@@ -1,0 +1,872 @@
+# monsters.yaml — Full card set (Stage 5+)
+#
+# The original 10 PoC monsters (dark_magician through ritual_acolyte) are
+# preserved for backwards compatibility with existing tests and game state.
+# New monsters (arcane_archivist onward) expand the roster for future stages.
+
+# ── ORIGINAL POC SET (Stage 5 — do not remove) ────────────────────────────
+
+- id: dark_magician
+  name: Dark Magician
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - queen
+  effects:
+    - type: spell_radius_bonus
+      params:
+        bonus: 1
+  duel_ability: arcane_intervention
+  description: >
+    A legendary sorcerer. When using a Bishop vessel its diagonal reach
+    amplifies nearby Spells. When using the Queen vessel it commands the
+    entire board with arcane authority.
+
+- id: apprentice_mage
+  name: Apprentice Mage
+  archetype: spellcaster
+  supported_vessels:
+    - pawn
+    - bishop
+  effects:
+    - type: draw_card
+      params:
+        count: 1
+        trigger: on_summon
+  duel_ability: null
+  description: >
+    A young mage still learning the craft. Cheap to summon on a Pawn;
+    draws one card on entry to maintain hand advantage.
+
+- id: arcane_sentinel
+  name: Arcane Sentinel
+  archetype: spellcaster
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: arcane_ward
+  description: >
+    A guardian construct. Survives the first capture attempt targeting it,
+    forcing the opponent to commit a second piece to destroy it.
+
+- id: wyrm_knight
+  name: Wyrm Knight
+  archetype: dragon
+  supported_vessels:
+    - knight
+    - rook
+  effects:
+    - type: alter_movement
+      params:
+        add_leap: true
+        leap_distance: 2
+        duration_turns: null
+  duel_ability: draconic_charge
+  description: >
+    A dragon-rider on horseback. Adds a 2-square leap in the four
+    cardinal directions to the Vessel's existing movement. On a Rook
+    this makes it brutally difficult to contain.
+
+- id: dragon_herald
+  name: Dragon Herald
+  archetype: dragon
+  supported_vessels:
+    - rook
+    - queen
+  effects:
+    - type: damage_aura
+      params:
+        radius: 1
+        trigger: enter_radius
+        owner_immune: true
+  duel_ability: null
+  description: >
+    A beast whose mere presence is lethal. Enemy pieces that move
+    within 1 square of this monster may be destroyed (resolved by EffectResolver).
+
+- id: iron_vanguard
+  name: Iron Vanguard
+  archetype: warrior
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: freeze_square
+      params:
+        radius: 0
+        trigger: on_capture
+        duration_turns: 1
+  duel_ability: shield_bash
+  description: >
+    A heavily armoured soldier. When this monster captures an enemy piece
+    it temporarily freezes its landing square — no piece may enter that
+    square until the owner's next turn.
+
+- id: blade_dancer
+  name: Blade Dancer
+  archetype: warrior
+  supported_vessels:
+    - knight
+    - queen
+  effects:
+    - type: reposition_unit
+      params:
+        max_distance: 2
+        trigger: after_capture
+  duel_ability: whirlwind
+  description: >
+    A graceful swordswoman. After capturing an enemy piece she may
+    immediately reposition up to 2 squares in any direction.
+
+- id: shadow_wolf
+  name: Shadow Wolf
+  archetype: beast
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: alter_movement
+      params:
+        ignore_occupied: false
+        stealth: true
+        note: "Opponent cannot determine exact destination until after move resolves"
+  duel_ability: null
+  description: >
+    A predatory spirit. Moves are declared but the exact destination is
+    hidden from the opponent until resolution (information asymmetry only;
+    position becomes public immediately after moving).
+
+- id: stone_golem
+  name: Stone Golem
+  archetype: beast
+  supported_vessels:
+    - rook
+    - pawn
+  effects:
+    - type: capture_protection
+      params:
+        uses: 2
+  duel_ability: fortify
+  description: >
+    An ancient rock construct. Absorbs the first two capture attempts.
+    Extremely durable but slow — inherits Rook/Pawn movement only.
+
+- id: ritual_acolyte
+  name: Ritual Acolyte
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: ritual_progress_boost
+      params:
+        amount: 1
+        trigger: end_of_turn
+  duel_ability: null
+  description: >
+    A devoted servant of the ritual arts. Advances the progress counter
+    of one of the owner's FORETOLD rituals by 1 at the end of each turn.
+
+
+# ── SPELLCASTER ARCHETYPE ──────────────────────────────────────────────────
+
+- id: arcane_archivist
+  name: Arcane Archivist
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: inspect_top_deck
+      params:
+        count: 3
+        trigger: on_summon
+    - type: reorder_top_deck
+      params:
+        count: 3
+        trigger: after_inspect
+  duel_ability: null
+  description: >
+    A scholar of forbidden knowledge. On summon, inspect the top 3 cards
+    of your deck and return them in any order. Improves future draws
+    without generating raw card advantage.
+
+- id: veil_conjurer
+  name: Veil Conjurer
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - knight
+  effects:
+    - type: obscure_influence
+      params:
+        radius: 1
+        hide_exact_effect: true
+        trigger: passive
+  duel_ability: arcane_veil
+  description: >
+    Nearby Spell and Trap influence remains visible, but opponents cannot
+    inspect the exact secondary modifiers affecting those zones until
+    they enter the area.
+
+- id: astral_binder
+  name: Astral Binder
+  archetype: spellcaster
+  supported_vessels:
+    - queen
+    - bishop
+  effects:
+    - type: movement_restriction
+      params:
+        radius: 1
+        affected_owner: enemy
+        max_distance: 1
+  duel_ability: binding_circle
+  description: >
+    Enemy units within 1 square cannot move more than 1 square per action,
+    regardless of their normal movement pattern.
+
+- id: spellbreaker
+  name: Spellbreaker
+  archetype: spellcaster
+  supported_vessels:
+    - knight
+    - rook
+  effects:
+    - type: suppress_spell_zone
+      params:
+        radius: 1
+        trigger: passive
+  duel_ability: arcane_denial
+  description: >
+    Continuous Spell effects are suppressed while their affected squares
+    overlap this monster's radius.
+
+- id: mirror_magus
+  name: Mirror Magus
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - queen
+  effects:
+    - type: copy_effect
+      params:
+        source: adjacent_allied_monster
+        uses: 1
+        trigger: start_of_turn
+  duel_ability: mirror_cast
+  description: >
+    Once per summon, copy one compatible passive effect from an adjacent
+    allied monster until the end of the turn.
+
+
+# ── DRAGON ARCHETYPE ───────────────────────────────────────────────────────
+
+- id: ember_drake
+  name: Ember Drake
+  archetype: dragon
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: scorch_square
+      params:
+        trigger: on_capture
+        duration_turns: 2
+        owner_immune: true
+  duel_ability: flame_burst
+  description: >
+    When Ember Drake captures a unit, its destination becomes Scorched
+    for 2 turns. Enemy units entering the square are destroyed.
+
+- id: sky_serpent
+  name: Sky Serpent
+  archetype: dragon
+  supported_vessels:
+    - knight
+    - queen
+  effects:
+    - type: ignore_terrain
+      params:
+        buildings: true
+        traps: false
+        units: false
+  duel_ability: aerial_assault
+  description: >
+    Ignores movement restrictions created by Buildings and Territory,
+    but remains affected by units and Traps.
+
+- id: obsidian_dragon
+  name: Obsidian Dragon
+  archetype: dragon
+  supported_vessels:
+    - rook
+    - queen
+  effects:
+    - type: building_damage_bonus
+      params:
+        destroy_on_capture: true
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: siege_breaker
+  description: >
+    A siege dragon specialized in destroying infrastructure. Buildings
+    captured by this monster are destroyed immediately.
+
+- id: broodmother
+  name: Broodmother
+  archetype: dragon
+  supported_vessels:
+    - queen
+    - rook
+  effects:
+    - type: vessel_support
+      params:
+        archetype: dragon
+        radius: 1
+        allow_extra_vessel:
+          - pawn
+  duel_ability: brood_call
+  description: >
+    Dragon monsters summoned within 1 square may use Pawns as vessels
+    even if they normally cannot.
+
+- id: storm_dragon
+  name: Storm Dragon
+  archetype: dragon
+  supported_vessels:
+    - rook
+    - bishop
+  effects:
+    - type: push_unit
+      params:
+        trigger: on_capture_attempt
+        distance: 1
+        direction: away_from_source
+  duel_ability: thunder_roar
+  description: >
+    Instead of capturing, Storm Dragon may push the target 1 square away
+    if that destination is legal and empty.
+
+
+# ── WARRIOR ARCHETYPE ─────────────────────────────────────────────────────
+
+- id: royal_guard
+  name: Royal Guard
+  archetype: warrior
+  supported_vessels:
+    - pawn
+    - rook
+  effects:
+    - type: king_support_bonus
+      params:
+        radius: 2
+        bonus: 1
+    - type: intercept
+      params:
+        trigger: adjacent_king_targeted
+        uses: 1
+  duel_ability: royal_guard
+  description: >
+    Improves Royal Support near the King and can intercept one attack
+    targeting an adjacent King.
+
+- id: siege_captain
+  name: Siege Captain
+  archetype: warrior
+  supported_vessels:
+    - rook
+    - knight
+  effects:
+    - type: building_aura
+      params:
+        radius: 1
+        allied_building_bonus:
+          durability: 1
+  duel_ability: tactical_command
+  description: >
+    Allied Buildings within 1 square require one additional successful
+    hostile action to destroy.
+
+- id: executioner
+  name: Executioner
+  archetype: warrior
+  supported_vessels:
+    - rook
+    - queen
+  effects:
+    - type: weakened_target_bonus
+      params:
+        condition:
+          capture_protection_remaining: 0
+        guaranteed_capture: true
+  duel_ability: finishing_blow
+  description: >
+    Excels against units whose defensive effects have already been spent.
+
+- id: battlefield_medic
+  name: Battlefield Medic
+  archetype: warrior
+  supported_vessels:
+    - pawn
+    - bishop
+  effects:
+    - type: restore_effect_charge
+      params:
+        trigger: end_of_turn
+        radius: 1
+        amount: 1
+        max_targets: 1
+  duel_ability: emergency_aid
+  description: >
+    At the end of your turn, restore one expended defensive effect charge
+    to one adjacent allied monster.
+
+- id: duelist
+  name: Duelist
+  archetype: warrior
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: challenge_unit
+      params:
+        trigger: start_of_turn
+        radius: 1
+        duration_turns: 1
+  duel_ability: first_strike
+  description: >
+    May challenge one adjacent enemy. Until the next turn, that unit may
+    only capture or be captured by the Duelist.
+
+
+# ── BEAST ARCHETYPE ────────────────────────────────────────────────────────
+
+- id: tunnel_mole
+  name: Tunnel Mole
+  archetype: beast
+  supported_vessels:
+    - pawn
+    - rook
+  effects:
+    - type: burrow
+      params:
+        max_distance: 2
+        ignore_units: true
+        destination_must_be_empty: true
+        cooldown_turns: 2
+  duel_ability: underground_escape
+  description: >
+    Once every 2 turns, move up to 2 squares through occupied squares,
+    provided the destination is empty.
+
+- id: thorn_boar
+  name: Thorn Boar
+  archetype: beast
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: retaliate
+      params:
+        trigger: capture_attempt
+        destroy_attacker_if_destroyed: true
+  duel_ability: last_charge
+  description: >
+    If destroyed by capture, the attacking unit is also destroyed.
+
+- id: moon_stalker
+  name: Moon Stalker
+  archetype: beast
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: territory_bonus
+      params:
+        condition: enemy_territory
+        movement_bonus: 1
+  duel_ability: predator_instinct
+  description: >
+    Becomes more mobile inside enemy-controlled Territory.
+
+- id: ancient_tortoise
+  name: Ancient Tortoise
+  archetype: beast
+  supported_vessels:
+    - rook
+    - pawn
+  effects:
+    - type: trap_immunity
+      params:
+        uses: 1
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: shell_guard
+  description: >
+    Ignores the first Trap effect that would affect it and survives one
+    capture attempt.
+
+- id: raven_scout
+  name: Raven Scout
+  archetype: beast
+  supported_vessels:
+    - pawn
+    - bishop
+  effects:
+    - type: reveal_hidden_info
+      params:
+        trigger: on_summon
+        target: ritual
+        reveal_level: foretold
+        selection: random
+  duel_ability: null
+  description: >
+    On summon, one random SEALED enemy Ritual becomes FORETOLD.
+
+
+# ── BUILDER / KINGDOM ARCHETYPE ───────────────────────────────────────────
+
+- id: master_mason
+  name: Master Mason
+  archetype: kingdom
+  supported_vessels:
+    - pawn
+  effects:
+    - type: construction_speed_bonus
+      params:
+        radius: 1
+        turns_reduced: 1
+        minimum_turns: 1
+  duel_ability: reinforce_wall
+  description: >
+    Buildings constructed by adjacent Pawns complete 1 turn faster.
+
+- id: royal_engineer
+  name: Royal Engineer
+  archetype: kingdom
+  supported_vessels:
+    - pawn
+    - bishop
+  effects:
+    - type: repair_building
+      params:
+        trigger: end_of_turn
+        radius: 1
+        amount: 1
+  duel_ability: emergency_repairs
+  description: >
+    Repairs one nearby damaged Building at the end of the owner's turn.
+
+- id: frontier_warden
+  name: Frontier Warden
+  archetype: kingdom
+  supported_vessels:
+    - rook
+    - knight
+  effects:
+    - type: territory_expansion
+      params:
+        radius_bonus: 1
+        source: adjacent_buildings
+  duel_ability: hold_the_line
+  description: >
+    Adjacent Buildings project Territory one additional square.
+
+- id: guild_foreman
+  name: Guild Foreman
+  archetype: kingdom
+  supported_vessels:
+    - pawn
+    - rook
+  effects:
+    - type: restore_builder
+      params:
+        trigger: on_summon
+        max_targets: 1
+        target: adjacent_pawn
+  duel_ability: null
+  description: >
+    On summon, one adjacent Pawn that has already built a structure may
+    regain its Builder token.
+
+- id: castle_keeper
+  name: Castle Keeper
+  archetype: kingdom
+  supported_vessels:
+    - rook
+    - bishop
+  effects:
+    - type: building_capture_protection
+      params:
+        radius: 1
+        uses: 1
+  duel_ability: fortress_command
+  description: >
+    The first attempt to destroy an allied Building within 1 square fails.
+
+
+# ── RITUAL SUPPORT ARCHETYPE ──────────────────────────────────────────────
+
+- id: omen_reader
+  name: Omen Reader
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: ritual_reveal_tradeoff
+      params:
+        trigger: on_summon
+        reveal_own: 1
+        draw_cards: 1
+  duel_ability: null
+  description: >
+    On summon, you may reveal one SEALED Ritual to draw one card.
+
+- id: circle_keeper
+  name: Circle Keeper
+  archetype: spellcaster
+  supported_vessels:
+    - rook
+    - bishop
+  effects:
+    - type: ritual_pattern_substitute
+      params:
+        count: 1
+        condition:
+          within_radius: 1
+  duel_ability: ritual_anchor
+  description: >
+    Counts as one compatible generic ritual component for a Ritual pattern
+    formed within 1 square.
+
+- id: blood_seer
+  name: Blood Seer
+  archetype: ritualist
+  supported_vessels:
+    - pawn
+    - bishop
+  effects:
+    - type: sacrifice_bonus
+      params:
+        trigger: when_sacrificed
+        ritual_progress: 2
+  duel_ability: null
+  description: >
+    When used as Ritual material, contributes 2 additional Ritual progress.
+
+- id: herald_of_the_gate
+  name: Herald of the Gate
+  archetype: ritualist
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: ritual_activation_range
+      params:
+        radius_bonus: 1
+  duel_ability: open_the_gate
+  description: >
+    Ritual patterns may treat eligible components within 1 extra square
+    as connected.
+
+- id: forbidden_priest
+  name: Forbidden Priest
+  archetype: ritualist
+  supported_vessels:
+    - bishop
+    - queen
+  effects:
+    - type: ritual_requirement_reduction
+      params:
+        amount: 1
+        cost:
+          reveal_ritual: true
+          retire_after_use: true
+  duel_ability: dark_benediction
+  description: >
+    Once per summon, reduce one Ritual requirement by 1. The Ritual must
+    become fully REVEALED and Forbidden Priest loses this effect afterward.
+
+
+# ── ASSASSIN / KING PRESSURE ARCHETYPE ────────────────────────────────────
+
+- id: kingsbane
+  name: Kingsbane
+  archetype: assassin
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: royal_support_suppression
+      params:
+        radius: 2
+        amount: 1
+  duel_ability: kingslayer
+  description: >
+    Enemy units within 2 squares contribute reduced Royal Support if a
+    Final Duel begins while Kingsbane remains nearby.
+
+- id: phantom_lancer
+  name: Phantom Lancer
+  archetype: assassin
+  supported_vessels:
+    - knight
+    - pawn
+  effects:
+    - type: pass_through_units
+      params:
+        max_units: 1
+        destination_must_be_empty: true
+  duel_ability: piercing_charge
+  description: >
+    May pass through one occupied square during movement but cannot end
+    movement on an occupied square.
+
+- id: saboteur
+  name: Saboteur
+  archetype: assassin
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: disable_building
+      params:
+        trigger: adjacent_end_turn
+        duration_turns: 1
+  duel_ability: sabotage
+  description: >
+    At the end of the owner's turn, may disable one adjacent enemy
+    Building until the start of the next owner turn.
+
+- id: royal_poisoner
+  name: Royal Poisoner
+  archetype: assassin
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: duel_debuff
+      params:
+        trigger: final_duel_start
+        condition:
+          distance_to_enemy_king: 2
+        defender_guard_penalty: 1
+  duel_ability: venomous_opening
+  description: >
+    If positioned close to the enemy King when a Final Duel starts, the
+    defender begins with one fewer Guard.
+
+- id: dusk_reaver
+  name: Dusk Reaver
+  archetype: assassin
+  supported_vessels:
+    - knight
+    - queen
+  effects:
+    - type: capture_then_retreat
+      params:
+        trigger: after_capture
+        max_distance: 1
+        must_move_away_from_enemy_king: true
+  duel_ability: shadow_escape
+  description: >
+    After capturing, may retreat 1 square away from the enemy King.
+
+
+# ── GRAVEYARD / RECYCLING ARCHETYPE ──────────────────────────────────────
+
+- id: grave_scholar
+  name: Grave Scholar
+  archetype: necromancer
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: graveyard_inspect
+      params:
+        trigger: on_summon
+        owner: self
+    - type: graveyard_to_deck
+      params:
+        trigger: on_summon
+        count: 1
+  duel_ability: null
+  description: >
+    On summon, return one card from your Graveyard to the bottom of
+    your deck.
+
+- id: bone_collector
+  name: Bone Collector
+  archetype: necromancer
+  supported_vessels:
+    - pawn
+    - rook
+  effects:
+    - type: graveyard_counter
+      params:
+        trigger: passive
+        source: destroyed_allied_units
+    - type: capture_protection_from_counter
+      params:
+        required_counters: 2
+        uses_per_counter: 1
+  duel_ability: bone_wall
+  description: >
+    Gains defensive value as allied units are destroyed.
+
+- id: vessel_reclaimer
+  name: Vessel Reclaimer
+  archetype: necromancer
+  supported_vessels:
+    - bishop
+    - queen
+  effects:
+    - type: dismiss_monster
+      params:
+        trigger: activated
+        target: adjacent_allied_monster
+        restore_vessel: true
+        monster_destination: graveyard
+  duel_ability: soul_release
+  description: >
+    May dismiss an adjacent allied Monster, restoring its original chess
+    Vessel while sending the Monster card to the Graveyard.
+
+- id: crypt_walker
+  name: Crypt Walker
+  archetype: necromancer
+  supported_vessels:
+    - pawn
+    - knight
+  effects:
+    - type: graveyard_scaling_movement
+      params:
+        threshold: 5
+        bonus_leap: 1
+  duel_ability: death_march
+  description: >
+    Gains additional mobility once at least 5 allied cards are in the
+    Graveyard.
+
+- id: mourning_queen
+  name: Mourning Queen
+  archetype: necromancer
+  supported_vessels:
+    - queen
+  effects:
+    - type: death_trigger_draw
+      params:
+        trigger: allied_monster_destroyed
+        count: 1
+        limit_per_turn: 1
+  duel_ability: spectral_command
+  description: >
+    Once per turn, draw a card when another allied Monster is destroyed.

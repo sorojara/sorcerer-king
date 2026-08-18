@@ -1,0 +1,77 @@
+# spells.yaml — PoC card set (5 Spells)
+# spell_type: instant | persistent | spatial
+# target_type: none | position | piece | trap | building | zone
+
+- id: arcane_reposition
+  name: Arcane Reposition
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: reposition_unit
+      params:
+        max_distance: 3
+        must_be_own: true
+        can_pass_through: true
+  description: >
+    Teleport one of your own pieces (not the King) to any empty square
+    within 3 squares. Does not count as a chess move. Useful for
+    escaping traps, setting up rituals, or rushing a pawn to promotion.
+
+- id: veil_of_stillness
+  name: Veil of Stillness
+  spell_type: persistent
+  target_type: zone
+  effects:
+    - type: block_zone
+      params:
+        width: 1
+        height: 8
+        axis: file
+        duration_turns: 2
+  description: >
+    Choose a file (column). For 2 turns no piece may move into or
+    through that file. Powerful for cutting board halves or protecting
+    a Ritual formation.
+
+- id: cursed_ground
+  name: Cursed Ground
+  spell_type: spatial
+  target_type: position
+  effects:
+    - type: freeze_square
+      params:
+        radius: 1
+        duration_turns: 3
+        affect_all: true
+  description: >
+    Place a 3×3 zone of cursed ground on the board. Any piece that
+    ends its move inside the zone cannot move on its owner's next turn.
+    Lasts 3 turns.
+
+- id: ritual_insight
+  name: Ritual Insight
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: reveal_ritual
+      params:
+        own_ritual: true
+        benefit: draw_card
+        draw_count: 1
+  description: >
+    Voluntarily reveal one of your SEALED Rituals. Your opponent now
+    sees its archetype and required vessel (FORETOLD state). You draw
+    1 card as compensation for the information trade.
+
+- id: shatter_trap
+  name: Shatter Trap
+  spell_type: instant
+  target_type: trap
+  effects:
+    - type: destroy_trap
+      params:
+        target_owner: opponent
+  description: >
+    Destroy one enemy Trap anywhere on the board. The Trap is removed
+    from play (not returned to hand). Provides relief against defensive
+    Trap formations.

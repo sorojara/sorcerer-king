@@ -1,0 +1,79 @@
+# traps.yaml — PoC card set (5 Traps)
+# Traps are NEVER secret — their identity, position, and radius are public.
+# trigger: enter_radius | capture | end_of_turn | manual
+
+- id: pit_trap
+  name: Pit Trap
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: destroy_piece
+      params:
+        target: triggering_piece
+        exempt_piece_types:
+          - king
+  description: >
+    A hidden pit (visible to both players). Any enemy piece that moves
+    into the 3×3 activation area is immediately destroyed. Kings are
+    immune — triggering a Pit Trap with the King triggers a Final Duel
+    instead of destroying the King.
+
+- id: ward_of_binding
+  name: Ward of Binding
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: freeze_piece
+      params:
+        target: triggering_piece
+        duration_turns: 2
+  description: >
+    An arcane ward. Any enemy piece that steps into the 3×3 area is
+    bound — it cannot move for 2 turns. It may still be captured while
+    bound.
+
+- id: alarm_beacon
+  name: Alarm Beacon
+  trigger: enter_radius
+  radius: 2
+  effects:
+    - type: draw_card
+      params:
+        target: owner
+        count: 1
+    - type: reveal_enemy_hand_card
+      params:
+        count: 1
+        random: true
+  description: >
+    A 5×5 surveillance trap. When an enemy piece enters range, the
+    owner draws 1 card and peeks at 1 random card in the opponent's
+    hand. Provides information rather than direct destruction.
+
+- id: counter_strike
+  name: Counter Strike
+  trigger: capture
+  radius: 1
+  effects:
+    - type: destroy_piece
+      params:
+        target: capturing_piece
+  description: >
+    A retaliatory mechanism. If an enemy piece captures any friendly
+    piece within the 3×3 area, the capturing piece is immediately
+    destroyed. Discourages aggressive trades in the protected zone.
+
+- id: time_anchor
+  name: Time Anchor
+  trigger: manual
+  radius: 0
+  effects:
+    - type: cancel_move
+      params:
+        target: last_enemy_chess_move
+        restore_pieces: true
+  description: >
+    A temporal device. Activated manually during the Reaction phase
+    to undo the opponent's most recent chess move. Both pieces return
+    to their pre-move positions. Can only be activated once per match.
+    Does not activate if the move triggered a Final Duel.
