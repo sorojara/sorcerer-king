@@ -1,0 +1,17 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+
+# Build artifacts / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime logs (rotated by the app's logger — regenerated every run)
+logs/*.log
+logs/*.log.*
