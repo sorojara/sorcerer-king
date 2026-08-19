@@ -97,10 +97,12 @@ class HandView:
         y_offset: int,
         strip_width: int,
         registry: "CardRegistry | None" = None,
+        x_offset: int = 0,
     ) -> None:
         self._surface = surface
         self._font = font
         self._y = y_offset
+        self._x = x_offset
         self._width = strip_width
         self._registry = registry
         # Cached tile rects for the own-hand row; updated each draw() call.
@@ -126,13 +128,17 @@ class HandView:
         opponent_cards: list[str] | None = None,
         discard_mode: bool = False,
         selected_card_id: str | None = None,
+        playable_card_ids: "set[str] | None" = None,
     ) -> None:
         """
         Render the hand strip below the board.
 
-        ``opponent_cards``   — if given, an extra debug row is drawn above.
-        ``discard_mode``     — when True, cards show red border (must discard).
-        ``selected_card_id`` — card held for summon targeting (gold border).
+        ``opponent_cards``    — if given, an extra debug row is drawn above.
+        ``discard_mode``      — when True, cards show red border (must discard).
+        ``selected_card_id``  — card held for summon targeting (gold border).
+        ``playable_card_ids`` — Stage 6: when given, any own-hand card_id NOT
+                                in this set is drawn dimmed/greyed — there's no
+                                legal action for it right now.  None = don't dim.
         """
         if opponent_cards is not None:
             opp_y = self._y - self.HEIGHT
@@ -158,6 +164,7 @@ class HandView:
             label_color=label_color,
             discard_mode=discard_mode,
             selected_card_id=selected_card_id,
+            playable_card_ids=playable_card_ids,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────
@@ -170,24 +177,26 @@ class HandView:
         label_color: tuple,
         discard_mode: bool = False,
         selected_card_id: str | None = None,
+        playable_card_ids: "set[str] | None" = None,
     ) -> list[tuple[str, pygame.Rect]]:
         """
         Draw one hand row at vertical position ``y``.
         Returns a list of (card_id, Rect) pairs for hit-testing.
         """
         tile_rects: list[tuple[str, pygame.Rect]] = []
+        x0 = self._x   # left edge of the strip (Stage 6: board may be offset)
 
         # Background strip
         strip_bg = (45, 20, 20) if discard_mode else SIDEBAR_BG
-        strip_rect = pygame.Rect(0, y, self._width, self.HEIGHT)
+        strip_rect = pygame.Rect(x0, y, self._width, self.HEIGHT)
         pygame.draw.rect(self._surface, strip_bg, strip_rect)
         border_color = _DISCARD_BORDER if discard_mode else DIALOG_BORDER
-        pygame.draw.line(self._surface, border_color, (0, y), (self._width, y),
+        pygame.draw.line(self._surface, border_color, (x0, y), (x0 + self._width, y),
                          2 if discard_mode else 1)
 
         # Small label in top-left corner of the strip (doesn't push cards right)
         label_surf = self._font.render(label, True, label_color)
-        self._surface.blit(label_surf, (self.PADDING, y + 2))
+        self._surface.blit(label_surf, (x0 + self.PADDING, y + 2))
 
         # Cards start from the left edge, just below the label
         label_h = label_surf.get_height() + 3
@@ -197,7 +206,7 @@ class HandView:
         if card_area_h > self.CARD_H:
             card_top += (card_area_h - self.CARD_H) // 2
 
-        x = self.PADDING
+        x = x0 + self.PADDING
 
         if not card_ids:
             empty = self._font.render("(empty)", True, HUD_LABEL)
@@ -206,15 +215,17 @@ class HandView:
 
         for card_id in card_ids:
             # If this card would overflow the strip, show a +N overflow badge
-            if x + self.CARD_W > self._width - self.PADDING:
+            if x + self.CARD_W > x0 + self._width - self.PADDING:
                 remaining_count = len(card_ids) - card_ids.index(card_id)
                 more = self._font.render(f"+{remaining_count}", True, HUD_LABEL)
                 self._surface.blit(more, (x + 2, card_top + (self.CARD_H - more.get_height()) // 2))
                 break
             is_selected = (selected_card_id is not None and card_id == selected_card_id)
+            is_playable = playable_card_ids is None or card_id in playable_card_ids
             self._draw_card_tile(x, card_top, card_id,
                                  discard_mode=discard_mode,
-                                 selected=is_selected)
+                                 selected=is_selected,
+                                 playable=is_playable)
             tile_rects.append((card_id, pygame.Rect(x, card_top, self.CARD_W, self.CARD_H)))
             x += self.CARD_W + self.CARD_GAP
 
@@ -227,8 +238,13 @@ class HandView:
         card_id: str,
         discard_mode: bool = False,
         selected: bool = False,
+        playable: bool = True,
     ) -> None:
-        """Render a single card thumbnail at (x, y)."""
+        """Render a single card thumbnail at (x, y).
+
+        Stage 6: ``playable=False`` greys the tile out — there's no legal
+        action for this card right now (no valid vessel/square/target).
+        """
         card: AnyCard | None = None
         if self._registry is not None and card_id in self._registry:
             card = self._registry.get(card_id)
@@ -263,6 +279,12 @@ class HandView:
         )
         name_y = y + 2 + badge_surf.get_height() + 1
         self._surface.blit(name_surf, (x + 3, name_y))
+
+        # Stage 6: grey overlay for unplayable cards, drawn last (on top).
+        if not playable:
+            dim = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            dim.fill((15, 15, 15, 165))
+            self._surface.blit(dim, (x, y))
 
 
 def _truncate(text: str, max_px: int, font: Any) -> str:

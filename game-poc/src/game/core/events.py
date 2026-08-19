@@ -183,6 +183,31 @@ class CaptureBlocked(Event):
     shields_remaining: int   # charges left on the defender after this block
 
 
+@dataclass(frozen=True)
+class PiecePushed(Event):
+    """
+    A ``push_unit`` monster effect pushed a piece instead of capturing it
+    (storm_dragon).  No ownership change occurs; the pushed piece is
+    relocated to an empty adjacent square.
+    """
+    piece_id: str
+    owner: str
+    source: Position
+    target: Position
+    pushed_by_piece_id: str
+
+
+@dataclass(frozen=True)
+class Retaliated(Event):
+    """
+    A ``retaliate`` monster effect destroyed the attacker when its unit
+    was captured (thorn_boar).  Both pieces end up destroyed.
+    """
+    defender_piece_id: str
+    attacker_piece_id: str
+    position: Position
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Monster / Card Events
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +282,35 @@ class TrapTriggered(Event):
 
 
 @dataclass(frozen=True)
+class EnemyCardRevealed(Event):
+    """
+    Stage 6 — a Trap/Spell effect peeked at one of the opponent's hand
+    cards (alarm_beacon).  ``player_id`` is who gets to know
+    ``revealed_card_id`` (the peeker, not the hand's owner) — a one-time,
+    non-persistent reveal.  This does NOT change what Observation exposes
+    going forward (HIDDEN_INFO stays intact for AI decision-making); a
+    human player learns it only by reading this event (e.g. a UI toast).
+    """
+    player_id: str
+    revealed_card_id: str
+
+
+@dataclass(frozen=True)
+class MoveCancelled(Event):
+    """
+    Stage 6 — time_anchor undid a player's most recent MovePiece.  The
+    board was restored to a pre-move snapshot; this event records what
+    was undone for replay/telemetry (the board mutation itself isn't
+    re-derivable from the event log alone, since it's a snapshot restore
+    rather than an inverse of individual events).
+    """
+    cancelled_player: str
+    source: Position
+    target: Position
+    turn_number: int
+
+
+@dataclass(frozen=True)
 class CardDrawn(Event):
     player_id: str
     card_id: str
@@ -316,6 +370,14 @@ class ConstructionStarted(Event):
 @dataclass(frozen=True)
 class SquareFrozen(Event):
     """A board square was frozen by a monster effect (no entry/exit for N turns)."""
+    position: Position
+    duration_turns: int
+    caused_by_piece_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SquareScorched(Event):
+    """A board square was scorched by a monster effect (ember_drake)."""
     position: Position
     duration_turns: int
     caused_by_piece_id: str | None = None

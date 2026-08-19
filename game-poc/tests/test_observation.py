@@ -160,3 +160,40 @@ class TestObservationStructure:
         obs = build_observation(game_state, "white")
         assert obs.own_in_check is False
         assert obs.opponent_in_check is False
+
+
+class TestSquareEffects:
+    """Stage 6 — square_effects exposes active Trap/Spell zones (public info)."""
+
+    def test_no_effects_on_a_fresh_board(self, game_state: GameState):
+        obs = build_observation(game_state, "white")
+        assert obs.board.square_effects == ()
+
+    def test_tagged_square_is_exposed(self, game_state: GameState):
+        from game.chess.pieces import Position
+
+        game_state.board.get_square(Position(3, 3)).add_effect("cursed:3:white")
+        obs = build_observation(game_state, "white")
+
+        matches = [e for e in obs.board.square_effects if e.position == Position(3, 3)]
+        assert len(matches) == 1
+        assert matches[0].effect_type == "cursed"
+        assert matches[0].duration_turns == 3
+        assert matches[0].owner == "white"
+
+    def test_unrecognized_effect_prefix_is_ignored(self, game_state: GameState):
+        from game.chess.pieces import Position
+
+        # Non-zone temp effects (e.g. a future unrelated tag) shouldn't leak
+        # into square_effects, which is specifically the zone-hazard view.
+        game_state.board.get_square(Position(0, 0)).add_effect("something_else:1")
+        obs = build_observation(game_state, "white")
+        assert obs.board.square_effects == ()
+
+    def test_both_players_see_the_same_zone(self, game_state: GameState):
+        from game.chess.pieces import Position
+
+        game_state.board.get_square(Position(5, 5)).add_effect("scorched:2:black")
+        obs_white = build_observation(game_state, "white")
+        obs_black = build_observation(game_state, "black")
+        assert obs_white.board.square_effects == obs_black.board.square_effects

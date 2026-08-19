@@ -225,9 +225,11 @@ class RulesEngine:
             elif isinstance(action, ActivateMonsterAbility):
                 events = self._execute_activate_monster_ability(state, action, rng, registry=self._registry)
             elif isinstance(action, ActivateSpell):
-                events = self._execute_activate_spell(state, action)
+                events = self._execute_activate_spell(state, action, rng, registry=self._registry)
             elif isinstance(action, PlaceTrap):
-                events = self._execute_place_trap(state, action)
+                events = self._execute_place_trap(state, action, registry=self._registry)
+            elif isinstance(action, ActivateTrap):
+                events = self._execute_activate_trap(state, action, registry=self._registry)
             elif isinstance(action, StartConstruction):
                 events = self._execute_start_construction(state, action)
             elif isinstance(action, CoronateKing):
@@ -349,9 +351,18 @@ class RulesEngine:
                         card = registry.get(card_id)
                         if isinstance(card, MonsterCard):
                             for pos, unit in state.board.all_units_for(player_id):
-                                if unit.monster_id is None and card.supports_vessel(
-                                    unit.piece.piece_type.value
-                                ) and unit.piece.piece_type != PieceType.KING:
+                                if unit.monster_id is not None or unit.piece.piece_type == PieceType.KING:
+                                    continue
+                                pt = unit.piece.piece_type.value
+                                # Stage 5: vessel_support (broodmother) can extend
+                                # the compatible vessel set near allied auras.
+                                compatible = card.supports_vessel(pt)
+                                if not compatible and registry is not None:
+                                    from game.mechanics.monsters import get_extra_vessel_types
+                                    compatible = pt in get_extra_vessel_types(
+                                        state, pos, player_id, card.archetype, registry
+                                    )
+                                if compatible:
                                     actions.append(
                                         SummonMonster(
                                             player_id=player_id,
@@ -381,6 +392,44 @@ class RulesEngine:
                                     king_card_id=kcs.king_card_id,
                                 )
                             )
+                # Stage 6: Place Trap — one per Trap card in hand × every
+                # empty square on the board.
+                from game.cards.card import SpellCard, TrapCard
+                if registry is not None:
+                    for card_id in ps.hand:
+                        if card_id not in registry:
+                            continue
+                        card = registry.get(card_id)
+                        if isinstance(card, TrapCard):
+                            occupied_trap_squares = {t.position for t in state.traps}
+                            for f in range(8):
+                                for r in range(8):
+                                    pos = Position(f, r)
+                                    if (
+                                        state.board.get_unit(pos) is None
+                                        and pos not in occupied_trap_squares
+                                    ):
+                                        actions.append(PlaceTrap(
+                                            player_id=player_id, card_id=card_id, position=pos,
+                                        ))
+                        elif isinstance(card, SpellCard):
+                            actions.extend(
+                                self._legal_spell_targets(state, player_id, card_id, card, registry)
+                            )
+                # Stage 6: Activate Trap — one per owned manual-trigger Trap.
+                if registry is not None:
+                    from game.cards.card import TrapTrigger
+                    for trap in state.traps:
+                        if trap.owner != player_id:
+                            continue
+                        try:
+                            tcard = registry.get(trap.card_id)
+                        except KeyError:
+                            continue
+                        if isinstance(tcard, TrapCard) and tcard.trigger == TrapTrigger.MANUAL:
+                            actions.append(ActivateTrap(
+                                player_id=player_id, trap_instance_id=trap.id,
+                            ))
             return actions
 
         if phase == Phase.CHESS:
@@ -461,6 +510,71 @@ class RulesEngine:
             return [EndTurn(player_id=player_id)]
 
         return []
+
+    def _legal_spell_targets(
+        self,
+        state: GameState,
+        player_id: str,
+        card_id: str,
+        card,   # SpellCard
+        registry: "object",
+    ) -> list:
+        """
+        Stage 6 — enumerate legal ActivateSpell actions for one Spell card,
+        based on its ``target_type``.  See _execute_activate_spell for the
+        matching ``action.target`` payload shapes.
+        """
+        actions: list = []
+
+        if card.target_type == "none":
+            actions.append(ActivateSpell(player_id=player_id, card_id=card_id, target=None))
+
+        elif card.target_type == "trap":
+            for trap in state.traps:
+                if trap.owner != player_id:   # e.g. shatter_trap: target_owner=opponent
+                    actions.append(ActivateSpell(
+                        player_id=player_id, card_id=card_id, target=trap.id,
+                    ))
+
+        elif card.target_type in ("position", "zone"):
+            if card.shape == "column":
+                squares = [(f, 0) for f in range(8)]
+            elif card.shape == "row":
+                squares = [(0, r) for r in range(8)]
+            else:
+                squares = [(f, r) for f in range(8) for r in range(8)]
+            for f, r in squares:
+                actions.append(ActivateSpell(
+                    player_id=player_id, card_id=card_id, target=(f, r),
+                ))
+
+        elif card.target_type == "piece":
+            # Only reposition_unit-style spells (arcane_reposition) can be
+            # enumerated generically — the destination is part of the
+            # target, unlike a Trap/Monster effect where it's chosen later.
+            reposition_effect = next(
+                (e for e in card.effects if e.type == "reposition_unit"), None
+            )
+            if reposition_effect is None:
+                return actions
+            max_dist = reposition_effect.params.get("max_distance", 1)
+            must_be_own = reposition_effect.params.get("must_be_own", True)
+            for pos, unit in state.board.all_units_for(player_id):
+                if must_be_own and unit.piece.piece_type == PieceType.KING:
+                    continue
+                for df in range(-max_dist, max_dist + 1):
+                    for dr in range(-max_dist, max_dist + 1):
+                        nf, nr = pos.file + df, pos.rank + dr
+                        if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                            continue
+                        if state.board.get_unit(Position(nf, nr)) is not None:
+                            continue
+                        actions.append(ActivateSpell(
+                            player_id=player_id, card_id=card_id,
+                            target={"position": (pos.file, pos.rank), "destination": (nf, nr)},
+                        ))
+
+        return actions
 
     # ── Validation helpers ───────────────────────────────────────────────
 
@@ -608,6 +722,27 @@ class RulesEngine:
                 f"Illegal move: {action.source} → {action.target}."
             )
 
+        # ── Stage 6: snapshot for time_anchor's cancel_move ────────────────
+        # Captured BEFORE any mutation. Overwrites this player's previous
+        # snapshot — GameState.move_history only ever needs "their most
+        # recent move". triggered_duel is patched to True below if this
+        # move turns out to trigger a Final Duel.
+        import copy as _copy
+        from game.core.state import MoveSnapshot
+        move_snapshot = MoveSnapshot(
+            player_id=action.player_id,
+            turn_number=state.turn_number,
+            source=action.source,
+            target=action.target,
+            board_before=_copy.deepcopy(state.board),
+            victim_captured_len_before=len(
+                state.get_player(state.opponent_of(action.player_id)).captured_pieces
+            ),
+            castling_rights_before=_copy.deepcopy(ps.castling_rights),
+            en_passant_before=ep,
+        )
+        state.move_history[action.player_id] = move_snapshot
+
         events: list[Event] = []
 
         # ── En passant detection ──────────────────────────────────────────
@@ -641,6 +776,41 @@ class RulesEngine:
                 ))
         else:
             # ── Normal move ───────────────────────────────────────────────
+            # Stage 5: push_unit (storm_dragon) may replace a capture attempt
+            # entirely — must be checked before any board mutation.
+            target_unit = state.board.get_unit(action.target)
+            if (
+                target_unit is not None
+                and target_unit.owner != action.player_id
+                and unit.monster_id is not None
+                and self._registry is not None
+            ):
+                from game.cards.card import MonsterCard as _MC
+                try:
+                    attacker_card = self._registry.get(unit.monster_id)
+                except KeyError:
+                    attacker_card = None
+                if attacker_card is not None and isinstance(attacker_card, _MC):
+                    from game.mechanics.monsters import try_push_unit
+                    if try_push_unit(
+                        state, unit, action.source, action.target,
+                        attacker_card, events,
+                    ):
+                        self._update_castling_rights(state, action.player_id, unit, action.source)
+                        state.en_passant_target = None
+                        ps.chess_move_used = True
+                        events.append(ChessMoveUsed(player_id=action.player_id))
+                        self._update_check_status(state, events)
+                        if state.phase == Phase.CHESS:
+                            old = state.phase
+                            state.phase = Phase.REACTION
+                            events.append(PhaseAdvanced(
+                                player_id=action.player_id,
+                                from_phase=old,
+                                to_phase=Phase.REACTION,
+                            ))
+                        return events
+
             # Stage 5: check capture protection BEFORE the board mutation.
             from game.mechanics.monsters import apply_capture_protection
             target_unit = state.board.get_unit(action.target)
@@ -697,9 +867,22 @@ class RulesEngine:
                         captured_by_piece_id=unit.piece.id,
                     ))
 
+                    # ── Stage 5: retaliate (thorn_boar) ──────────────────
+                    # If the captured unit had "retaliate", the attacker is
+                    # destroyed too — skip after-capture effects / damage
+                    # aura below since the attacker no longer exists.
+                    from game.mechanics.monsters import apply_retaliate
+                    attacker_destroyed = apply_retaliate(
+                        state, captured, action.target, unit, events
+                    )
+
                     # ── Stage 5: after-capture effects on the attacker ───
                     # (freeze_square for iron_vanguard, reposition for blade_dancer)
-                    if unit.monster_id is not None and self._registry is not None:
+                    if (
+                        not attacker_destroyed
+                        and unit.monster_id is not None
+                        and self._registry is not None
+                    ):
                         try:
                             attacker_card = self._registry.get(unit.monster_id)
                         except KeyError:
@@ -711,14 +894,67 @@ class RulesEngine:
                                 state, unit, action.target, attacker_card, events
                             )
 
+                    # ── Stage 6: capture-trigger Traps (counter_strike) ──
+                    # Fires against the CAPTURING piece if it landed inside
+                    # a Trap the defender owns.
+                    if not attacker_destroyed and self._registry is not None:
+                        from game.mechanics.monsters import check_capture_traps
+                        check_capture_traps(
+                            state, unit, captured.owner, action.target, events, self._registry, rng=rng
+                        )
+
+                    if attacker_destroyed:
+                        # Attacker is gone — nothing more can happen at this
+                        # square (no damage aura / promotion / King-capture
+                        # duel; the attacker isn't there to have captured a King).
+                        self._update_castling_rights(state, action.player_id, unit, action.source)
+                        state.en_passant_target = None
+                        ps.chess_move_used = True
+                        events.append(ChessMoveUsed(player_id=action.player_id))
+                        self._update_check_status(state, events)
+                        if state.phase == Phase.CHESS:
+                            old = state.phase
+                            state.phase = Phase.REACTION
+                            events.append(PhaseAdvanced(
+                                player_id=action.player_id,
+                                from_phase=old,
+                                to_phase=Phase.REACTION,
+                            ))
+                        return events
+
                 # ── Stage 5: damage aura check after any (non-blocked) move ─
                 # Check if the moving piece entered an enemy damage aura.
                 # Must run AFTER the piece has landed at action.target.
                 from game.mechanics.monsters import check_damage_aura
-                check_damage_aura(state, unit, action.target, events, self._registry)
+                aura_destroyed = check_damage_aura(state, unit, action.target, events, self._registry)
+
+                # ── Stage 5: scorch_square check (ember_drake) ───────────
+                # Any unit that walks onto (or is left standing on) a
+                # scorched square is destroyed — including the attacker
+                # that just captured there.
+                if not aura_destroyed:
+                    from game.mechanics.monsters import check_scorch_square
+                    scorch_destroyed = check_scorch_square(state, unit, action.target, events)
+
+                    # ── Stage 6: enter_radius Traps (pit_trap, ward_of_binding) ─
+                    # Fires against the MOVING piece if it survived — checked
+                    # for every move, capture or not.
+                    if not scorch_destroyed and self._registry is not None:
+                        from game.mechanics.monsters import check_enter_radius_traps
+                        check_enter_radius_traps(
+                            state, unit, action.target, events, self._registry, rng=rng
+                        )
+
+                    # ── Stage 6: immobilize_zone (cursed_ground) ─────────
+                    # Applies to ANY piece, either side — not gated on
+                    # owner like Traps are.
+                    if not scorch_destroyed:
+                        from game.mechanics.monsters import check_immobilize_zone
+                        check_immobilize_zone(state, unit, action.target)
 
             # King capture → Final Duel (never sets winner directly)
             if captured is not None and not shield_absorbed and captured.piece.piece_type == PieceType.KING:
+                move_snapshot.triggered_duel = True
                 duel = DuelState(
                     duel_type=FinalDuelType.ASSAULT,
                     attacker=action.player_id,
@@ -771,6 +1007,7 @@ class RulesEngine:
         opp_cr = opp_ps.castling_rights
 
         if is_checkmate(state.board, opp_id, opp_ep, opp_cr):
+            move_snapshot.triggered_duel = True
             state.duel = DuelState(
                 duel_type=FinalDuelType.SIEGE,
                 attacker=action.player_id,
@@ -783,6 +1020,7 @@ class RulesEngine:
                 duel_type=FinalDuelType.SIEGE,
             ))
         elif is_stalemate(state.board, opp_id, opp_ep, opp_cr):
+            move_snapshot.triggered_duel = True
             events.append(StalemateDetected(player_id=opp_id))
             state.duel = DuelState(
                 duel_type=FinalDuelType.LAST_STAND,
@@ -840,6 +1078,11 @@ class RulesEngine:
                 )
         else:
             raise IllegalActionError(f"Unknown castling side: {action.side!r}")
+
+        # Stage 6: time_anchor only supports undoing MovePiece (see
+        # state.MoveSnapshot). Clear any stale snapshot rather than let
+        # time_anchor silently restore the wrong, older move.
+        state.move_history[action.player_id] = None
 
         rank = 0 if action.player_id == "white" else 7
         king_from = Position(4, rank)  # e-file
@@ -965,7 +1208,17 @@ class RulesEngine:
                 raise IllegalActionError(
                     f"Card {action.card_id!r} is not a Monster card."
                 )
-            if not card.supports_vessel(unit.piece.piece_type.value):
+            pt = unit.piece.piece_type.value
+            compatible = card.supports_vessel(pt)
+            if not compatible:
+                # Stage 5: vessel_support (broodmother) — an allied aura
+                # nearby may extend the compatible vessel set.
+                from game.mechanics.monsters import get_extra_vessel_types
+                compatible = pt in get_extra_vessel_types(
+                    state, action.vessel_position, action.player_id,
+                    card.archetype, registry,
+                )
+            if not compatible:
                 raise IllegalActionError(
                     f"Monster {action.card_id!r} cannot use "
                     f"{unit.piece.piece_type.value!r} as a vessel. "
@@ -1155,6 +1408,17 @@ class RulesEngine:
             raise IllegalActionError("Cannot reposition an opponent's piece.")
 
         state.board.move_unit(action.from_position, action.to_position)
+
+        # Stage 5: burrow (tunnel_mole) piggybacks this same PendingDecision
+        # flow and tags a cooldown status to apply once the move resolves.
+        post_move_status = pd.context.get("post_move_status")
+        if post_move_status:
+            unit.statuses = [
+                s for s in unit.statuses
+                if s.split(":")[0] != post_move_status.split(":")[0]
+            ]
+            unit.add_status(post_move_status)
+
         state.pending_decision = None
 
         from game.core.events import PhaseAdvanced
@@ -1178,7 +1442,33 @@ class RulesEngine:
         self,
         state: GameState,
         action: ActivateSpell,
+        rng: DeterministicRNG,
+        registry: "object | None" = None,
     ) -> list[Event]:
+        """
+        Stage 6 — play a Spell and resolve its effects.
+
+        Canonical effect contract:
+            TRIGGER           the player activates the Spell
+            CONDITION         card is in hand; ``action.target`` matches the
+                               shape ``target_type`` expects (validated below)
+            TARGET SELECTION  mechanics.area.expand_area(card.radius, card.shape)
+                               around ``action.target`` for spatial Spells, OR
+                               a single named piece/Trap
+            EFFECT            each of the card's effects, via the SAME
+                               EFFECT_REGISTRY monsters/traps use
+            DURATION/EVENTS   handled inside each individual handler
+
+        ``action.target`` shape depends on ``card.target_type``:
+            "piece"     {"position": (f, r), "destination": (f, r) | None}
+            "position"  (f, r) — area center; expanded via card.radius/shape
+            "zone"      (f, r) — anchor square; shape="column"/"row" expands
+                         to the whole file/rank regardless of which square
+                         on that line was picked
+            "trap"      trap_instance_id (str)
+            "none"      None — card has no board target (e.g. ritual_insight)
+        """
+        from game.cards.card import SpellCard
         from game.core.events import SpellActivated
 
         self._require_phase(state, Phase.PREPARATION)
@@ -1187,6 +1477,15 @@ class RulesEngine:
 
         if action.card_id not in ps.hand:
             raise IllegalActionError(f"Card {action.card_id!r} not in hand.")
+
+        card = None
+        if registry is not None:
+            try:
+                card = registry.get(action.card_id)
+            except KeyError:
+                raise IllegalActionError(f"Unknown card: {action.card_id!r}")
+            if not isinstance(card, SpellCard):
+                raise IllegalActionError(f"Card {action.card_id!r} is not a Spell card.")
 
         ps.hand.remove(action.card_id)
         ps.graveyard.append(action.card_id)
@@ -1198,14 +1497,152 @@ class RulesEngine:
             card_id=action.card_id,
             target=action.target,
         ))
-        # Effect resolution deferred to Stage 6 EffectResolver.
+
+        if card is None:
+            return events
+
+        if card.target_type == "piece":
+            self._resolve_spell_on_piece(state, action, card, events, registry)
+        elif card.target_type in ("position", "zone"):
+            self._resolve_spell_on_area(state, action, card, events, registry)
+        elif card.target_type == "trap":
+            self._resolve_spell_on_trap(state, action, card, events)
+        elif card.target_type == "none":
+            self._resolve_spell_untargeted(state, card, events, rng, registry)
         return events
+
+    def _resolve_spell_on_piece(
+        self,
+        state: GameState,
+        action: ActivateSpell,
+        card,   # SpellCard
+        events: list[Event],
+        registry: "object | None",
+    ) -> None:
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        if not isinstance(action.target, dict) or "position" not in action.target:
+            raise IllegalActionError(
+                f"{card.name!r} needs a "
+                "{'position': (file, rank), 'destination': (file, rank) | None} target."
+            )
+        pos = Position(*action.target["position"])
+        unit = state.board.get_unit(pos)
+        if unit is None:
+            raise IllegalActionError(f"No piece at {pos}.")
+        if unit.owner != action.player_id:
+            raise IllegalActionError("Cannot target an opponent's piece with this Spell.")
+
+        destination = action.target.get("destination")
+        for effect in card.effects:
+            ctx = EffectContext(
+                state=state, unit=unit, position=pos, card=card, effect=effect,
+                events=events, registry=registry, trigger="instant_spell",
+                extra={"destination": destination} if destination is not None else {},
+            )
+            try:
+                resolve_effect(ctx)
+            except NotImplementedError:
+                _log.debug("SPELL    NotImplemented for %r — skipped", effect.type)
+
+    def _resolve_spell_on_area(
+        self,
+        state: GameState,
+        action: ActivateSpell,
+        card,   # SpellCard
+        events: list[Event],
+        registry: "object | None",
+    ) -> None:
+        from game.mechanics.area import expand_area
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        if not isinstance(action.target, (tuple, list)) or len(action.target) != 2:
+            raise IllegalActionError(f"{card.name!r} needs a (file, rank) target square.")
+        center = Position(*action.target)
+        area = expand_area(center, card.radius, card.shape)
+
+        for square in area:
+            for effect in card.effects:
+                ctx = EffectContext(
+                    state=state, unit=None, position=square, card=card, effect=effect,
+                    events=events, registry=registry, trigger="instant_spell",
+                    extra={"caster_owner": action.player_id},
+                )
+                try:
+                    resolve_effect(ctx)
+                except NotImplementedError:
+                    _log.debug("SPELL    NotImplemented for %r — skipped", effect.type)
+
+    def _resolve_spell_on_trap(
+        self,
+        state: GameState,
+        action: ActivateSpell,
+        card,   # SpellCard
+        events: list[Event],
+    ) -> None:
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        trap_id = action.target
+        if not isinstance(trap_id, str):
+            raise IllegalActionError(f"{card.name!r} needs a trap_instance_id target.")
+        trap = next((t for t in state.traps if t.id == trap_id), None)
+        if trap is None:
+            raise IllegalActionError(f"No Trap with id {trap_id!r} on the board.")
+
+        for effect in card.effects:
+            target_owner = effect.params.get("target_owner", "opponent")
+            if target_owner == "opponent" and trap.owner == action.player_id:
+                raise IllegalActionError(f"{card.name!r} can only target an enemy Trap.")
+            ctx = EffectContext(
+                state=state, unit=None, position=trap.position, card=card, effect=effect,
+                events=events, trigger="instant_spell",
+                extra={"trap_instance_id": trap_id},
+            )
+            try:
+                resolve_effect(ctx)
+            except NotImplementedError:
+                _log.debug("SPELL    NotImplemented for %r — skipped", effect.type)
+
+    def _resolve_spell_untargeted(
+        self,
+        state: GameState,
+        card,   # SpellCard
+        events: list[Event],
+        rng: DeterministicRNG,
+        registry: "object | None",
+    ) -> None:
+        """
+        target_type == "none" Spells (e.g. ritual_insight — deferred, needs
+        the Ritual system).  Effects that aren't implemented yet are
+        silently skipped, same as any other not-yet-implemented handler.
+        """
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        for effect in card.effects:
+            ctx = EffectContext(
+                state=state, unit=None, position=None, card=card, effect=effect,
+                events=events, rng=rng, registry=registry, trigger="instant_spell",
+            )
+            try:
+                resolve_effect(ctx)
+            except NotImplementedError:
+                _log.debug("SPELL    NotImplemented for %r — skipped", effect.type)
 
     def _execute_place_trap(
         self,
         state: GameState,
         action: PlaceTrap,
+        registry: "object | None" = None,
     ) -> list[Event]:
+        """
+        Stage 6 — place a Trap card from hand onto the board.
+
+        The TrapInstance's radius/shape/trigger/charges are read from the
+        card definition (not hardcoded) so trigger detection
+        (mechanics.monsters.check_enter_radius_traps /
+        check_capture_traps) sees the Trap's real area of effect.
+        """
+        from game.cards.card import TrapCard
         from game.core.events import TrapPlaced
 
         self._require_phase(state, Phase.PREPARATION)
@@ -1215,6 +1652,27 @@ class RulesEngine:
         if action.card_id not in ps.hand:
             raise IllegalActionError(f"Card {action.card_id!r} not in hand.")
 
+        if state.board.get_unit(action.position) is not None:
+            raise IllegalActionError(
+                f"Cannot place a Trap on an occupied square ({action.position})."
+            )
+        if any(t.position == action.position for t in state.traps):
+            raise IllegalActionError(
+                f"A Trap is already placed at {action.position}."
+            )
+
+        card = None
+        radius, shape, trigger_name, charges = 1, "square", "enter_radius", None
+        if registry is not None:
+            try:
+                card = registry.get(action.card_id)
+            except KeyError:
+                raise IllegalActionError(f"Unknown card: {action.card_id!r}")
+            if not isinstance(card, TrapCard):
+                raise IllegalActionError(f"Card {action.card_id!r} is not a Trap card.")
+            radius, shape = card.radius, card.shape
+            trigger_name, charges = card.trigger.value, card.charges
+
         ps.hand.remove(action.card_id)
 
         trap_id = f"trap-{action.player_id}-{len(state.traps)+1:03d}"
@@ -1223,8 +1681,10 @@ class RulesEngine:
             owner=action.player_id,
             card_id=action.card_id,
             position=action.position,
-            radius=1,           # default; overridden by card data in Stage 6
-            trigger_condition="enter_radius",
+            radius=radius,
+            shape=shape,
+            trigger_condition=trigger_name,
+            charges=charges,
         )
         state.traps.append(trap)
 
@@ -1237,6 +1697,67 @@ class RulesEngine:
             position=action.position,
             radius=trap.radius,
         ))
+        return events
+
+    def _execute_activate_trap(
+        self,
+        state: GameState,
+        action: ActivateTrap,
+        registry: "object | None" = None,
+    ) -> list[Event]:
+        """
+        Stage 6 — manually fire a ``trigger: manual`` Trap (time_anchor).
+
+        Simplification: the README's flavor text has these "activated
+        during the Reaction phase" (the owner reacting to the opponent's
+        move) but the engine currently only lets active_player act outside
+        the two special interrupt phases (RECOMPOSE_SELECTION /
+        PROMOTION_SELECTION). Mechanically equivalent and much simpler:
+        the owner activates it during their OWN next PREPARATION phase —
+        which, since it follows the opponent's move and EndTurn, is the
+        very next moment the owner can act anyway. state.move_history is
+        unaffected by whose turn it is, so undo semantics come out
+        identical either way; only the UI framing differs.
+        """
+        from game.cards.card import TrapCard, TrapTrigger
+        from game.core.events import TrapTriggered
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        self._require_phase(state, Phase.PREPARATION)
+        self._require_no_prep_used(state, action.player_id)
+
+        trap = next((t for t in state.traps if t.id == action.trap_instance_id), None)
+        if trap is None:
+            raise IllegalActionError(f"No Trap with id {action.trap_instance_id!r} on the board.")
+        if trap.owner != action.player_id:
+            raise IllegalActionError("Cannot activate an opponent's Trap.")
+
+        card = None
+        if registry is not None:
+            try:
+                card = registry.get(trap.card_id)
+            except KeyError:
+                card = None
+        if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.MANUAL:
+            raise IllegalActionError(f"Trap {trap.card_id!r} cannot be manually activated.")
+
+        events: list[Event] = []
+        target_player = state.opponent_of(action.player_id)
+        for effect in card.effects:
+            ctx = EffectContext(
+                state=state, unit=None, position=trap.position, card=card, effect=effect,
+                events=events, registry=registry, trigger="manual",
+                extra={"target_player": target_player, "trap_owner": action.player_id},
+            )
+            resolve_effect(ctx)   # let IllegalActionError propagate — nothing consumed yet
+
+        self._mark_prep_used(state, action.player_id, "ActivateTrap", events)
+        if trap.charges is not None:
+            trap.charges -= 1
+            if trap.charges <= 0:
+                state.traps = [t for t in state.traps if t.id != trap.id]
+
+        events.append(TrapTriggered(trap_instance_id=trap.id, triggering_piece_id=None))
         return events
 
     def _execute_start_construction(
@@ -1555,29 +2076,60 @@ class RulesEngine:
             turn_number=state.turn_number,
         ))
 
-        # ── Stage 5: tick down frozen squares ────────────────────────────
-        # Effect format: "frozen:<turns>:<owner_player_id>"
-        # Decrement only when the player who DIDN'T set the freeze ends their
-        # turn (i.e., the opponent of the freezer calls EndTurn).  This ensures
-        # the freeze blocks for exactly <turns> full opponent turns.
+        # ── Stage 5/6: tick down frozen / scorched / blocked / cursed squares ─
+        # Effect format: "<prefix>:<turns>:<owner_player_id>"
+        # "blocked" is veil_of_stillness's zone; "cursed" is cursed_ground's.
+        # Decrement only when the player who DIDN'T set the effect ends their
+        # turn (i.e., the opponent of the setter calls EndTurn).  This ensures
+        # the effect blocks for exactly <turns> full opponent turns.
         ending_player = action.player_id
         for sq in state.board.squares.values():
             remaining = []
             for eff in sq.temporary_effects:
-                if eff.startswith("frozen:"):
+                prefix = eff.split(":")[0]
+                if prefix in ("frozen", "scorched", "blocked", "cursed"):
+                    # Format: "<prefix>:<turns>:<owner>:<source_card_id>" — the
+                    # trailing card_id (Stage 6, for the CardViewer's "Active in
+                    # this zone" list) must survive the decrement/rewrite below.
                     parts = eff.split(":")
                     n = int(parts[1])
                     owner = parts[2] if len(parts) > 2 else None
+                    card_id = parts[3] if len(parts) > 3 else None
                     # Decrement only if the player ending their turn is NOT the owner
                     if owner is None or owner != ending_player:
                         n -= 1
                     if n > 0:
-                        owner_tag = f":{owner}" if owner else ""
-                        remaining.append(f"frozen:{n}{owner_tag}")
+                        tail = f":{owner}" if owner or card_id else ""
+                        tail += f":{card_id}" if card_id else ""
+                        remaining.append(f"{prefix}:{n}{tail}")
                     # else: expired, don't add back
                 else:
                     remaining.append(eff)
             sq.temporary_effects = remaining
+
+        # ── Stage 5/6: tick down the OWNER's own per-unit timers ─────────
+        # burrow_cooldown / immobilized / exposed all count the unit
+        # OWNER's own turns (not the opponent's), unlike frozen/scorched/
+        # blocked squares above — "cannot move on ITS next turn" means the
+        # victim's own turn, not the trap owner's.
+        for pos, u in state.board.all_units_for(ending_player):
+            remaining_statuses = []
+            for status in u.statuses:
+                prefix = status.split(":")[0]
+                if prefix in ("burrow_cooldown", "immobilized", "exposed"):
+                    n = int(status.split(":")[1]) - 1
+                    if n > 0:
+                        remaining_statuses.append(f"{prefix}:{n}")
+                    # else: expired, don't add back
+                else:
+                    remaining_statuses.append(status)
+            u.statuses = remaining_statuses
+
+        # ── Stage 5: restore_effect_charge (battlefield_medic) ───────────
+        # At the end of the owner's own turn, restore one spent shield
+        # charge to a single adjacent allied monster.
+        if self._registry is not None:
+            self._resolve_restore_effect_charge(state, ending_player, events, self._registry)
 
         # Switch to other player
         opponent = state.opponent_of(action.player_id)
@@ -1593,6 +2145,68 @@ class RulesEngine:
         # (The auto-start is triggered by the next call from the game loop)
 
         return events
+
+    def _resolve_restore_effect_charge(
+        self,
+        state: GameState,
+        ending_player: str,
+        events: list[Event],
+        registry: "object | None",
+    ) -> None:
+        """
+        Stage 5 — battlefield_medic's ``restore_effect_charge``.
+
+        At the end of ``ending_player``'s own turn, every allied unit
+        carrying this effect restores one spent shield charge
+        (``shield:0`` → ``shield:1``) to a single adjacent allied monster
+        that has previously had a shield.  Only one target per medic per
+        turn (``max_targets: 1`` in the current data set).
+        """
+        from game.cards.card import MonsterCard
+
+        for pos, medic_unit in state.board.all_units_for(ending_player):
+            if medic_unit.monster_id is None:
+                continue
+            try:
+                card = registry.get(medic_unit.monster_id)
+            except KeyError:
+                continue
+            if not isinstance(card, MonsterCard):
+                continue
+
+            for effect in card.effects:
+                if effect.type != "restore_effect_charge":
+                    continue
+                if effect.params.get("trigger", "end_of_turn") != "end_of_turn":
+                    continue
+                radius = effect.params.get("radius", 1)
+                amount = effect.params.get("amount", 1)
+
+                restored = False
+                for df in (-1, 0, 1):
+                    if restored:
+                        break
+                    for dr in (-1, 0, 1):
+                        if df == 0 and dr == 0:
+                            continue
+                        if abs(df) > radius or abs(dr) > radius:
+                            continue
+                        nf, nr = pos.file + df, pos.rank + dr
+                        if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                            continue
+                        ally_pos = Position(nf, nr)
+                        ally = state.board.get_unit(ally_pos)
+                        if ally is None or ally.owner != ending_player or ally is medic_unit:
+                            continue
+                        for idx, status in enumerate(ally.statuses):
+                            if status.startswith("shield:"):
+                                charges = int(status.split(":")[1])
+                                ally.statuses[idx] = f"shield:{charges + amount}"
+                                restored = True
+                                break
+                        if restored:
+                            break
+                break  # only the first matching effect entry per medic
 
     # ── Castling rights helpers (Stage 1) ────────────────────────────────
 

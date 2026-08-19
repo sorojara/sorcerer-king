@@ -5,10 +5,19 @@ mechanics/effects/board_control.py — BOARD_CONTROL category
 Effect types in this category
 ------------------------------
 freeze_square          IMPLEMENTED  — lock landing square after capture
-scorch_square          STUB         — destroy units entering square (Stage 7+)
-movement_restriction   STUB         — limit enemy movement range (Stage 7+)
-suppress_spell_zone    STUB         — disable spell effects in radius (Stage 6+)
+scorch_square          IMPLEMENTED  — destroy units entering square (ember_drake)
+movement_restriction   IMPLEMENTED  — limit enemy movement range (astral_binder)
+suppress_spell_zone    STUB         — disable spell effects in radius (Stage 6+,
+                                       needs the Spell/Trap zone system)
 damage_aura            IMPLEMENTED  — destroy pieces entering radius (dragon_herald)
+immobilize_zone        IMPLEMENTED  — Stage 6: ANY piece that ends its move
+                                       here gets immobilized, unlike
+                                       freeze_square which blocks entry
+                                       outright (cursed_ground)
+destroy_monster_or_piece IMPLEMENTED — Stage 6: destroys just the Monster,
+                                       sparing its Vessel, if the triggering
+                                       piece hosts one; destroys the whole
+                                       piece otherwise (pit_trap)
 """
 
 from __future__ import annotations
@@ -25,34 +34,42 @@ if TYPE_CHECKING:
 
 def _freeze_square(ctx: "EffectContext") -> None:
     """
-    IMPLEMENTED — iron_vanguard on_capture effect.
+    IMPLEMENTED — iron_vanguard on_capture effect, AND (Stage 6) cursed_ground,
+    a spatial Spell that freezes every square in its area (radius=1) rather
+    than one capture-landing square.
 
-    After capturing, the landing square is marked ``frozen:<N>:<owner>``
-    where N = duration_turns and owner = attacker player_id.
+    _execute_activate_spell resolves area-targeted Spells by calling
+    resolve_effect() once per square in the card's expanded area, so this
+    handler still only ever touches one square (``ctx.position``) — the
+    Spell case supplies ``ctx.extra["caster_owner"]`` in place of
+    ``ctx.unit.owner`` since there's no attacking unit involved.
 
     The freeze is only decremented at the opponent's EndTurn (not the
-    capturing player's own EndTurn), so it effectively blocks the opponent
+    setting player's own EndTurn), so it effectively blocks the opponent
     for exactly N opponent turns.
     """
     from game.core.events import SquareFrozen
 
     params  = ctx.effect.params
     trigger = params.get("trigger", "on_capture")
-    if trigger != "on_capture":
+    if trigger not in ("on_capture", "instant_spell"):
         return
 
-    if ctx.unit is None or ctx.position is None or ctx.state is None:
+    if ctx.position is None or ctx.state is None:
+        return
+    owner = ctx.unit.owner if ctx.unit is not None else (ctx.extra or {}).get("caster_owner")
+    if owner is None:
         return
 
     duration = params.get("duration_turns", 1)
-    owner    = ctx.unit.owner
+    card_id = ctx.card.id if ctx.card is not None else "-"
     ctx.state.board.get_square(ctx.position).add_effect(
-        f"frozen:{duration}:{owner}"
+        f"frozen:{duration}:{owner}:{card_id}"
     )
     ctx.events.append(SquareFrozen(
         position=ctx.position,
         duration_turns=duration,
-        caused_by_piece_id=ctx.unit.piece.id,
+        caused_by_piece_id=ctx.unit.piece.id if ctx.unit is not None else None,
     ))
 
 
@@ -62,23 +79,39 @@ def _freeze_square(ctx: "EffectContext") -> None:
 
 def _scorch_square(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 7+
+    IMPLEMENTED — ember_drake on_capture effect.
 
     When this monster captures a unit, the landing square becomes
     ``scorched:<N>:<owner>`` for ``duration_turns`` turns.  Any enemy unit
-    entering a scorched square is destroyed.
+    entering a scorched square afterwards is destroyed.
 
-    When implemented this will:
-      1. At on_capture: write "scorched:N:owner" to the square's temp effects.
-      2. In _execute_move_piece: check target square for "scorched:..." and
-         destroy the moving unit if it's an enemy.
-      3. Decrement scorched counters at the opponent's EndTurn (same rule as
-         frozen squares).
+    Mirrors ``_freeze_square`` exactly on the write side.  The read side
+    (destroying units that walk into a scorched square) lives in
+    ``check_scorch_square()`` in mechanics/monsters.py, called from
+    ``_execute_move_piece`` right after the damage-aura check.  Scorched
+    counters tick down in ``_execute_end_turn`` alongside frozen squares.
     """
-    raise NotImplementedError(
-        "scorch_square is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
+    from game.core.events import SquareScorched
+
+    params  = ctx.effect.params
+    trigger = params.get("trigger", "on_capture")
+    if trigger != "on_capture":
+        return
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
+        return
+
+    duration = params.get("duration_turns", 2)
+    owner    = ctx.unit.owner
+    card_id  = ctx.card.id if ctx.card is not None else "-"
+    ctx.state.board.get_square(ctx.position).add_effect(
+        f"scorched:{duration}:{owner}:{card_id}"
     )
+    ctx.events.append(SquareScorched(
+        position=ctx.position,
+        duration_turns=duration,
+        caused_by_piece_id=ctx.unit.piece.id,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -87,21 +120,26 @@ def _scorch_square(ctx: "EffectContext") -> None:
 
 def _movement_restriction(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 7+
+    IMPLEMENTED — astral_binder passive aura.
 
     Enemy units within ``radius`` squares of this monster cannot move more
-    than ``max_distance`` squares per action.
+    than ``max_distance`` squares (Chebyshev) per action.
 
-    When implemented this will:
-      1. At movement-generation time: for each enemy unit inside the radius,
-         filter candidate destinations to those within max_distance (Chebyshev)
-         of the unit's current position.
-      2. This is a passive aura — no summon-time action required.
+    This handler only flags the aura on the caster
+    (``movement_restriction:<radius>:<max_distance>``); the caster is scanned
+    for at legal-move-generation time by
+    ``mechanics.monsters.get_movement_cap()``, called from
+    ``chess.movement.get_pseudo_legal_moves()`` to filter the enemy's
+    candidate destinations.
     """
-    raise NotImplementedError(
-        "movement_restriction is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    if ctx.unit is None:
+        return
+    radius      = ctx.effect.params.get("radius", 1)
+    max_distance = ctx.effect.params.get("max_distance", 1)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("movement_restriction:")
+    ]
+    ctx.unit.add_status(f"movement_restriction:{radius}:{max_distance}")
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +186,96 @@ def _damage_aura(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# immobilize_zone  (Stage 6 — cursed_ground)
+# ---------------------------------------------------------------------------
+
+def _immobilize_zone(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — cursed_ground.
+
+    Unlike ``freeze_square`` (an unenterable square, used by iron_vanguard
+    to lock the opponent OUT), cursed_ground's own wording is "Any piece
+    that ends its move inside the zone cannot move on its owner's next
+    turn" — entry is legal, the piece just gets stuck there afterward, and
+    it affects BOTH sides, not just an enemy.
+
+    _execute_activate_spell resolves area-targeted Spells by calling
+    resolve_effect() once per square in the card's expanded area (same
+    convention as freeze_square/block_zone), so this handler only ever
+    touches one square (``ctx.position``), tagging it
+    ``cursed:<duration>:<owner>``.  The read side —
+    mechanics.monsters.check_immobilize_zone() — is called from
+    _execute_move_piece for EVERY completed move (no owner filter), and
+    applies the same "immobilized:N" status pit_trap/ward_of_binding use.
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    owner = ctx.unit.owner if ctx.unit is not None else (ctx.extra or {}).get("caster_owner")
+    duration = ctx.effect.params.get("duration_turns", 3)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+    ctx.state.board.get_square(ctx.position).add_effect(f"cursed:{duration}:{owner}:{card_id}")
+
+
+# ---------------------------------------------------------------------------
+# destroy_monster_or_piece  (Stage 6 — pit_trap)
+# ---------------------------------------------------------------------------
+
+def _destroy_monster_or_piece(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — pit_trap.
+
+    If the triggering piece hosts a Monster, destroy just the Monster —
+    its card goes to the owner's Graveyard and the Vessel survives,
+    reverted to a plain piece (same status cleanup as DismissMonster, but
+    this is a destruction, not a voluntary dismissal, so the card does
+    NOT return to hand).  If there's no Monster, the whole piece is
+    destroyed outright.
+
+    Kings are already exempt from every Trap effect generically (see
+    mechanics.monsters._fire_trap's is_king check) — no special-casing
+    needed here.
+    """
+    from game.core.events import MonsterDestroyed, PieceCaptured
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
+        return
+
+    unit = ctx.unit
+    pos = ctx.position
+
+    if unit.monster_id is not None:
+        card_id = unit.monster_id
+        unit.monster_id = None
+        unit.statuses = [
+            s for s in unit.statuses
+            if not any(
+                s.startswith(prefix) for prefix in (
+                    "shield:", "spell_radius_bonus:", "stealth",
+                    "ritual_boost:", "exposed:", "immobilized:",
+                )
+            )
+        ]
+        ctx.state.get_player(unit.owner).graveyard.append(card_id)
+        ctx.events.append(MonsterDestroyed(
+            player_id=unit.owner,
+            card_id=card_id,
+            vessel_piece_id=unit.piece.id,
+            position=pos,
+            destroyed_by_piece_id=None,
+        ))
+    else:
+        removed = ctx.state.board.remove_unit(pos)
+        if removed is not None:
+            ctx.state.get_player(removed.owner).captured_pieces.append(removed.piece.id)
+            ctx.events.append(PieceCaptured(
+                piece_id=removed.piece.id,
+                owner=removed.owner,
+                captured_at=pos,
+                captured_by_piece_id="pit_trap",
+            ))
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -156,5 +284,7 @@ BOARD_CONTROL_HANDLERS: dict[str, object] = {
     "scorch_square":        _scorch_square,
     "movement_restriction": _movement_restriction,
     "suppress_spell_zone":  _suppress_spell_zone,
+    "destroy_monster_or_piece": _destroy_monster_or_piece,
     "damage_aura":          _damage_aura,
+    "immobilize_zone":      _immobilize_zone,
 }

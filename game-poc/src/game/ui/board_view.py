@@ -32,6 +32,7 @@ import pygame
 from game.chess.pieces import Position
 from game.core.actions import Castle, MovePiece
 from game.core.phases import PieceType
+from game.mechanics.area import expand_area
 from game.ui.colors import (
     ACTIVATABLE_DOT,
     BLACK_PIECE,
@@ -48,8 +49,13 @@ from game.ui.colors import (
     SELECTED_TINT,
     SUMMON_VESSEL_DOT,
     SUMMON_VESSEL_TINT,
+    TRAP_LABEL_BG,
+    TRAP_MARKER_ENEMY,
+    TRAP_MARKER_OWN,
     WHITE_PIECE,
     WHITE_PIECE_SHADOW,
+    ZONE_TINT_ENEMY,
+    ZONE_TINT_OWN,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +64,14 @@ if TYPE_CHECKING:
 
 # ── Constants ──────────────────────────────────────────────────────────────
 SQUARE_SIZE: int = 80       # pixels per square
-BOARD_OFFSET_X: int = 0     # left edge of board on the surface
+# Stage 6: a left sidebar (hand card reference panel) now occupies the space
+# left of the board — see ui/overlays.py HandInfoPanel and
+# ui/pygame_app.py's LEFT_SIDEBAR_W. AppController is the single source of
+# truth for this value; it's mirrored here so board_view's own coordinate
+# math (_sq_to_screen / _screen_to_pos) and everything built on it (click
+# hit-testing, tooltips) stays correct without threading an offset through
+# every call site.
+BOARD_OFFSET_X: int = 220   # left edge of board on the surface
 BOARD_OFFSET_Y: int = 0     # top edge of board on the surface
 BOARD_PIXEL_SIZE: int = SQUARE_SIZE * 8  # 640 px
 
@@ -145,6 +158,7 @@ class BoardView:
         checked_player: str | None,
         summon_vessel_dests: list[Position] | None = None,
         inspect_pos: Position | None = None,
+        aura_colors: "dict[Position, tuple[int, int, int]] | None" = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -156,13 +170,22 @@ class BoardView:
         legal_dests        : legal destination squares for the selected piece
         castle_dests       : legal castling destination squares (g1/c1 etc.)
         checked_player     : "white" or "black" if in check, else None
-        summon_vessel_dests: Stage 5 — valid vessel squares for the held monster card
+        summon_vessel_dests: Stage 5 — valid vessel squares for the held monster
+                              card; Stage 6 also reuses this same gold-ring
+                              channel for Trap-placement / Spell-target squares
+                              (the AppController decides which mode is active).
         inspect_pos        : Stage 5 — unit being inspected (purple tint, info panel)
+        aura_colors        : Stage 6 — Position → RGB for every summoned piece's
+                              archetype aura. Computed by AppController (it owns
+                              the card registry lookup); this module only draws
+                              whatever color it's handed. Positions with no
+                              Monster, or missing from the map, get no aura.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos)
         self._draw_coordinates()
-        self._draw_pieces(observation)
+        self._draw_traps(observation)
+        self._draw_pieces(observation, aura_colors or {})
 
     # ── Private draw helpers ──────────────────────────────────────────────
 
@@ -190,6 +213,26 @@ class BoardView:
 
         vessel_set: set[Position] = set(summon_vessel_dests or [])
 
+        # Stage 6: every Trap's full activation area (always visible — Traps
+        # are never secret) + every active persistent zone effect.  Tinted
+        # by OWNERSHIP relative to the viewer (obs.player_id), not by effect
+        # type — an opponent's zone shows only that a hazard exists there,
+        # never what it actually does (see _draw_traps for the matching
+        # identity-hiding on the marker/label).
+        own_zone_squares: set[Position] = set()
+        enemy_zone_squares: set[Position] = set()
+        for trap in obs.board.trap_locations:
+            area = expand_area(trap.position, trap.radius, trap.shape)
+            if trap.owner == obs.player_id:
+                own_zone_squares.update(area)
+            else:
+                enemy_zone_squares.update(area)
+        for eff in obs.board.square_effects:
+            if eff.owner == obs.player_id:
+                own_zone_squares.add(eff.position)
+            else:
+                enemy_zone_squares.add(eff.position)
+
         for file in range(8):
             for rank in range(8):
                 pos = Position(file, rank)
@@ -198,6 +241,17 @@ class BoardView:
                 sx, sy = _sq_to_screen(pos, self._flip)
                 rect = pygame.Rect(sx, sy, SQUARE_SIZE, SQUARE_SIZE)
                 pygame.draw.rect(self._surface, color, rect)
+
+                # Stage 6: Trap danger zone + active effect zone (drawn first
+                # so selection/check/inspect highlights stay visually on top).
+                # A square can be both (e.g. own Trap area overlapping an
+                # enemy zone) — own tint wins so you always see your own info.
+                if pos in own_zone_squares:
+                    self._overlay.fill(ZONE_TINT_OWN)
+                    self._surface.blit(self._overlay, (sx, sy))
+                elif pos in enemy_zone_squares:
+                    self._overlay.fill(ZONE_TINT_ENEMY)
+                    self._surface.blit(self._overlay, (sx, sy))
 
                 # Check highlight (king square)
                 if king_pos is not None and pos == king_pos:
@@ -292,10 +346,47 @@ class BoardView:
                 sy = BOARD_OFFSET_Y + rank * SQUARE_SIZE + 3
             self._surface.blit(surf, (sx, sy))
 
-    def _draw_pieces(self, obs: "Observation") -> None:
+    def _draw_traps(self, obs: "Observation") -> None:
+        """
+        Stage 6 — every placed Trap gets a marker ring on its square (its
+        existence and rough danger zone are always visible — that's the
+        colored area from _draw_squares).  Its IDENTITY is only revealed
+        for the viewer's own Traps: the name label is only drawn when
+        ``trap.owner == obs.player_id``.  An enemy Trap shows a plain ring
+        in the "enemy" color — you know something is there, not what it is.
+        """
+        for trap in getattr(obs, "trap_locations", ()):
+            pos = trap.position
+            sx, sy = _sq_to_screen(pos, self._flip)
+            cx = sx + SQUARE_SIZE // 2
+            cy = sy + SQUARE_SIZE // 2
+            is_own = trap.owner == obs.player_id
+            ring_color = TRAP_MARKER_OWN if is_own else TRAP_MARKER_ENEMY
+            pygame.draw.circle(
+                self._surface, ring_color, (cx, cy),
+                SQUARE_SIZE // 2 - 3, 3,
+            )
+            if not is_own:
+                continue
+            short_name = trap.card_id.replace("_", " ").title()
+            lbl = self._font_small.render(short_name, True, ring_color)
+            lbl_bg = pygame.Surface((lbl.get_width() + 4, lbl.get_height() + 2), pygame.SRCALPHA)
+            lbl_bg.fill(TRAP_LABEL_BG)
+            lx = sx + (SQUARE_SIZE - lbl.get_width()) // 2
+            ly = sy + 2
+            self._surface.blit(lbl_bg, (lx - 2, ly - 1))
+            self._surface.blit(lbl, (lx, ly))
+
+    def _draw_pieces(
+        self,
+        obs: "Observation",
+        aura_colors: "dict[Position, tuple[int, int, int]]",
+    ) -> None:
         """Render all pieces as Unicode glyphs centered on their squares.
 
         Stage 5: monster units get a gold underline bar and a tiny name label.
+        Stage 6: monster units also get a colored aura keyed by archetype
+        (see ui/archetype_colors.py) — drawn first so the glyph sits on top.
         """
         for unit_info in obs.board.units:
             pos = unit_info.position
@@ -306,6 +397,16 @@ class BoardView:
             has_monster = bool(getattr(unit_info, "monster_id", None))
             text_color = WHITE_PIECE if unit_info.owner == "white" else BLACK_PIECE
             shadow_color = WHITE_PIECE_SHADOW if unit_info.owner == "white" else BLACK_PIECE_SHADOW
+
+            # Stage 6: archetype aura — soft glow + ring, behind the glyph.
+            if has_monster and pos in aura_colors:
+                color = aura_colors[pos]
+                aura = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
+                cx, cy = SQUARE_SIZE // 2, SQUARE_SIZE // 2
+                radius = SQUARE_SIZE // 2 - 4
+                pygame.draw.circle(aura, (*color, 70), (cx, cy), radius)
+                pygame.draw.circle(aura, (*color, 190), (cx, cy), radius, 3)
+                self._surface.blit(aura, (sx, sy))
 
             # Shadow (offset by 1 pixel)
             shadow = self._font_large.render(glyph, True, shadow_color)
@@ -365,3 +466,46 @@ class BoardView:
     def pos_from_click(self, mx: int, my: int) -> Position | None:
         """Convert a mouse click to a board Position, or None if outside."""
         return _screen_to_pos(mx, my, self._flip)
+
+    # ── Stage 6: hover tooltip ──────────────────────────────────────────────
+
+    def draw_tooltip(
+        self,
+        mouse_pos: tuple[int, int],
+        lines: list[tuple[str, tuple]],
+    ) -> None:
+        """
+        Draw a small stacked-text tooltip box near ``mouse_pos``.
+
+        ``lines`` is title-first: ``[(text, color), ...]``.  The caller
+        (AppController) decides WHAT to show (Trap info, zone-effect info)
+        — this only knows HOW to draw a box of text lines.  Clamped to stay
+        fully on-screen.
+        """
+        from game.ui.colors import TOOLTIP_BG, TOOLTIP_BORDER
+
+        if not lines:
+            return
+
+        surfs = [self._font_small.render(text, True, color) for text, color in lines]
+        pad = 6
+        line_h = max(s.get_height() for s in surfs) + 2
+        w = max(s.get_width() for s in surfs) + pad * 2
+        h = line_h * len(surfs) + pad * 2
+
+        mx, my = mouse_pos
+        x = mx + 16
+        y = my + 16
+        surface_w = self._surface.get_width()
+        surface_h = self._surface.get_height()
+        if x + w > surface_w:
+            x = surface_w - w - 4
+        if y + h > surface_h:
+            y = surface_h - h - 4
+
+        box = pygame.Surface((w, h), pygame.SRCALPHA)
+        box.fill(TOOLTIP_BG)
+        pygame.draw.rect(box, TOOLTIP_BORDER, box.get_rect(), 1)
+        for i, surf in enumerate(surfs):
+            box.blit(surf, (pad, pad + i * line_h))
+        self._surface.blit(box, (x, y))

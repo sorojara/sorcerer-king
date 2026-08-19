@@ -75,11 +75,24 @@ from game.mechanics.effects.buildings     import BUILDINGS_HANDLERS      # noqa:
 from game.mechanics.effects.ritual        import RITUAL_HANDLERS         # noqa: E402
 from game.mechanics.effects.king_duel     import KING_DUEL_HANDLERS      # noqa: E402
 from game.mechanics.effects.information   import INFORMATION_HANDLERS    # noqa: E402
+from game.mechanics.effects.spells        import SPELLS_HANDLERS         # noqa: E402
 from game.mechanics.effects._meta        import META_HANDLERS            # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # Master registry: effect-type → handler
+#
+# This ONE registry serves Monsters, Traps, and Spells alike — the
+# canonical effect contract (Stage 6):
+#
+#     TRIGGER → CONDITION → TARGET SELECTION → EFFECT → DURATION → EVENTS
+#
+# "TARGET SELECTION" happens before resolve_effect() is ever called (trap
+# trigger detection in mechanics.monsters, or area expansion in
+# _execute_activate_spell via mechanics.area.expand_area) — by the time a
+# handler in this registry runs, ctx.unit/ctx.position/ctx.extra already
+# name the concrete target(s). Handlers only implement EFFECT + DURATION
+# (arming a status/temp-effect) and append to ctx.events.
 # ---------------------------------------------------------------------------
 
 EFFECT_REGISTRY: dict[str, _Handler] = {
@@ -91,6 +104,7 @@ EFFECT_REGISTRY: dict[str, _Handler] = {
     **RITUAL_HANDLERS,
     **KING_DUEL_HANDLERS,
     **INFORMATION_HANDLERS,
+    **SPELLS_HANDLERS,
     **META_HANDLERS,
 }
 

@@ -112,8 +112,14 @@ def get_pseudo_legal_moves(
 
     Stage 5: applies monster movement additions (alter_movement / add_leap)
     on top of the base vessel movement pattern.
+
+    Stage 6: an "immobilized:N" unit (pit_trap, ward_of_binding) has zero
+    legal moves until the status expires — it may still be captured.
     """
     from game.cards.card import MonsterCard
+
+    if any(s.startswith("immobilized:") for s in unit.statuses):
+        return []
 
     owner = unit.owner
     pt = unit.piece.piece_type
@@ -209,14 +215,28 @@ def get_pseudo_legal_moves(
                         if candidate not in moves:
                             moves.append(candidate)
 
-    # ── Stage 5: frozen squares cannot be entered ────────────────────────
+    # ── Stage 5/6: frozen / blocked squares cannot be entered ────────────
+    # "blocked" is veil_of_stillness's zone (Stage 6) — same square-effect
+    # mechanism as "frozen", just a different spatial extent (a whole file
+    # via shape: column rather than one landing square).
     moves = [
         m for m in moves
         if not any(
-            eff.startswith("frozen:")
+            eff.startswith("frozen:") or eff.startswith("blocked:")
             for eff in board.get_square(m).temporary_effects
         )
     ]
+
+    # ── Stage 5: enemy movement_restriction aura (astral_binder) ─────────
+    # Enemy monsters may cap how far this unit can move per action.
+    if registry is not None:
+        from game.mechanics.monsters import get_movement_cap
+        cap = get_movement_cap(board, pos, owner, registry)
+        if cap is not None:
+            moves = [
+                m for m in moves
+                if abs(m.file - pos.file) <= cap and abs(m.rank - pos.rank) <= cap
+            ]
 
     return moves
 

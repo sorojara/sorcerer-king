@@ -48,6 +48,8 @@ from game.cards.card import CardRegistry, load_registry_from_yaml
 from game.chess.pieces import Position
 from game.core.actions import (
     ActivateMonsterAbility,
+    ActivateSpell,
+    ActivateTrap,
     Castle,
     DeclareRecompose,
     DiscardCard,
@@ -55,6 +57,7 @@ from game.core.actions import (
     EndPreparation,
     EndTurn,
     MovePiece,
+    PlaceTrap,
     PromotePawn,
     RepositionUnit,
     SummonMonster,
@@ -62,11 +65,13 @@ from game.core.actions import (
 from game.core.phases import HAND_SIZE_LIMIT
 from game.core.game import Game
 from game.core.phases import Phase
-from game.ui.board_view import BOARD_PIXEL_SIZE, BoardView
-from game.ui.colors import BLACK
+from game.ui.archetype_colors import aura_color_for
+from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView
+from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
 from game.ui.font import FTFont, load_font
 from game.ui.hand_view import HandView
-from game.ui.overlays import PromotionDialog, SidebarOverlay
+from game.ui.event_log import LOG_HEIGHT, EventLogPanel
+from game.ui.overlays import CardViewer, PromotionDialog, SidebarOverlay
 from game.ui.state_io import export_state, import_state
 
 # How many render frames the AI "thinks" before playing (visual pause)
@@ -79,11 +84,17 @@ _BOARD_H: int = BOARD_PIXEL_SIZE          # 640
 _HAND_H: int = HandView.HEIGHT            # 72  height of one hand row
 _SIDEBAR_W: int = SidebarOverlay.SIDEBAR_WIDTH  # 200
 
-WIN_W: int = _BOARD_W + _SIDEBAR_W       # 840
+# Stage 6: left sidebar — a dedicated, always-on hand-card reference panel
+# (HandInfoPanel) replacing the old hover-to-see-info flow, which relied on
+# MOUSEMOTION tracking that felt unreliable in practice. BOARD_OFFSET_X in
+# board_view.py must match this exactly — see the note on that constant.
+_LEFT_SIDEBAR_W: int = BOARD_OFFSET_X     # 220
+
+WIN_W: int = _LEFT_SIDEBAR_W + _BOARD_W + _SIDEBAR_W   # 1060
 WIN_H: int = _BOARD_H + _HAND_H          # 712  (base — no debug row)
 _WIN_H_DEBUG: int = _BOARD_H + _HAND_H * 2  # 784  (with black-hand debug row)
 
-_SIDEBAR_X: int = _BOARD_W               # 640
+_SIDEBAR_X: int = _LEFT_SIDEBAR_W + _BOARD_W   # 860 — right sidebar's left edge
 _HAND_Y: int = _BOARD_H                  # 640  (base hand-strip top)
 
 # Font sizes
@@ -152,6 +163,20 @@ class AppController:
             y_offset=_HAND_Y,
             strip_width=_BOARD_W,
             registry=self._registry,
+            x_offset=BOARD_OFFSET_X,
+        )
+        self._card_viewer = CardViewer(
+            surface=self._screen,
+            font=self._font_large,
+            font_small=self._font_small,
+            width=_LEFT_SIDEBAR_W,
+            registry=self._registry,
+            images_dir=_data_dir / "images",
+        )
+        self._event_log_panel = EventLogPanel(
+            surface=self._screen,
+            font_small=self._font_small,
+            width=_LEFT_SIDEBAR_W,
         )
 
         # ── Player modes & bots ───────────────────────────────────────────
@@ -171,6 +196,7 @@ class AppController:
         self._selected_pos: Position | None = None
         self._legal_dests: list[Position] = []
         self._castle_dests: list[Position] = []
+        self._mouse_pos: tuple[int, int] = (0, 0)
 
         # Index of card highlighted for discard (-1 = none)
         self._discard_highlight: int = -1
@@ -181,12 +207,34 @@ class AppController:
         # Valid vessel positions for the currently selected summon card
         self._summon_vessel_positions: list[Position] = []
 
-        # Stage 5: card info panel state
-        # _hovered_card_id  — card the mouse is hovering over in the hand strip
-        # _inspect_unit_pos — position of a board unit whose info is being shown
-        #   (set by clicking a monster piece; takes priority over hand hover)
-        self._hovered_card_id: str | None = None
+        # Stage 6: generic single-click targeting mode for Traps (PlaceTrap)
+        # and "position"/"zone"/"trap" Spells (ActivateSpell) — maps every
+        # clickable square directly to the concrete Action clicking it fires.
+        # ActivateSpell target_type "none" never enters a mode (fires on
+        # card click); target_type "piece" uses the two-step fields below.
+        self._targeting_card_id: str | None = None
+        self._targeting_action_by_pos: dict[Position, object] = {}
+
+        # Stage 6: two-step targeting for "piece" Spells (arcane_reposition):
+        # 1st click picks the source piece, 2nd click picks the destination.
+        self._spell_piece_card_id: str | None = None
+        self._spell_piece_actions: list = []
+        self._spell_piece_source: Position | None = None
+
+        # Stage 6 (corrected): CardViewer state — right-click driven, never
+        # hover (hover proved unreliable).
+        # _viewer_card_id      — the card currently shown in the left CardViewer.
+        # _inspect_unit_pos    — board position of a right-clicked SUMMONED
+        #   piece; set alongside _viewer_card_id so the purple board tint,
+        #   ability buttons, and live statuses all know which unit is meant.
+        #   None when the viewer is showing a hand card or a zone-list card
+        #   (no unit context for those).
+        # _zone_active_entries — (label, card_id) pairs for the "Active in
+        #   this zone" section, populated by right-clicking a square inside
+        #   one of the player's OWN active Trap/zone effects.
+        self._viewer_card_id: str | None = None
         self._inspect_unit_pos: Position | None = None
+        self._zone_active_entries: "list[tuple[str, str]] | None" = None
 
         # Promotion dialog — created on demand, destroyed after selection
         self._promotion_dialog: PromotionDialog | None = None
@@ -220,27 +268,29 @@ class AppController:
                 sys.exit()
             elif event.key == pygame.K_ESCAPE:
                 self._cancel_summon()
+                self._cancel_targeting_mode()
+                self._cancel_spell_piece_mode()
                 self._deselect()
                 self._inspect_unit_pos = None
-                self._hovered_card_id = None
+                self._viewer_card_id = None
+                self._zone_active_entries = None
             elif event.key == pygame.K_d:
                 # D key: dismiss the monster on the selected piece (if any)
                 self._try_dismiss_selected()
             elif event.key == pygame.K_a:
                 # A key: activate the first available ability on the selected/inspected piece
                 self._try_activate_ability()
+            elif event.key == pygame.K_t:
+                # T key: activate one of the player's own manual-trigger Traps
+                # (time_anchor) — Stage 6.
+                self._try_activate_trap()
 
         elif event.type == pygame.MOUSEMOTION:
-            mx, my = event.pos
+            self._mouse_pos = event.pos
             if self._promotion_dialog is not None:
                 self._promotion_dialog.update_mouse(event.pos)
             self._sidebar.update_mouse(event.pos)
-            # Track hand-card hover (only when not inspecting a board unit)
-            if self._inspect_unit_pos is None:
-                obs = self._current_obs()
-                self._hovered_card_id = self._hand_view.card_from_click(
-                    mx, my, list(obs.own_hand)
-                )
+            self._card_viewer.update_mouse(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
@@ -250,8 +300,25 @@ class AppController:
                 self._handle_click(mx, my)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
-            # Right-click: inspect the unit at this board position (if any)
+            # Stage 6 (corrected): right-click sets the CardViewer's active
+            # card. Priority: an "Active in this zone" list entry > a hand
+            # card > a board square (unit / Trap-or-zone area).
             mx, my = event.pos
+            zone_card_id = self._card_viewer.zone_entry_from_click(mx, my)
+            if zone_card_id is not None:
+                self._viewer_card_id = zone_card_id
+                self._inspect_unit_pos = None
+                return
+
+            obs = self._current_obs()
+            if self._player_modes.get(obs.active_player) == "human":
+                hand_card_id = self._hand_view.card_from_click(mx, my, list(obs.own_hand))
+                if hand_card_id is not None:
+                    self._viewer_card_id = hand_card_id
+                    self._inspect_unit_pos = None
+                    self._zone_active_entries = None
+                    return
+
             pos = self._board_view.pos_from_click(mx, my)
             if pos is not None:
                 self._toggle_inspect(pos)
@@ -259,7 +326,13 @@ class AppController:
     # ── Click routing ─────────────────────────────────────────────────────
 
     def _handle_click(self, mx: int, my: int) -> None:
-        """Route a left-click to board, sidebar buttons, or hand strip."""
+        """Route a left-click to the CardViewer, sidebar buttons, board, or hand strip."""
+        # Stage 6: CardViewer ability buttons (left column) take top priority.
+        viewer_ability_id = self._card_viewer.handle_ability_click(mx, my)
+        if viewer_ability_id is not None:
+            self._do_activate_ability(viewer_ability_id, self._inspect_unit_pos)
+            return
+
         # Sidebar buttons take priority
         btn = self._sidebar.handle_click(mx, my)
         if btn == "export":
@@ -280,9 +353,16 @@ class AppController:
         if btn == "recompose":
             self._do_recompose()
             return
-        if btn is not None and btn.startswith("ability:"):
-            ability_id = btn[len("ability:"):]
-            self._do_activate_ability(ability_id)
+        if btn is not None and btn.startswith("trap:"):
+            # Stage 6: "⚡ Activatable" section — fire a manual Trap directly.
+            trap_instance_id = btn[len("trap:"):]
+            self._do_activate_trap_by_id(trap_instance_id)
+            return
+        if btn is not None and btn.startswith("ability_at:"):
+            # Stage 6: "⚡ Activatable" section — fire a monster ability on
+            # ANY unit, not just the currently-inspected one.
+            _, f, r, ability_id = btn.split(":", 3)
+            self._do_activate_ability(ability_id, Position(int(f), int(r)))
             return
 
         obs = self._current_obs()
@@ -404,6 +484,42 @@ class AppController:
                     # Clicked elsewhere — cancel summon mode
                     self._cancel_summon()
                     self._show_toast("Summon cancelled.")
+            elif self._targeting_card_id is not None:
+                # Stage 6: Trap-placement / Spell-area targeting mode —
+                # click a highlighted square → fire the matching action.
+                action = self._targeting_action_by_pos.get(pos)
+                self._cancel_targeting_mode()
+                if action is not None:
+                    self._execute_and_advance(action, active)
+                else:
+                    self._show_toast("Targeting cancelled.")
+            elif self._spell_piece_card_id is not None:
+                # Stage 6: two-step piece-targeting Spell mode.
+                if self._spell_piece_source is None:
+                    valid_sources = {
+                        tuple(a.target["position"]) for a in self._spell_piece_actions
+                    }
+                    if (pos.file, pos.rank) in valid_sources:
+                        self._spell_piece_source = pos
+                    else:
+                        self._cancel_spell_piece_mode()
+                        self._show_toast("Targeting cancelled.")
+                else:
+                    src_tuple = (self._spell_piece_source.file, self._spell_piece_source.rank)
+                    if pos == self._spell_piece_source:
+                        self._spell_piece_source = None  # deselect, stay in mode
+                        return
+                    match = next(
+                        (a for a in self._spell_piece_actions
+                         if tuple(a.target["position"]) == src_tuple
+                         and tuple(a.target["destination"]) == (pos.file, pos.rank)),
+                        None,
+                    )
+                    self._cancel_spell_piece_mode()
+                    if match is not None:
+                        self._execute_and_advance(match, active)
+                    else:
+                        self._show_toast("Targeting cancelled.")
             else:
                 # No summon mode: two-click model.
                 # • Piece click → select/deselect (preview moves, stay in PREP).
@@ -429,13 +545,18 @@ class AppController:
         • If the card is a MONSTER and not already selected: enter summon mode
           — compute valid vessel squares via legal actions and highlight them.
         • If the same monster card is already selected: cancel summon mode.
-        • Non-monster cards: show a toast explaining they aren't usable yet.
+        • TRAP cards: enter Trap-placement targeting mode (Stage 6).
+        • SPELL cards: dispatched by target_type (Stage 6) — see
+          _enter_spell_mode().
         """
-        from game.cards.card import MonsterCard
+        from game.cards.card import MonsterCard, SpellCard, TrapCard
 
-        # Toggle: clicking the already-selected card cancels summon mode.
-        if self._summon_card_id == card_id:
+        # Toggle: clicking the already-selected card cancels its mode.
+        if self._summon_card_id == card_id or self._targeting_card_id == card_id \
+                or self._spell_piece_card_id == card_id:
             self._cancel_summon()
+            self._cancel_targeting_mode()
+            self._cancel_spell_piece_mode()
             return
 
         # Look up the card in the registry
@@ -445,8 +566,21 @@ class AppController:
 
         card = self._registry.get(card_id)
 
+        if isinstance(card, TrapCard):
+            legal = self._game.get_legal_actions(obs.active_player)
+            matches = [
+                (a.position, a) for a in legal
+                if isinstance(a, PlaceTrap) and a.card_id == card_id
+            ]
+            self._enter_targeting_mode(card_id, card.name, matches)
+            return
+
+        if isinstance(card, SpellCard):
+            self._enter_spell_mode(card_id, card, obs)
+            return
+
         if not isinstance(card, MonsterCard):
-            self._show_toast("Only MON cards can be summoned — Spells/Traps coming soon.")
+            self._show_toast(f"{getattr(card, 'name', card_id)}: no UI support yet.")
             return
 
         # Enter summon mode: enumerate valid vessel positions from legal actions
@@ -476,6 +610,227 @@ class AppController:
         """Exit summon mode without firing any action."""
         self._summon_card_id = None
         self._summon_vessel_positions = []
+
+    def _cancel_targeting_mode(self) -> None:
+        """Exit Trap-placement / Spell-area-targeting mode without firing."""
+        self._targeting_card_id = None
+        self._targeting_action_by_pos = {}
+
+    def _cancel_spell_piece_mode(self) -> None:
+        """Exit the two-step piece-targeting Spell mode without firing."""
+        self._spell_piece_card_id = None
+        self._spell_piece_actions = []
+        self._spell_piece_source = None
+
+    def _compute_aura_colors(self, obs) -> "dict[Position, tuple[int, int, int]]":
+        """
+        Stage 6 — Position → RGB aura color for every summoned piece on the
+        board, keyed by its Monster's archetype (see ui/archetype_colors.py;
+        colors live in data/archetype_colors.yaml, unassigned archetypes
+        fall back to brown).  board_view.py only draws whatever it's given —
+        this is the one place that looks archetype up via the card registry.
+        """
+        colors: dict[Position, tuple[int, int, int]] = {}
+        for unit_info in obs.board.units:
+            if unit_info.monster_id is None:
+                continue
+            archetype = None
+            if self._registry is not None and unit_info.monster_id in self._registry:
+                try:
+                    card = self._registry.get(unit_info.monster_id)
+                    archetype = getattr(card, "archetype", None)
+                except Exception:
+                    archetype = None
+            colors[unit_info.position] = aura_color_for(archetype)
+        return colors
+
+    def _compute_playable_card_ids(self, obs) -> set[str]:
+        """
+        Stage 6 — card_ids in ``obs.active_player``'s hand that have at
+        least one legal action right now (SummonMonster / PlaceTrap /
+        ActivateSpell all carry ``card_id``).  Used to grey out hand cards
+        that currently have no valid vessel/square/target.
+        """
+        legal = self._game.get_legal_actions(obs.active_player)
+        return {
+            a.card_id for a in legal
+            if getattr(a, "card_id", None) is not None
+        }
+
+    def _compute_activatable_entries(self, obs) -> list[tuple[str, str]]:
+        """
+        Stage 6 — (label, token) pairs for every ActivateTrap /
+        ActivateMonsterAbility legal right now, across the WHOLE field —
+        not gated on the player having inspected that specific piece/Trap
+        first.  Consumed by SidebarOverlay's "⚡ Activatable" section and
+        routed back in _handle_click via the token.
+        """
+        from game.core.actions import ActivateMonsterAbility, ActivateTrap
+
+        entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for a in self._game.get_legal_actions(obs.active_player):
+            if isinstance(a, ActivateTrap):
+                token = f"trap:{a.trap_instance_id}"
+                if token in seen:
+                    continue
+                seen.add(token)
+                trap = next((t for t in obs.board.trap_locations if t.id == a.trap_instance_id), None)
+                name = trap.card_id.replace("_", " ").title() if trap else a.trap_instance_id
+                if trap is not None:
+                    try:
+                        name = self._registry.get(trap.card_id).name
+                    except Exception:
+                        pass
+                entries.append((f"⚡ {name} (Trap)", token))
+
+            elif isinstance(a, ActivateMonsterAbility):
+                token = f"ability_at:{a.unit_position.file}:{a.unit_position.rank}:{a.ability_id}"
+                if token in seen:
+                    continue
+                seen.add(token)
+                unit_info = next(
+                    (u for u in obs.board.units if u.position == a.unit_position), None
+                )
+                piece_label = unit_info.piece_id if unit_info else str(a.unit_position)
+                entries.append((
+                    f"⚡ {piece_label} — {a.ability_id.replace('_', ' ')}", token,
+                ))
+
+        return entries
+
+    def _trap_position(self, trap_instance_id: str, obs) -> Position | None:
+        """Look up a placed Trap's board position from its instance id."""
+        for trap in obs.board.trap_locations:
+            if trap.id == trap_instance_id:
+                return trap.position
+        return None
+
+    # ── Stage 6: hover tooltips (Trap / active zone info) ──────────────────
+
+    _ZONE_DESCRIPTIONS: dict[str, str] = {
+        "frozen":   "Frozen — no piece may enter this square.",
+        "scorched": "Scorched — destroys the next enemy that enters.",
+        "blocked":  "Blocked — no piece may enter this square.",
+        "cursed":   "Cursed — immobilizes the next piece that lands here.",
+    }
+
+    def _hover_tooltip_lines(self, hover_pos: Position, obs) -> list[tuple[str, tuple]]:
+        """
+        Build tooltip lines for the square under the mouse, in priority order:
+        exact Trap square > Trap activation area > active zone effect.
+
+        Identity/details are only shown for the viewer's OWN Traps/zones
+        (``owner == obs.player_id``) — an enemy Trap or zone shows only that
+        it exists, never its name, trigger, radius, charges, or effect type.
+        Returns [] if there's nothing to show.
+        """
+        from game.mechanics.area import expand_area
+
+        for trap in obs.board.trap_locations:
+            if trap.position == hover_pos:
+                if trap.owner != obs.player_id:
+                    return [("Enemy Trap", TOOLTIP_TITLE)]
+                lines: list[tuple[str, tuple]] = []
+                try:
+                    card = self._registry.get(trap.card_id)
+                    lines.append((card.name, TOOLTIP_TITLE))
+                except Exception:
+                    lines.append((trap.card_id.replace("_", " ").title(), TOOLTIP_TITLE))
+                lines.append((f"Owner: {trap.owner}", TOOLTIP_TEXT))
+                lines.append((f"Trigger: {trap.trigger_condition}", TOOLTIP_TEXT))
+                lines.append((f"Radius: {trap.radius} ({trap.shape})", TOOLTIP_TEXT))
+                charges_txt = "unlimited" if trap.charges is None else str(trap.charges)
+                lines.append((f"Charges left: {charges_txt}", TOOLTIP_TEXT))
+                return lines
+
+        for trap in obs.board.trap_locations:
+            area = expand_area(trap.position, trap.radius, trap.shape)
+            if hover_pos in area:
+                if trap.owner != obs.player_id:
+                    return [("Enemy Trap's activation area", TOOLTIP_TITLE)]
+                name = trap.card_id.replace("_", " ").title()
+                try:
+                    name = self._registry.get(trap.card_id).name
+                except Exception:
+                    pass
+                return [
+                    (f"{name}'s activation area", TOOLTIP_TITLE),
+                    (f"Owner: {trap.owner}  ·  triggers on {trap.trigger_condition}", TOOLTIP_TEXT),
+                ]
+
+        for eff in obs.board.square_effects:
+            if eff.position == hover_pos:
+                if eff.owner != obs.player_id:
+                    return [("Enemy zone", TOOLTIP_TITLE)]
+                desc = self._ZONE_DESCRIPTIONS.get(eff.effect_type, "")
+                lines = [(f"{eff.effect_type.title()} zone", TOOLTIP_TITLE)]
+                if desc:
+                    lines.append((desc, TOOLTIP_TEXT))
+                lines.append((f"Set by you  ·  {eff.duration_turns} turn(s) left", TOOLTIP_TEXT))
+                return lines
+
+        return []
+
+    def _enter_targeting_mode(
+        self,
+        card_id: str,
+        card_name: str,
+        matches: list[tuple[Position, object]],
+    ) -> None:
+        """
+        Stage 6 — enter single-click targeting mode for a Trap or Spell.
+
+        ``matches`` pairs every clickable square with the concrete Action
+        that clicking it should fire (PlaceTrap or ActivateSpell).
+        """
+        if not matches:
+            self._show_toast(f"{card_name}: no valid targets right now.")
+            return
+        self._cancel_summon()
+        self._cancel_spell_piece_mode()
+        self._targeting_card_id = card_id
+        self._targeting_action_by_pos = dict(matches)
+        self._show_toast(f"{card_name} — click a highlighted square  (ESC to cancel)")
+
+    def _enter_spell_mode(self, card_id: str, card, obs) -> None:
+        """Stage 6 — dispatch card-click handling for a Spell by target_type."""
+        active = obs.active_player
+        if card.target_type == "none":
+            action = ActivateSpell(player_id=active, card_id=card_id, target=None)
+            self._execute_and_advance(action, active)
+            return
+
+        legal = self._game.get_legal_actions(active)
+        spell_actions = [
+            a for a in legal if isinstance(a, ActivateSpell) and a.card_id == card_id
+        ]
+        if not spell_actions:
+            self._show_toast(f"{card.name}: no valid targets right now.")
+            return
+
+        if card.target_type == "trap":
+            matches = []
+            for a in spell_actions:
+                pos = self._trap_position(a.target, obs)
+                if pos is not None:
+                    matches.append((pos, a))
+            self._enter_targeting_mode(card_id, card.name, matches)
+
+        elif card.target_type in ("position", "zone"):
+            matches = [(Position(*a.target), a) for a in spell_actions]
+            self._enter_targeting_mode(card_id, card.name, matches)
+
+        elif card.target_type == "piece":
+            self._cancel_summon()
+            self._cancel_targeting_mode()
+            self._spell_piece_card_id = card_id
+            self._spell_piece_actions = spell_actions
+            self._spell_piece_source = None
+            self._show_toast(f"{card.name} — click your piece to move  (ESC to cancel)")
+
+        else:
+            self._show_toast(f"{card.name}: target type {card.target_type!r} not supported yet.")
 
     def _do_recompose(self) -> None:
         """
@@ -521,20 +876,98 @@ class AppController:
 
     def _toggle_inspect(self, pos: Position) -> None:
         """
-        Right-click on the board: toggle the card-info inspect panel for the
-        unit at ``pos`` (any unit — own or opponent).
+        Right-click on the board (Stage 6 — corrected):
 
-        • If the same pos is already inspected → clear (toggle off).
-        • If a different pos has a unit → set as inspected, clear hand hover.
-        • If the square is empty → clear inspect.
+        • A unit hosting a Monster → open it in the CardViewer directly
+          (toggle off if that exact unit is already open).
+        • A plain unit (no Monster) → nothing of its own to view, but it
+          may be standing inside an active zone — falls through to the
+          zone check below rather than clearing outright.
+        • The square is inside one or more of the player's OWN
+          active Trap/zone effects → populate the "Active in this zone"
+          list. This does NOT open the viewer itself — right-click one of
+          the list's entries for that (see zone_entry_from_click routing
+          in _handle_event).
+        • A square with only an ENEMY Trap/zone (nothing of the player's
+          own) → identity stays hidden; just a toast, matching the
+          "opponent sees only the zone" rule from the tint pass.
+        • Truly empty square → clear everything.
         """
         obs = self._current_obs()
-        has_unit = any(u.position == pos for u in obs.board.units)
-        if not has_unit or pos == self._inspect_unit_pos:
-            self._inspect_unit_pos = None
-        else:
-            self._inspect_unit_pos = pos
-            self._hovered_card_id = None  # board inspect takes priority
+        unit_here = next((u for u in obs.board.units if u.position == pos), None)
+
+        if unit_here is not None and unit_here.monster_id is not None:
+            self._zone_active_entries = None
+            if pos == self._inspect_unit_pos:
+                self._inspect_unit_pos = None
+                self._viewer_card_id = None
+            else:
+                self._inspect_unit_pos = pos
+                self._viewer_card_id = unit_here.monster_id
+            return
+
+        # Either no unit here, or a plain (non-Monster) unit that has
+        # nothing of its own to view — either way, check what's in the zone.
+        self._inspect_unit_pos = None
+
+        entries = self._collect_zone_entries(pos, obs)
+        if entries:
+            self._zone_active_entries = entries
+            self._viewer_card_id = None
+            return
+
+        self._zone_active_entries = None
+        self._viewer_card_id = None
+
+        has_enemy_only = (
+            any(t.position == pos for t in obs.board.trap_locations)
+            or any(e.position == pos for e in obs.board.square_effects)
+        )
+        if has_enemy_only:
+            self._show_toast("Enemy Trap/zone — identity hidden, only its area is visible.")
+
+    def _collect_zone_entries(self, pos: Position, obs) -> "list[tuple[str, str]]":
+        """
+        Stage 6 — (label, card_id) pairs for every one of the VIEWER's own
+        Traps whose activation area covers ``pos``, plus any of their own
+        active zone effects (frozen/scorched/blocked/cursed) sitting
+        exactly at ``pos``.  Feeds the CardViewer's "Active in this zone"
+        section.
+        """
+        from game.mechanics.area import expand_area
+
+        entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        for trap in obs.board.trap_locations:
+            if trap.owner != obs.player_id:
+                continue
+            if pos not in expand_area(trap.position, trap.radius, trap.shape):
+                continue
+            if trap.card_id in seen:
+                continue
+            seen.add(trap.card_id)
+            name = trap.card_id.replace("_", " ").title()
+            try:
+                name = self._registry.get(trap.card_id).name
+            except Exception:
+                pass
+            entries.append((f"🪤 {name}", trap.card_id))
+
+        for eff in obs.board.square_effects:
+            if eff.position != pos or eff.owner != obs.player_id or eff.card_id is None:
+                continue
+            if eff.card_id in seen:
+                continue
+            seen.add(eff.card_id)
+            name = eff.card_id.replace("_", " ").title()
+            try:
+                name = self._registry.get(eff.card_id).name
+            except Exception:
+                pass
+            entries.append((f"✨ {name} ({eff.effect_type})", eff.card_id))
+
+        return entries
 
     def _try_activate_ability(self) -> None:
         """
@@ -574,6 +1007,48 @@ class AppController:
             self._show_toast(
                 f"{len(abilities)} abilities available — click them in the sidebar."
             )
+
+    def _try_activate_trap(self) -> None:
+        """
+        T key — Stage 6: activate one of the player's own placed
+        ``trigger: manual`` Traps (time_anchor).  If exactly one is legal
+        right now, fire it directly; if several, point at the sidebar's
+        "⚡ Activatable" list (one clickable row per Trap) instead of
+        guessing which one you meant.
+        """
+        obs = self._current_obs()
+        if obs.phase != Phase.PREPARATION:
+            self._show_toast("Traps can only be activated during your own Preparation phase.")
+            return
+        active = obs.active_player
+        if self._player_modes.get(active) == "ai":
+            return
+
+        legal = self._game.get_legal_actions(active)
+        trap_actions = [a for a in legal if isinstance(a, ActivateTrap)]
+        if not trap_actions:
+            self._show_toast("No activatable Traps right now.")
+            return
+        if len(trap_actions) == 1:
+            self._do_activate_trap_by_id(trap_actions[0].trap_instance_id)
+        else:
+            self._show_toast(
+                f"{len(trap_actions)} Traps available — use the sidebar's ⚡ Activatable list."
+            )
+
+    def _do_activate_trap_by_id(self, trap_instance_id: str) -> None:
+        """Execute ActivateTrap for a specific Trap (T key or sidebar button)."""
+        obs = self._current_obs()
+        active = obs.active_player
+        if self._player_modes.get(active) == "ai":
+            return
+        action = ActivateTrap(player_id=active, trap_instance_id=trap_instance_id)
+        try:
+            self._game.execute(action)
+            self._auto_advance()
+            self._show_toast("⚡ Trap activated!")
+        except Exception as exc:
+            self._show_toast(f"Cannot activate Trap: {exc}")
 
     def _do_activate_ability(
         self,
@@ -691,6 +1166,8 @@ class AppController:
 
         self._deselect()
         self._cancel_summon()   # clear summon mode after any executed action
+        self._cancel_targeting_mode()
+        self._cancel_spell_piece_mode()
 
         # If a promotion is required, open the dialog
         obs = self._current_obs()
@@ -1067,6 +1544,21 @@ class AppController:
         board_summon_dests: list[Position] = []
         if self._summon_card_id is not None:
             board_summon_dests = self._summon_vessel_positions
+        elif self._targeting_card_id is not None:
+            # Stage 6: Trap-placement / Spell-area targeting — reuses the
+            # same gold-ring highlight channel as summon mode.
+            board_summon_dests = list(self._targeting_action_by_pos.keys())
+        elif self._spell_piece_card_id is not None:
+            if self._spell_piece_source is None:
+                board_summon_dests = [
+                    Position(*a.target["position"]) for a in self._spell_piece_actions
+                ]
+            else:
+                src_tuple = (self._spell_piece_source.file, self._spell_piece_source.rank)
+                board_summon_dests = [
+                    Position(*a.target["destination"]) for a in self._spell_piece_actions
+                    if tuple(a.target["position"]) == src_tuple
+                ]
 
         self._board_view.draw(
             observation=obs,
@@ -1076,7 +1568,15 @@ class AppController:
             checked_player=checked_player,
             summon_vessel_dests=board_summon_dests,
             inspect_pos=self._inspect_unit_pos,
+            aura_colors=self._compute_aura_colors(obs),
         )
+
+        # Stage 6: hover tooltip for Traps / active zone effects.
+        hover_pos = self._board_view.pos_from_click(*self._mouse_pos)
+        if hover_pos is not None:
+            tooltip_lines = self._hover_tooltip_lines(hover_pos, obs)
+            if tooltip_lines:
+                self._board_view.draw_tooltip(self._mouse_pos, tooltip_lines)
 
         # Sidebar (pass player modes, black-hand flag, and recompose button flag)
         active = obs.active_player
@@ -1087,48 +1587,50 @@ class AppController:
             and not self._game.state.get_player(active).preparation_action_used
         )
 
-        # ── Card info panel ────────────────────────────────────────────────
-        # Priority: board unit inspect > hand hover
-        card_info = None
+        # ── CardViewer (left sidebar) ───────────────────────────────────────
+        # Stage 6 (corrected): right-click driven only — hand cards, board
+        # units, and "Active in this zone" entries all set self._viewer_card_id
+        # directly (see _handle_event / _toggle_inspect).  Ability buttons +
+        # live statuses only apply when the viewer is showing a right-clicked
+        # SUMMONED unit (self._inspect_unit_pos set and matching).
         ability_ids: list[str] = []
         _unit_statuses: tuple = ()
-
-        if self._inspect_unit_pos is not None:
+        if self._inspect_unit_pos is not None and self._viewer_card_id is not None:
             unit_info = next(
                 (u for u in obs.board.units if u.position == self._inspect_unit_pos),
                 None,
             )
-            if unit_info is not None and unit_info.monster_id is not None:
-                try:
-                    card_info = self._registry.get(unit_info.monster_id)
-                except (KeyError, Exception):
-                    card_info = None
-                # Show ability buttons only for own pieces during CHESS
-                if (
-                    card_info is not None
-                    and unit_info.owner == active
-                    and obs.phase == Phase.CHESS
-                    and active_is_human
-                ):
+            if unit_info is not None and unit_info.monster_id == self._viewer_card_id:
+                if unit_info.owner == active and obs.phase == Phase.CHESS and active_is_human:
                     ability_ids = list(unit_info.activatable_effects)
-                # Always expose live statuses for the inspected unit
-                _unit_statuses = unit_info.statuses if unit_info is not None else ()
+                _unit_statuses = unit_info.statuses
+            else:
+                # Stale — the unit moved/changed since the right-click.
+                self._inspect_unit_pos = None
 
-        if card_info is None and self._hovered_card_id is not None:
-            try:
-                card_info = self._registry.get(self._hovered_card_id)
-            except (KeyError, Exception):
-                card_info = None
+        # Stage 6: hand playability (greying) + the global Activatable list —
+        # both only meaningful when it's actually this human's turn to act.
+        playable_card_ids: "set[str] | None" = None
+        activatable_entries: list[tuple[str, str]] = []
+        if active_is_human:
+            playable_card_ids = self._compute_playable_card_ids(obs)
+            activatable_entries = self._compute_activatable_entries(obs)
 
         self._sidebar.draw(
             obs,
             player_modes=self._player_modes,
             show_black_hand=self._show_black_hand,
             show_recompose_btn=show_recompose,
-            card_info=card_info,
-            ability_ids=ability_ids if ability_ids else None,
-            unit_statuses=_unit_statuses if card_info is not None else None,
+            activatable_entries=activatable_entries or None,
         )
+        self._card_viewer.draw(
+            self._viewer_card_id,
+            ability_ids=ability_ids if ability_ids else None,
+            unit_statuses=_unit_statuses,
+            zone_entries=self._zone_active_entries,
+            content_height=self._screen.get_height() - LOG_HEIGHT,
+        )
+        self._event_log_panel.draw(self._game.state.event_log, registry=self._registry)
 
         # Hand strip:
         # • Main row always shows the CURRENT HUMAN player's hand:
@@ -1156,11 +1658,15 @@ class AppController:
             if self._show_black_hand else None
         )
 
+        selected_card_id = (
+            self._summon_card_id or self._targeting_card_id or self._spell_piece_card_id
+        )
         self._hand_view.draw(
             hand_obs,
             opponent_cards=black_cards,
             discard_mode=(obs.phase == Phase.DISCARD and active_is_human),
-            selected_card_id=self._summon_card_id if active_is_human else None,
+            selected_card_id=selected_card_id if active_is_human else None,
+            playable_card_ids=playable_card_ids,
         )
 
         # Promotion dialog (on-board overlay)

@@ -27,6 +27,12 @@ def _draw_card(ctx: "EffectContext") -> None:
     IMPLEMENTED — draw ``count`` cards from deck.
 
     Handles deck-recycle (shuffle graveyard back) if deck is empty.
+
+    Stage 6: Traps (alarm_beacon) can target ``owner`` (the Trap owner)
+    rather than ``triggering_piece`` — mechanics.monsters._fire_trap()
+    supplies the Trap owner via ``ctx.extra["owner_override"]`` since
+    ``ctx.unit`` there is always the triggering (enemy) piece, not the
+    Trap owner.
     """
     from game.core.events import CardDrawn, DeckRecycled
 
@@ -35,11 +41,13 @@ def _draw_card(ctx: "EffectContext") -> None:
     if trigger not in ("on_summon", "on_move", "passive", ""):
         return
 
-    if ctx.unit is None or ctx.state is None:
+    owner = (ctx.extra or {}).get("owner_override")
+    if owner is None and ctx.unit is not None:
+        owner = ctx.unit.owner
+    if owner is None or ctx.state is None:
         return
 
-    owner = ctx.unit.owner
-    ps    = ctx.state.get_player(owner)
+    ps = ctx.state.get_player(owner)
     count = params.get("count", 1)
 
     for _ in range(count):

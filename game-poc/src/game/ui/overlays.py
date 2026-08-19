@@ -85,8 +85,8 @@ class SidebarOverlay:
         self._btn_black_hand: pygame.Rect | None = None
         self._btn_recompose: pygame.Rect | None = None
         self._mouse_pos: tuple[int, int] = (0, 0)
-        # Cached ability button rects: list of (ability_id, Rect)
-        self._ability_btn_rects: list[tuple[str, pygame.Rect]] = []
+        # Stage 6: cached "Activatable" row rects: list of (token, Rect)
+        self._activatable_btn_rects: list[tuple[str, pygame.Rect]] = []
 
     def update_mouse(self, pos: tuple[int, int]) -> None:
         self._mouse_pos = pos
@@ -100,7 +100,10 @@ class SidebarOverlay:
             'toggle_black'      — Toggle black player mode
             'toggle_black_hand' — Toggle black-hand debug view
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
-            'ability:<id>'      — Activate monster ability button (id = ability_id)
+            'trap:<id>'         — Stage 6: Activatable-section Trap button (id = trap_instance_id)
+            'ability_at:<f>:<r>:<id>' — Stage 6: Activatable-section monster ability
+                                 button, naming the piece's position since the
+                                 Activatable list spans every unit, not just one
             None                — missed all buttons
         """
         if self._btn_export and self._btn_export.collidepoint(mx, my):
@@ -115,9 +118,9 @@ class SidebarOverlay:
             return "toggle_black_hand"
         if self._btn_recompose and self._btn_recompose.collidepoint(mx, my):
             return "recompose"
-        for ability_id, rect in self._ability_btn_rects:
+        for token, rect in self._activatable_btn_rects:
             if rect.collidepoint(mx, my):
-                return f"ability:{ability_id}"
+                return token
         return None
 
     def draw(
@@ -126,9 +129,7 @@ class SidebarOverlay:
         player_modes: dict | None = None,
         show_black_hand: bool = False,
         show_recompose_btn: bool = False,
-        card_info: "AnyCard | None" = None,
-        ability_ids: "list[str] | None" = None,
-        unit_statuses: "tuple[str, ...] | None" = None,
+        activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
         """
         Render the sidebar based on the current observation.
@@ -136,13 +137,11 @@ class SidebarOverlay:
         ``player_modes``       — optional dict mapping player_id → "human" | "ai".
         ``show_black_hand``    — when True, the black-hand toggle button is shown active.
         ``show_recompose_btn`` — when True, the Recompose button is drawn and clickable.
-        ``card_info``          — when set, a card description panel is drawn at the
-                                 bottom of the main info block (hovered card or
-                                 selected monster).
-        ``ability_ids``        — list of activatable ability IDs on the inspected
-                                 monster; one clickable button is drawn per ability.
-        ``unit_statuses``      — live statuses tuple from the inspected unit; shown
-                                 in the card info panel so copied effects are visible.
+        ``activatable_entries``— Stage 6: (label, token) pairs for every currently
+                                 activatable Trap/Monster-ability "in the field".
+                                 One clickable row per entry; ``handle_click``
+                                 returns the token verbatim. (Card detail itself
+                                 lives in the left CardViewer, not here.)
         """
         modes = player_modes or {}
 
@@ -273,6 +272,28 @@ class SidebarOverlay:
         y = self._draw_kv("Opp hand", str(obs.opponent_hand_count), y)
         y = self._draw_kv("Opp deck", str(obs.opponent_deck_count), y)
 
+        # ── Stage 6: Activatable — every Trap/Monster-ability the player can
+        # fire right now, "in the field" — not just on an inspected piece.
+        self._activatable_btn_rects = []
+        if activatable_entries:
+            y += 12
+            y = self._draw_divider(y)
+            y += 6
+            y = self._draw_line("⚡ Activatable", self._font_small, HUD_LABEL, y, center=False)
+            y += 2
+            for label, token in activatable_entries:
+                row_rect = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+                hover = row_rect.collidepoint(self._mouse_pos)
+                pygame.draw.rect(self._surface, DIALOG_HOVER if hover else DIALOG_BG,
+                                 row_rect, border_radius=4)
+                pygame.draw.rect(self._surface, (80, 220, 220), row_rect, 1, border_radius=4)
+                lbl_surf = self._font_small.render(label, True, (80, 220, 220))
+                self._surface.blit(lbl_surf, (
+                    row_rect.x + 6, row_rect.y + (self.BTN_H - lbl_surf.get_height()) // 2,
+                ))
+                self._activatable_btn_rects.append((token, row_rect))
+                y += self.BTN_H + 3
+
         # Recompose button — only shown during PREPARATION for a human player
         if show_recompose_btn:
             y += 8
@@ -293,23 +314,9 @@ class SidebarOverlay:
         else:
             self._btn_recompose = None
 
-        # ── Card info panel OR controls hint at the bottom ─────────────────
-        # _draw_controls_hint always places the Export/Import buttons at a
-        # fixed absolute position at the very bottom of the sidebar.
-        # When card info is present: draw the card panel first (it fills its
-        # region with a solid DIALOG_BG background), then redraw only the
-        # buttons on top so they remain visible and clickable.
-        # When no card info: draw the full hint strip + buttons.
-        self._ability_btn_rects = []
-        if card_info is not None:
-            y += 12
-            y = self._draw_divider(y)
-            y += 6
-            self._draw_card_info_panel(y, card_info, ability_ids or [], unit_statuses or ())
-            # Redraw only the Export/Import buttons on top of the card panel
-            self._draw_controls_hint(draw_hints=False)
-        else:
-            self._draw_controls_hint()
+        # Controls hint + Export/Import buttons at the fixed bottom position.
+        # (Card detail now lives entirely in the left CardViewer.)
+        self._draw_controls_hint()
 
     # ── Private helpers ───────────────────────────────────────────────────
 
@@ -351,190 +358,6 @@ class SidebarOverlay:
             1,
         )
         return y + 1
-
-    def _draw_card_info_panel(
-        self,
-        y: int,
-        card: "AnyCard",
-        ability_ids: list[str],
-        unit_statuses: "tuple[str, ...]" = (),
-    ) -> int:
-        """
-        Draw a compact card description panel below the main info block.
-
-        Shows:
-          • Card name (bold via font_large if it fits, else font_small)
-          • Type badge + archetype (monsters only)
-          • Effect list (truncated to sidebar width)
-          • Description (word-wrapped, max 4 lines)
-          • One clickable [⚡ Activate] button per activatable ability
-            (CHESS phase only — caller decides when to pass ability_ids)
-
-        Returns the y position after the panel.
-        """
-        from game.cards.card import CardType, MonsterCard, SpellCard, TrapCard
-
-        inner_w = self.SIDEBAR_WIDTH - self.PADDING * 2
-        text_x = self._x + self.PADDING
-
-        # ── Solid background so text doesn't bleed over underlying content ──
-        # Stop just above the Export/Import button block so those buttons
-        # remain visible when redrawn on top by _draw_controls_hint.
-        btn_block = self.BTN_H * 2 + self.PADDING * 3
-        panel_bottom = self._surface.get_height() - btn_block
-        panel_rect = pygame.Rect(
-            self._x, y - 4,
-            self.SIDEBAR_WIDTH,
-            panel_bottom - (y - 4),
-        )
-        pygame.draw.rect(self._surface, DIALOG_BG, panel_rect)
-        # Thin top border to visually separate from the info block above
-        pygame.draw.line(
-            self._surface, DIALOG_BORDER,
-            (self._x + self.PADDING, y - 3),
-            (self._x + self.SIDEBAR_WIDTH - self.PADDING, y - 3),
-            1,
-        )
-
-        # ── Name ──────────────────────────────────────────────────────────
-        name_surf = self._font.render(card.name, True, HUD_TEXT)
-        if name_surf.get_width() <= inner_w:
-            self._surface.blit(name_surf, (text_x, y))
-            y += name_surf.get_height() + 2
-        else:
-            name_surf = self._font_small.render(card.name, True, HUD_TEXT)
-            self._surface.blit(name_surf, (text_x, y))
-            y += name_surf.get_height() + 2
-
-        # ── Type badge + archetype ─────────────────────────────────────────
-        if card.card_type == CardType.MONSTER:
-            badge_color = (200, 100, 100)
-            badge = f"MON"
-            archetype = getattr(card, "archetype", "")
-            arch_line = f"{badge}  {archetype}" if archetype else badge
-        elif card.card_type == CardType.SPELL:
-            badge_color = (80, 140, 220)
-            spell_type = getattr(card, "spell_type", None)
-            arch_line = f"SPC  {spell_type.value}" if spell_type else "SPC"
-        else:
-            badge_color = (160, 100, 220)
-            trigger = getattr(card, "trigger", None)
-            arch_line = f"TRP  {trigger.value}" if trigger else "TRP"
-
-        badge_surf = self._font_small.render(arch_line, True, badge_color)
-        self._surface.blit(badge_surf, (text_x, y))
-        y += badge_surf.get_height() + 4
-
-        # ── Effects ───────────────────────────────────────────────────────
-        effects = getattr(card, "effects", [])
-        if effects:
-            eff_header = self._font_small.render("Effects:", True, HUD_LABEL)
-            self._surface.blit(eff_header, (text_x, y))
-            y += eff_header.get_height() + 1
-            for eff in effects[:4]:    # cap at 4 lines
-                eff_name = eff.type.replace("_", " ")
-                eff_surf = self._font_small.render(f"• {eff_name}", True, (160, 200, 160))
-                if eff_surf.get_width() > inner_w:
-                    # truncate
-                    txt = eff_name
-                    while txt and self._font_small.render(f"• {txt}…", True, (0,0,0)).get_width() > inner_w:
-                        txt = txt[:-1]
-                    eff_surf = self._font_small.render(f"• {txt}…", True, (160, 200, 160))
-                self._surface.blit(eff_surf, (text_x + 4, y))
-                y += eff_surf.get_height() + 1
-            if len(effects) > 4:
-                more_surf = self._font_small.render(f"  +{len(effects)-4} more", True, HUD_LABEL)
-                self._surface.blit(more_surf, (text_x + 4, y))
-                y += more_surf.get_height() + 1
-            y += 2
-
-        # ── Live unit statuses (only for board-inspected units) ───────────
-        # Filter to statuses a player would care about; skip internal bookkeeping.
-        _HIDE_STATUS_PREFIXES = ("builder_available",)
-        display_statuses = [
-            s for s in unit_statuses
-            if not any(s.startswith(p) for p in _HIDE_STATUS_PREFIXES)
-        ]
-        if display_statuses:
-            st_header = self._font_small.render("Active:", True, HUD_LABEL)
-            self._surface.blit(st_header, (text_x, y))
-            y += st_header.get_height() + 1
-            for status in display_statuses:
-                # Pretty-print: "copied_effect:alter_movement" → "⟳ alter movement"
-                if status.startswith("copied_effect:"):
-                    label = "⟳ " + status[len("copied_effect:"):].replace("_", " ")
-                    color = (120, 220, 255)
-                elif status.startswith("challenge_issued:"):
-                    label = "⚔ challenge issued"
-                    color = (255, 160, 60)
-                elif ":" in status:
-                    key, _, val = status.partition(":")
-                    label = f"{key.replace('_', ' ')}: {val}"
-                    color = (180, 180, 180)
-                else:
-                    label = status.replace("_", " ")
-                    color = (180, 180, 180)
-                st_surf = self._font_small.render(f"  {label}", True, color)
-                self._surface.blit(st_surf, (text_x + 4, y))
-                y += st_surf.get_height() + 1
-            y += 2
-
-        # ── Description (word-wrap) ────────────────────────────────────────
-        desc = getattr(card, "description", "") or ""
-        desc = desc.strip()
-        if desc:
-            desc_header = self._font_small.render("About:", True, HUD_LABEL)
-            self._surface.blit(desc_header, (text_x, y))
-            y += desc_header.get_height() + 1
-            # Simple word-wrap: split on spaces, emit up to 4 lines
-            words = desc.split()
-            line: list[str] = []
-            lines_drawn = 0
-            max_lines = 5
-            for word in words:
-                test = " ".join(line + [word])
-                if self._font_small.render(test, True, (0, 0, 0)).get_width() > inner_w:
-                    if line:
-                        row_surf = self._font_small.render(" ".join(line), True, HUD_LABEL)
-                        self._surface.blit(row_surf, (text_x, y))
-                        y += row_surf.get_height() + 1
-                        lines_drawn += 1
-                        if lines_drawn >= max_lines:
-                            break
-                        line = [word]
-                    else:
-                        line = [word]
-                else:
-                    line.append(word)
-            if line and lines_drawn < max_lines:
-                row_surf = self._font_small.render(" ".join(line), True, HUD_LABEL)
-                self._surface.blit(row_surf, (text_x, y))
-                y += row_surf.get_height() + 1
-            y += 4
-
-        # ── Activatable ability buttons ────────────────────────────────────
-        if ability_ids:
-            y = self._draw_divider(y)
-            y += 4
-            act_header = self._font_small.render("Abilities:", True, (80, 220, 220))
-            self._surface.blit(act_header, (text_x, y))
-            y += act_header.get_height() + 3
-            btn_w = inner_w
-            for ability_id in ability_ids:
-                btn_label = f"⚡ {ability_id.replace('_', ' ')}"
-                btn_rect = pygame.Rect(text_x, y, btn_w, self.BTN_H)
-                hover = btn_rect.collidepoint(self._mouse_pos)
-                pygame.draw.rect(self._surface, DIALOG_HOVER if hover else DIALOG_BG, btn_rect, border_radius=4)
-                pygame.draw.rect(self._surface, (80, 220, 220), btn_rect, 1, border_radius=4)
-                btn_surf = self._font_small.render(btn_label, True, (80, 220, 220))
-                self._surface.blit(btn_surf, (
-                    btn_rect.x + (btn_w - btn_surf.get_width()) // 2,
-                    btn_rect.y + (self.BTN_H - btn_surf.get_height()) // 2,
-                ))
-                self._ability_btn_rects.append((ability_id, btn_rect))
-                y += self.BTN_H + 3
-
-        return y
 
     def _draw_controls_hint(self, draw_hints: bool = True) -> None:
         """Draw keyboard hints and the Export/Import buttons at the bottom of the sidebar.
@@ -583,6 +406,385 @@ class SidebarOverlay:
             lx = btn.x + (btn.width - lsurf.get_width()) // 2
             ly = btn.y + (btn.height - lsurf.get_height()) // 2
             self._surface.blit(lsurf, (lx, ly))
+
+
+class CardViewer:
+    """
+    Stage 6 (corrected) — dedicated LEFT sidebar: shows ONE card's full
+    detail — name, type badge, effects, live statuses, description, and
+    activatable-ability buttons — exactly like the old hover-driven panel
+    used to, except selection is RIGHT-CLICK, never hover (hover proved
+    unreliable). AppController owns which card is "active"; this class only
+    renders it. Set it by right-clicking:
+
+        • a card in your hand
+        • a summoned piece on the board (shows its Monster + live statuses
+          + ability buttons, same as before)
+        • an entry in the "Active in this zone" list below (see next point)
+
+    Right-clicking a board square that carries one or more of YOUR OWN
+    active Trap/Spell effects (a Trap's activation area, or a persistent
+    zone like frozen/scorched/blocked/cursed) does NOT open the viewer
+    directly — it populates the "Active in this zone" list here instead;
+    right-clicking one of ITS entries is what opens that card in the
+    viewer above. (An empty list / no card selected shows a hint instead.)
+    """
+
+    PADDING: int = 10
+    BTN_H: int = 26
+    IMAGE_BOX_H: int = 130
+    _TYPE_BADGES: dict = {
+        "monster": ("MON", (200, 100, 100)),
+        "spell":   ("SPC", (80, 140, 220)),
+        "trap":    ("TRP", (160, 100, 220)),
+    }
+
+    def __init__(
+        self,
+        surface: pygame.Surface,
+        font: Any,
+        font_small: Any,
+        width: int,
+        registry: "object | None" = None,
+        images_dir: "Any | None" = None,
+    ) -> None:
+        self._surface = surface
+        self._font = font
+        self._font_small = font_small
+        self._width = width
+        self._registry = registry
+        self._images_dir = images_dir  # Path — see data/images/README.md
+        self._mouse_pos: tuple[int, int] = (0, 0)
+        # image_path -> loaded Surface, or None if load failed/missing
+        # (cached so we don't re-hit the filesystem every frame).
+        self._image_cache: "dict[str, Any]" = {}
+        # Cached rects — populated each draw() call.
+        self._ability_btn_rects: list[tuple[str, pygame.Rect]] = []
+        self._zone_entry_rects: list[tuple[str, pygame.Rect]] = []
+
+    def update_mouse(self, pos: tuple[int, int]) -> None:
+        self._mouse_pos = pos
+
+    def handle_ability_click(self, mx: int, my: int) -> str | None:
+        """LEFT-click hit-test for the ability buttons. Returns the ability_id."""
+        for ability_id, rect in self._ability_btn_rects:
+            if rect.collidepoint(mx, my):
+                return ability_id
+        return None
+
+    def zone_entry_from_click(self, mx: int, my: int) -> str | None:
+        """
+        RIGHT-click hit-test for the "Active in this zone" list. Returns
+        the card_id of the entry clicked, so the caller can open it in the
+        viewer.
+        """
+        for card_id, rect in self._zone_entry_rects:
+            if rect.collidepoint(mx, my):
+                return card_id
+        return None
+
+    def draw(
+        self,
+        card_id: str | None,
+        ability_ids: "list[str] | None" = None,
+        unit_statuses: "tuple[str, ...]" = (),
+        zone_entries: "list[tuple[str, str]] | None" = None,
+        content_height: "int | None" = None,
+    ) -> None:
+        """
+        ``card_id``       — the card to show, or None for the empty state.
+        ``ability_ids``   — activatable abilities on the inspected unit
+                            (only meaningful when card_id came from a
+                            right-clicked board piece); one button each.
+        ``unit_statuses`` — live statuses of that inspected unit.
+        ``zone_entries``  — (label, card_id) pairs for the "Active in this
+                            zone" section from a right-clicked Trap/zone
+                            square; None hides the section entirely.
+        ``content_height`` — pixel height this panel is allowed to draw
+                            into, measured from the top of the surface.
+                            Defaults to the full surface height (the old
+                            behaviour). Pass the boundary above the
+                            EventLogPanel's strip (see ui/event_log.py) so
+                            the two never overlap — content that would run
+                            past it is clipped rather than drawn over the
+                            log.
+        """
+        full_h = self._surface.get_height()
+        h = content_height if content_height is not None else full_h
+        rect = pygame.Rect(0, 0, self._width, h)
+        pygame.draw.rect(self._surface, SIDEBAR_BG, rect)
+        pygame.draw.line(self._surface, DIALOG_BORDER, (self._width, 0), (self._width, h), 1)
+
+        prev_clip = self._surface.get_clip()
+        self._surface.set_clip(pygame.Rect(0, 0, self._width, h))
+        try:
+            x = self.PADDING
+            y = self.PADDING
+            header = self._font_small.render("Card Viewer", True, HUD_LABEL)
+            self._surface.blit(header, (x, y))
+            y += header.get_height() + 6
+            y = self._draw_divider(y)
+            y += 8
+
+            self._ability_btn_rects = []
+
+            card = None
+            if card_id is not None and self._registry is not None and card_id in self._registry:
+                try:
+                    card = self._registry.get(card_id)
+                except Exception:
+                    card = None
+
+            if card is None:
+                for line in ("Right-click a card, piece,", "or Trap zone to inspect it."):
+                    hint = self._font_small.render(line, True, HUD_LABEL)
+                    self._surface.blit(hint, (x, y))
+                    y += hint.get_height() + 2
+                y += 6
+            else:
+                y = self._draw_card_block(x, y, card, ability_ids or [], unit_statuses)
+
+            self._zone_entry_rects = []
+            if zone_entries:
+                y += 4
+                y = self._draw_divider(y)
+                y += 6
+                zh = self._font_small.render("Active in this zone:", True, HUD_LABEL)
+                self._surface.blit(zh, (x, y))
+                y += zh.get_height() + 4
+
+                row_w = self._width - self.PADDING * 2
+                for label, entry_card_id in zone_entries:
+                    row_rect = pygame.Rect(x, y, row_w, self.BTN_H)
+                    hover = row_rect.collidepoint(self._mouse_pos)
+                    is_active = entry_card_id == card_id
+                    bg = DIALOG_HOVER if hover else DIALOG_BG
+                    border = (255, 210, 0) if is_active else DIALOG_BORDER
+                    pygame.draw.rect(self._surface, bg, row_rect, border_radius=4)
+                    pygame.draw.rect(self._surface, border, row_rect, 1, border_radius=4)
+                    lbl_surf = self._font_small.render(label, True, HUD_TEXT)
+                    self._surface.blit(lbl_surf, (
+                        row_rect.x + 6, row_rect.y + (self.BTN_H - lbl_surf.get_height()) // 2,
+                    ))
+                    self._zone_entry_rects.append((entry_card_id, row_rect))
+                    y += self.BTN_H + 3
+
+                hint = self._font_small.render("(right-click an entry to view)", True, HUD_LABEL)
+                self._surface.blit(hint, (x, y))
+                y += hint.get_height() + 4
+
+            # Content that got clipped out visually must not stay clickable.
+            self._ability_btn_rects = [
+                (aid, r) for aid, r in self._ability_btn_rects if r.bottom <= h
+            ]
+            self._zone_entry_rects = [
+                (cid, r) for cid, r in self._zone_entry_rects if r.bottom <= h
+            ]
+        finally:
+            self._surface.set_clip(prev_clip)
+
+    def _draw_divider(self, y: int) -> int:
+        pygame.draw.line(
+            self._surface, DIALOG_BORDER,
+            (self.PADDING, y), (self._width - self.PADDING, y), 1,
+        )
+        return y + 1
+
+    def _get_image(self, card: "AnyCard") -> "pygame.Surface | None":
+        """
+        Load (and cache) ``card``'s artwork from data/images/, or None if
+        it's missing/unloadable — the caller draws the "No Image Available"
+        placeholder in that case.  A missing file is expected right now
+        (see data/images/README.md) and must never raise.
+        """
+        path = getattr(card, "image_path", "") or ""
+        if not path or self._images_dir is None:
+            return None
+        if path in self._image_cache:
+            return self._image_cache[path]
+
+        surf = None
+        try:
+            full_path = self._images_dir / path
+            if full_path.is_file():
+                surf = pygame.image.load(str(full_path)).convert_alpha()
+        except Exception:
+            surf = None
+        self._image_cache[path] = surf
+        return surf
+
+    def _draw_image_box(self, x: int, y: int, card: "AnyCard", inner_w: int) -> int:
+        """Draw the card's artwork, scaled to fit, or a placeholder box."""
+        box_h = self.IMAGE_BOX_H
+        box_rect = pygame.Rect(x, y, inner_w, box_h)
+        pygame.draw.rect(self._surface, DIALOG_BG, box_rect, border_radius=4)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, box_rect, 1, border_radius=4)
+
+        img = self._get_image(card)
+        if img is not None:
+            iw, ih = img.get_size()
+            if iw > 0 and ih > 0:
+                scale = min((inner_w - 8) / iw, (box_h - 8) / ih)
+                new_w = max(1, int(iw * scale))
+                new_h = max(1, int(ih * scale))
+                scaled = pygame.transform.smoothscale(img, (new_w, new_h))
+                self._surface.blit(scaled, (
+                    x + (inner_w - new_w) // 2, y + (box_h - new_h) // 2,
+                ))
+        else:
+            label1 = self._font_small.render("No Image", True, HUD_LABEL)
+            label2 = self._font_small.render("Available", True, HUD_LABEL)
+            cx = x + inner_w // 2
+            cy = y + box_h // 2
+            self._surface.blit(label1, (cx - label1.get_width() // 2, cy - label1.get_height() - 1))
+            self._surface.blit(label2, (cx - label2.get_width() // 2, cy + 1))
+
+        return y + box_h + 8
+
+    def _draw_card_block(
+        self,
+        x: int,
+        y: int,
+        card: "AnyCard",
+        ability_ids: list[str],
+        unit_statuses: "tuple[str, ...]",
+    ) -> int:
+        """Adapted from the old hover panel's layout — see module history."""
+        from game.cards.card import CardType
+
+        inner_w = self._width - self.PADDING * 2
+
+        # ── Name ──────────────────────────────────────────────────────────
+        name_surf = self._font.render(card.name, True, HUD_TEXT)
+        if name_surf.get_width() > inner_w:
+            name_surf = self._font_small.render(card.name, True, HUD_TEXT)
+        self._surface.blit(name_surf, (x, y))
+        y += name_surf.get_height() + 2
+
+        # ── Type badge + archetype/spell-type/trigger ───────────────────────
+        if card.card_type == CardType.MONSTER:
+            badge_color = (200, 100, 100)
+            archetype = getattr(card, "archetype", "")
+            arch_line = f"MON  {archetype}" if archetype else "MON"
+        elif card.card_type == CardType.SPELL:
+            badge_color = (80, 140, 220)
+            spell_type = getattr(card, "spell_type", None)
+            arch_line = f"SPC  {spell_type.value}" if spell_type else "SPC"
+        else:
+            badge_color = (160, 100, 220)
+            trigger = getattr(card, "trigger", None)
+            arch_line = f"TRP  {trigger.value}" if trigger else "TRP"
+        badge_surf = self._font_small.render(arch_line, True, badge_color)
+        self._surface.blit(badge_surf, (x, y))
+        y += badge_surf.get_height() + 4
+
+        # ── Image (Stage 6) ──────────────────────────────────────────────
+        y = self._draw_image_box(x, y, card, inner_w)
+
+        # ── Effects ───────────────────────────────────────────────────────
+        effects = getattr(card, "effects", [])
+        if effects:
+            eff_header = self._font_small.render("Effects:", True, HUD_LABEL)
+            self._surface.blit(eff_header, (x, y))
+            y += eff_header.get_height() + 1
+            for eff in effects[:4]:
+                eff_name = eff.type.replace("_", " ")
+                eff_surf = self._font_small.render(f"• {eff_name}", True, (160, 200, 160))
+                if eff_surf.get_width() > inner_w:
+                    txt = eff_name
+                    while txt and self._font_small.render(f"• {txt}…", True, (0, 0, 0)).get_width() > inner_w:
+                        txt = txt[:-1]
+                    eff_surf = self._font_small.render(f"• {txt}…", True, (160, 200, 160))
+                self._surface.blit(eff_surf, (x + 4, y))
+                y += eff_surf.get_height() + 1
+            if len(effects) > 4:
+                more_surf = self._font_small.render(f"  +{len(effects) - 4} more", True, HUD_LABEL)
+                self._surface.blit(more_surf, (x + 4, y))
+                y += more_surf.get_height() + 1
+            y += 2
+
+        # ── Live unit statuses (only when viewing a board-inspected unit) ──
+        _HIDE_STATUS_PREFIXES = ("builder_available",)
+        display_statuses = [
+            s for s in unit_statuses
+            if not any(s.startswith(p) for p in _HIDE_STATUS_PREFIXES)
+        ]
+        if display_statuses:
+            st_header = self._font_small.render("Active:", True, HUD_LABEL)
+            self._surface.blit(st_header, (x, y))
+            y += st_header.get_height() + 1
+            for status in display_statuses:
+                if status.startswith("copied_effect:"):
+                    label = "⟳ " + status[len("copied_effect:"):].replace("_", " ")
+                    color = (120, 220, 255)
+                elif status.startswith("challenge_issued:"):
+                    label = "⚔ challenge issued"
+                    color = (255, 160, 60)
+                elif ":" in status:
+                    key, _, val = status.partition(":")
+                    label = f"{key.replace('_', ' ')}: {val}"
+                    color = (180, 180, 180)
+                else:
+                    label = status.replace("_", " ")
+                    color = (180, 180, 180)
+                st_surf = self._font_small.render(f"  {label}", True, color)
+                self._surface.blit(st_surf, (x + 4, y))
+                y += st_surf.get_height() + 1
+            y += 2
+
+        # ── Description (word-wrap) ────────────────────────────────────────
+        desc = (getattr(card, "description", "") or "").strip()
+        if desc:
+            desc_header = self._font_small.render("About:", True, HUD_LABEL)
+            self._surface.blit(desc_header, (x, y))
+            y += desc_header.get_height() + 1
+            words = desc.split()
+            line: list[str] = []
+            lines_drawn = 0
+            max_lines = 6
+            for word in words:
+                test = " ".join(line + [word])
+                if self._font_small.render(test, True, (0, 0, 0)).get_width() > inner_w:
+                    if line:
+                        row_surf = self._font_small.render(" ".join(line), True, HUD_LABEL)
+                        self._surface.blit(row_surf, (x, y))
+                        y += row_surf.get_height() + 1
+                        lines_drawn += 1
+                        if lines_drawn >= max_lines:
+                            break
+                        line = [word]
+                    else:
+                        line = [word]
+                else:
+                    line.append(word)
+            if line and lines_drawn < max_lines:
+                row_surf = self._font_small.render(" ".join(line), True, HUD_LABEL)
+                self._surface.blit(row_surf, (x, y))
+                y += row_surf.get_height() + 1
+            y += 4
+
+        # ── Activatable ability buttons (LEFT-click) ────────────────────────
+        if ability_ids:
+            y = self._draw_divider(y)
+            y += 4
+            act_header = self._font_small.render("Abilities:", True, (80, 220, 220))
+            self._surface.blit(act_header, (x, y))
+            y += act_header.get_height() + 3
+            for ability_id in ability_ids:
+                btn_label = f"⚡ {ability_id.replace('_', ' ')}"
+                btn_rect = pygame.Rect(x, y, inner_w, self.BTN_H)
+                hover = btn_rect.collidepoint(self._mouse_pos)
+                pygame.draw.rect(self._surface, DIALOG_HOVER if hover else DIALOG_BG, btn_rect, border_radius=4)
+                pygame.draw.rect(self._surface, (80, 220, 220), btn_rect, 1, border_radius=4)
+                btn_surf = self._font_small.render(btn_label, True, (80, 220, 220))
+                self._surface.blit(btn_surf, (
+                    btn_rect.x + (inner_w - btn_surf.get_width()) // 2,
+                    btn_rect.y + (self.BTN_H - btn_surf.get_height()) // 2,
+                ))
+                self._ability_btn_rects.append((ability_id, btn_rect))
+                y += self.BTN_H + 3
+
+        return y
 
 
 class PromotionDialog:

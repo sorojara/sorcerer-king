@@ -5,9 +5,20 @@ mechanics/effects/defense.py — DEFENSE category
 Effect types in this category
 ------------------------------
 capture_protection  IMPLEMENTED  — absorb N capture attempts (shield:N status)
-trap_immunity       STUB         — ignore first trap trigger (Stage 8+)
-intercept           STUB         — block attack targeting adjacent king (Stage 9+)
-retaliate           STUB         — destroy attacker when this unit is captured (Stage 7+)
+trap_immunity       IMPLEMENTED  — ignore the first Trap effect that would
+                                    affect this unit (ancient_tortoise); the
+                                    flag is set here, consumed in
+                                    mechanics.monsters.check_enter_radius_traps()
+                                    / check_capture_traps() (Stage 6)
+intercept           STUB         — block attack targeting adjacent king
+                                    (needs Final Duel / King targeting infra)
+retaliate           IMPLEMENTED  — destroy attacker when this unit is captured
+                                    (thorn_boar; consumed in rules.py's
+                                    _execute_move_piece right after the
+                                    capture is resolved)
+capture_vulnerability IMPLEMENTED — Stage 6: "Exposed" — bypasses
+                                    capture_protection for a few turns
+                                    (pit_trap, counter_strike)
 """
 
 from __future__ import annotations
@@ -120,12 +131,34 @@ def _retaliate(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# capture_vulnerability  (Stage 6 — pit_trap, counter_strike)
+# ---------------------------------------------------------------------------
+
+def _capture_vulnerability(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — Stage 6 Trap effect ("Exposed").
+
+    Flags the target as "exposed:<duration_turns>" — while exposed, its
+    capture_protection shield (if any) does NOT block an incoming capture;
+    see mechanics.monsters.apply_capture_protection(), which checks this
+    status before consuming a shield charge.  Decays on the unit OWNER's
+    own EndTurn, same as immobilize_piece.
+    """
+    if ctx.unit is None:
+        return
+    duration = ctx.effect.params.get("duration_turns", 1)
+    ctx.unit.statuses = [s for s in ctx.unit.statuses if not s.startswith("exposed:")]
+    ctx.unit.add_status(f"exposed:{duration}")
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
 DEFENSE_HANDLERS: dict[str, object] = {
-    "capture_protection": _capture_protection,
-    "trap_immunity":      _trap_immunity,
-    "intercept":          _intercept,
-    "retaliate":          _retaliate,
+    "capture_protection":    _capture_protection,
+    "trap_immunity":         _trap_immunity,
+    "intercept":             _intercept,
+    "retaliate":             _retaliate,
+    "capture_vulnerability": _capture_vulnerability,
 }

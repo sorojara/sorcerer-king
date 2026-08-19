@@ -7,25 +7,58 @@ single primary category, or they span multiple systems not yet implemented.
 
 Effect types handled here
 --------------------------
-copy_effect                 STUB  — copy adjacent monster effect (Stage 7+)
-vessel_support              STUB  — allow extra vessel types in radius (Stage 7+)
-ignore_terrain              STUB  — skip building/territory movement costs (Stage 8+)
-building_damage_bonus       STUB  — destroy buildings on capture (Stage 8+)
-building_capture_protection STUB  — absorb building-destroy attempts (Stage 8+)
-weakened_target_bonus       STUB  — auto-capture shield-depleted units (Stage 7+)
-restore_effect_charge       STUB  — restore spent effect charges nearby (Stage 7+)
-challenge_unit              STUB  — restrict adjacent unit to fight only this one (Stage 7+)
-territory_bonus             STUB  — extra mobility in enemy territory (Stage 8+)
-graveyard_inspect           STUB  — view own graveyard (Stage 6+)
-graveyard_counter           STUB  — passive counter from destroyed allies (Stage 7+)
-capture_protection_from_counter STUB  — shield charges from counter (Stage 7+)
-dismiss_monster             STUB  — dismiss adjacent monster (Stage 7+)
-graveyard_scaling_movement  STUB  — leap bonus at graveyard threshold (Stage 7+)
-death_trigger_draw          STUB  — draw on ally death (Stage 7+)
-sacrifice_bonus             STUB  — extra ritual progress when sacrificed (Stage 11+)
-ritual_activation_range     STUB  — extend ritual pattern range (Stage 11+)
-restore_builder             STUB  — restore builder token to pawn (Stage 8+)
-capture_then_retreat        STUB  — post-capture retreat (Stage 7+)
+copy_effect                 IMPLEMENTED — copy adjacent monster effect (mirror_magus)
+vessel_support               IMPLEMENTED — allow extra vessel types in radius
+                                  (broodmother; aura scan lives in
+                                  mechanics.monsters.get_extra_vessel_types(),
+                                  wired into SummonMonster legal-action
+                                  generation + validation)
+ignore_terrain               STUB  — skip building/territory movement costs
+                                  (needs the Building/Territory systems)
+building_damage_bonus       STUB  — destroy buildings on capture (needs the
+                                  Building system)
+building_capture_protection STUB  — absorb building-destroy attempts (needs
+                                  the Building system)
+weakened_target_bonus       IMPLEMENTED (flag only) — bypasses an adjacent
+                                  retaliate effect; see
+                                  mechanics.monsters.apply_retaliate()
+restore_effect_charge       IMPLEMENTED — restore a spent effect charge to an
+                                  adjacent ally at end of the owner's own turn
+                                  (battlefield_medic; resolved in
+                                  _execute_end_turn)
+challenge_unit               STUB (flag only) — restrict an adjacent unit to
+                                  fight only this one; the flag is armed but
+                                  capture-legality enforcement is deferred
+                                  (needs two-sided move-generation changes)
+territory_bonus              STUB  — extra mobility in enemy territory (needs
+                                  the Territory system)
+graveyard_inspect            STUB  — view own graveyard (needs private/public
+                                  Observation plumbing for deck contents)
+graveyard_counter            STUB (flag only) — passive counter from
+                                  destroyed allies (needs a generic
+                                  event-triggered passive-effect scanner)
+capture_protection_from_counter STUB  — shield charges from counter (depends
+                                  on graveyard_counter above)
+dismiss_monster              STUB  — activated dismiss of an ADJACENT ally
+                                  (distinct from the player's own
+                                  DismissMonster action, which already
+                                  works); needs a target-selection
+                                  PendingDecision flow not yet built
+graveyard_scaling_movement  STUB (flag only) — leap bonus at graveyard
+                                  threshold (get_movement_additions() has no
+                                  GameState/graveyard access at its call site)
+death_trigger_draw          STUB (flag only) — draw on ally death (needs the
+                                  same event-triggered scanner as
+                                  graveyard_counter)
+sacrifice_bonus              STUB (flag only) — extra ritual progress when
+                                  sacrificed (needs the Ritual system)
+ritual_activation_range     STUB (flag only) — extend ritual pattern range
+                                  (needs the Ritual system)
+restore_builder              STUB  — restore builder token to pawn (needs the
+                                  Building system)
+capture_then_retreat        IMPLEMENTED — post-capture retreat away from the
+                                  enemy King (dusk_reaver; reuses the
+                                  REPOSITION PendingDecision machinery)
 spell_radius_bonus          IMPLEMENTED (flag only)
 """
 
@@ -156,11 +189,22 @@ def _copy_effect(ctx: "EffectContext") -> None:
 
 
 def _vessel_support(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Allow extra vessel types for dragon monsters in radius."""
-    raise NotImplementedError(
-        "vessel_support is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — broodmother (real logic lives elsewhere).
+
+    This is a passive positional aura: it doesn't change anything about
+    broodmother's own unit, it extends the set of legal vessel piece types
+    for OTHER summons happening nearby.  That can't be expressed as a status
+    flag resolved once at summon time — it has to be re-checked every time a
+    SummonMonster action is validated or enumerated.
+
+    The actual scan is `mechanics.monsters.get_extra_vessel_types()`, called
+    from both legal-action generation and `_execute_summon_monster()` in
+    rules.py.  This handler is a no-op placeholder so the effect type is
+    recognised by the registry and never logged as unresolved.
+    """
+    # Real implementation: mechanics.monsters.get_extra_vessel_types()
+    pass
 
 
 def _ignore_terrain(ctx: "EffectContext") -> None:
@@ -198,11 +242,18 @@ def _weakened_target_bonus(ctx: "EffectContext") -> None:
 
 
 def _restore_effect_charge(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Restore one spent defensive charge to an adjacent ally."""
-    raise NotImplementedError(
-        "restore_effect_charge is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — battlefield_medic (real logic lives elsewhere).
+
+    This only fires at end_of_turn, scanning the board for adjacency —
+    not something a summon-time status flag can express.  The actual
+    restoration is ``RulesEngine._resolve_restore_effect_charge()``, called
+    from ``_execute_end_turn`` for the ending player's own units.  This
+    handler is a no-op placeholder so the type is recognised by the
+    registry and never logged as unresolved.
+    """
+    # Real implementation: RulesEngine._resolve_restore_effect_charge()
+    pass
 
 
 def _challenge_unit(ctx: "EffectContext") -> None:
@@ -303,11 +354,79 @@ def _restore_builder(ctx: "EffectContext") -> None:
 
 
 def _capture_then_retreat(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. After capture, retreat up to max_distance squares away from enemy king."""
-    raise NotImplementedError(
-        "capture_then_retreat is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — dusk_reaver after-capture effect.
+
+    After capturing, the attacker may retreat up to ``max_distance`` squares
+    (Chebyshev) provided the destination is empty and, if
+    ``must_move_away_from_enemy_king`` is set, no closer to the enemy King
+    than the attacker's current position.
+
+    Structurally identical to ``movement._reposition_unit`` (blade_dancer) —
+    reuses the same REPOSITION PendingDecision / RepositionUnit resolver —
+    with the extra enemy-King-distance filter applied to the option list.
+    """
+    from game.chess.pieces import Position
+    from game.core.phases import DecisionType
+    from game.core.state import PendingDecision
+
+    params  = ctx.effect.params
+    trigger = params.get("trigger", "")
+    if trigger != "after_capture":
+        return
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
+        return
+
+    max_dist = params.get("max_distance", 1)
+    must_flee = params.get("must_move_away_from_enemy_king", False)
+    attacker_pos = ctx.position
+
+    king_dist = None
+    if must_flee:
+        opponent = "black" if ctx.unit.owner == "white" else "white"
+        king_result = ctx.state.board.find_king(opponent)
+        if king_result is not None:
+            king_pos, _ = king_result
+            king_dist = max(
+                abs(attacker_pos.file - king_pos.file),
+                abs(attacker_pos.rank - king_pos.rank),
+            )
+
+    options: list[tuple[int, int]] = []
+    for df in range(-max_dist, max_dist + 1):
+        for dr in range(-max_dist, max_dist + 1):
+            if df == 0 and dr == 0:
+                continue
+            nf = attacker_pos.file + df
+            nr = attacker_pos.rank + dr
+            if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                continue
+            if ctx.state.board.get_unit(Position(nf, nr)) is not None:
+                continue
+            if king_dist is not None:
+                king_result = ctx.state.board.find_king(
+                    "black" if ctx.unit.owner == "white" else "white"
+                )
+                if king_result is not None:
+                    king_pos, _ = king_result
+                    new_dist = max(abs(nf - king_pos.file), abs(nr - king_pos.rank))
+                    if new_dist < king_dist:
+                        continue  # would move closer to the enemy King
+            options.append((nf, nr))
+
+    if options and ctx.state.pending_decision is None:
+        ctx.state.pending_decision = PendingDecision(
+            player_id=ctx.unit.owner,
+            decision_type=DecisionType.REPOSITION,
+            options=options,
+            min_choices=1,
+            max_choices=1,
+            context={
+                "piece_id": ctx.unit.piece.id,
+                "current_pos": (attacker_pos.file, attacker_pos.rank),
+            },
+        )
 
 
 META_HANDLERS: dict[str, object] = {

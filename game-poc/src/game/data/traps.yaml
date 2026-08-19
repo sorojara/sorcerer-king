@@ -1,41 +1,49 @@
 # traps.yaml — PoC card set (5 Traps)
 # Traps are NEVER secret — their identity, position, and radius are public.
 # trigger: enter_radius | capture | end_of_turn | manual
+#
+# Stage 6 area-of-effect convention:
+#   radius defaults to 1 (3×3, centred on the Trap) if omitted.
+#   shape defaults to "square"; "row"/"column" cover a whole rank/file.
+#   charges defaults to 1 (single-use — the Trap is destroyed after
+#   triggering once) unless the card sets `charges: null` explicitly for a
+#   Trap meant to stay armed indefinitely, or a higher int for N uses.
 
 - id: pit_trap
   name: Pit Trap
   trigger: enter_radius
   radius: 1
+  charges: 1
   effects:
-    - type: destroy_piece
+    - type: destroy_monster_or_piece
       params:
         target: triggering_piece
-        exempt_piece_types:
-          - king
   description: >
-    A hidden pit (visible to both players). Any enemy piece that moves
-    into the 3×3 activation area is immediately destroyed. Kings are
-    immune — triggering a Pit Trap with the King triggers a Final Duel
-    instead of destroying the King.
+    The first enemy entering the radius falls into the Pit. If it hosts a
+    Monster, the Monster is destroyed but its Vessel survives, reverted to
+    a plain piece. If it's a plain piece, the Pit destroys it outright.
+    Kings are immune. Pit Trap is destroyed after triggering.
 
 - id: ward_of_binding
   name: Ward of Binding
   trigger: enter_radius
   radius: 1
+  charges: 1
   effects:
-    - type: freeze_piece
+    - type: immobilize_piece
       params:
         target: triggering_piece
         duration_turns: 2
   description: >
-    An arcane ward. Any enemy piece that steps into the 3×3 area is
+    An arcane ward. The first enemy piece that steps into the 3×3 area is
     bound — it cannot move for 2 turns. It may still be captured while
-    bound.
+    bound. Ward of Binding is destroyed after triggering.
 
 - id: alarm_beacon
   name: Alarm Beacon
   trigger: enter_radius
   radius: 2
+  charges: 1
   effects:
     - type: draw_card
       params:
@@ -46,27 +54,33 @@
         count: 1
         random: true
   description: >
-    A 5×5 surveillance trap. When an enemy piece enters range, the
-    owner draws 1 card and peeks at 1 random card in the opponent's
-    hand. Provides information rather than direct destruction.
+    A 5×5 surveillance trap. The first enemy piece that enters range causes
+    the owner to draw 1 card and peek at 1 random card in the opponent's
+    hand. Provides information rather than direct destruction. Alarm
+    Beacon is destroyed after triggering.
 
 - id: counter_strike
   name: Counter Strike
   trigger: capture
   radius: 1
+  charges: 1
   effects:
-    - type: destroy_piece
+    - type: capture_vulnerability
       params:
         target: capturing_piece
+        duration_turns: 1
   description: >
-    A retaliatory mechanism. If an enemy piece captures any friendly
-    piece within the 3×3 area, the capturing piece is immediately
-    destroyed. Discourages aggressive trades in the protected zone.
+    A retaliatory mechanism. The first time an enemy piece captures a
+    friendly piece within the 3×3 area, the capturing piece becomes
+    Exposed — it loses capture protection until the owner's next turn,
+    giving the defender a window to punish the trade rather than losing
+    the piece outright. Counter Strike is destroyed after triggering.
 
 - id: time_anchor
   name: Time Anchor
   trigger: manual
   radius: 0
+  charges: 1
   effects:
     - type: cancel_move
       params:
@@ -77,3 +91,267 @@
     to undo the opponent's most recent chess move. Both pieces return
     to their pre-move positions. Can only be activated once per match.
     Does not activate if the move triggered a Final Duel.
+
+# ── MOVEMENT CONTROL TRAPS ─────────────────────────────────────────────────
+
+- id: repulsion_field
+  name: Repulsion Field
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: push_unit
+      params:
+        target: triggering_piece
+        distance: 1
+        direction: away_from_trap
+  description: >
+    When an enemy enters the activation radius, push it 1 square directly
+    away from the Trap if that square is available.
+
+- id: gravity_well
+  name: Gravity Well
+  trigger: enter_radius
+  radius: 2
+  effects:
+    - type: pull_unit
+      params:
+        target: triggering_piece
+        distance: 1
+        toward: trap
+  description: >
+    When an enemy enters the 5×5 activation area, pull it 1 square toward
+    the Trap if the resulting square is legal.
+
+- id: labyrinth_rune
+  name: Labyrinth Rune
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: movement_restriction
+      params:
+        target: triggering_piece
+        max_distance: 1
+        duration_turns: 1
+  description: >
+    An enemy entering the area has its movement limited to 1 square on
+    its next turn.
+
+- id: displacement_rune
+  name: Displacement Rune
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: reposition_unit
+      params:
+        target: triggering_piece
+        destination: random_adjacent_empty
+  description: >
+    An enemy entering the area is displaced to a random adjacent empty
+    square. The destination is determined by seeded game RNG.
+
+
+# ── CAPTURE CONTROL TRAPS ──────────────────────────────────────────────────
+
+- id: guardian_sigils
+  name: Guardian Sigils
+  trigger: capture
+  radius: 1
+  effects:
+    - type: cancel_capture
+      params:
+        protected_owner: trap_owner
+        consume_trap: true
+  description: >
+    The first enemy capture of an allied unit inside the radius is
+    cancelled. The attacker returns to its original square and this Trap
+    is destroyed.
+
+- id: blood_price
+  name: Blood Price
+  trigger: capture
+  radius: 1
+  effects:
+    - type: discard_card
+      params:
+        target: capturing_player
+        count: 1
+        selection: random
+  description: >
+    Enemy captures inside the radius succeed, but the attacking player
+    must discard one random card.
+
+- id: vengeance_mark
+  name: Vengeance Mark
+  trigger: capture
+  radius: 2
+  effects:
+    - type: mark_unit
+      params:
+        target: capturing_piece
+        status: vulnerable
+        duration_turns: 1
+  description: >
+    An enemy that captures an allied unit inside the 5×5 area becomes
+    Vulnerable until its next turn, allowing effects that target
+    Vulnerable units to punish it.
+
+
+# ── SUMMON / MONSTER TRAPS ─────────────────────────────────────────────────
+
+- id: vessel_lock
+  name: Vessel Lock
+  trigger: manual
+  radius: 1
+  effects:
+    - type: prohibit_summoning
+      params:
+        affected_owner: opponent
+        duration_turns: 1
+  description: >
+    Activate during the opponent's Preparation Phase. Enemy pieces inside
+    the radius cannot become Monster Vessels for the remainder of the turn.
+
+- id: transformation_alarm
+  name: Transformation Alarm
+  trigger: summon
+  radius: 2
+  effects:
+    - type: draw_card
+      params:
+        target: owner
+        count: 1
+  description: >
+    Whenever an enemy Monster is summoned within the 5×5 area, draw one
+    card. The summon is not prevented.
+
+- id: nullification_glyph
+  name: Nullification Glyph
+  trigger: summon
+  radius: 1
+  effects:
+    - type: suppress_monster_effects
+      params:
+        target: summoned_monster
+        duration_turns: 1
+  description: >
+    A Monster summoned within the radius enters normally but has its
+    special effects disabled until its owner's next turn.
+
+
+# ── BUILDING / TERRITORY TRAPS ─────────────────────────────────────────────
+
+- id: demolition_charge
+  name: Demolition Charge
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: building_damage
+      params:
+        condition:
+          triggering_owner: opponent
+        adjacent_enemy_buildings: true
+        amount: 1
+  description: >
+    When an enemy enters the radius, damage one enemy Building adjacent
+    to the Trap.
+
+- id: builders_ward
+  name: Builder's Ward
+  trigger: enter_radius
+  radius: 1
+  effects:
+    - type: protect_builder
+      params:
+        duration_turns: 1
+        capture_protection_uses: 1
+  description: >
+    An allied Pawn currently constructing inside the radius gains one
+    layer of capture protection.
+
+- id: border_beacon
+  name: Border Beacon
+  trigger: manual
+  radius: 1
+  effects:
+    - type: temporary_territory
+      params:
+        owner: trap_owner
+        duration_turns: 2
+  description: >
+    Activate to treat the Trap's 3×3 radius as friendly Territory for
+    2 turns.
+
+
+# ── RITUAL CONTROL TRAPS ───────────────────────────────────────────────────
+
+- id: profane_interruption
+  name: Profane Interruption
+  trigger: ritual_activation
+  radius: 2
+  effects:
+    - type: interrupt_ritual
+      params:
+        delay_turns: 1
+        sacrifices_preserved: true
+  description: >
+    If an enemy attempts a Ritual using material inside this Trap's radius,
+    delay the Ritual until their next turn. The material is not sacrificed.
+
+- id: omen_bell
+  name: Omen Bell
+  trigger: ritual_progress
+  radius: 2
+  effects:
+    - type: reveal_ritual
+      params:
+        target_owner: opponent
+        from: sealed
+        to: foretold
+  description: >
+    When an enemy advances a Ritual using a unit inside this radius, that
+    Ritual becomes FORETOLD.
+
+
+# ── KING / FINAL DUEL TRAPS ────────────────────────────────────────────────
+
+- id: royal_escape_route
+  name: Royal Escape Route
+  trigger: final_duel_start
+  radius: 1
+  effects:
+    - type: duel_escape_bonus
+      params:
+        condition:
+          king_inside_radius: true
+        additional_escape_option: 1
+  description: >
+    If your King is inside this Trap's radius when a Final Duel begins,
+    gain an additional Royal Escape option if the King survives.
+
+- id: muster_bell
+  name: Muster Bell
+  trigger: final_duel_start
+  radius: 2
+  effects:
+    - type: royal_support_range_bonus
+      params:
+        amount: 1
+  description: >
+    If your King is within the Trap's area when a Final Duel begins,
+    allied Royal Support range increases by 1 for that Duel.
+
+- id: kingslayer_alarm
+  name: Kingslayer Alarm
+  trigger: enter_radius
+  radius: 2
+  effects:
+    - type: royal_support_mark
+      params:
+        target: triggering_piece
+        condition:
+          triggering_owner: opponent
+        duel_penalty: 1
+  description: >
+    Enemy units approaching the King are marked. If a marked unit later
+    participates in initiating a Final Duel, it contributes reduced Duel
+    support.

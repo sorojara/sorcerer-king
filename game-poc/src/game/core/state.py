@@ -109,6 +109,11 @@ class TrapInstance:
     radius: int          # default 1 = 3×3 area centered on position
     trigger_condition: str  # short tag: "enter_radius", "capture", etc.
     activated: bool = False
+    shape: str = "square"        # Stage 6: mirrors TrapCard.shape
+    # Stage 6: mirrors TrapCard.charges — None = reusable indefinitely,
+    # otherwise decremented by mechanics.monsters._fire_trap() and the Trap
+    # is removed from state.traps once it reaches 0 (pit_trap: charges=1).
+    charges: int | None = None
 
 
 @dataclass
@@ -137,6 +142,51 @@ class DuelState:
     defender: str
     round_number: int = 1
     # future fields: arena_board, support_scores, …
+
+
+@dataclass
+class MoveSnapshot:
+    """
+    Stage 6 — a reversible-transaction snapshot of one MovePiece, kept so
+    ``time_anchor`` can restore the board to how it looked immediately
+    before that move.
+
+    This is a pragmatic alternative to a fully generic undoable event log:
+    rather than defining an inverse for every Event type, we snapshot the
+    handful of mutable pieces of state a MovePiece can touch and restore
+    them wholesale.  GameState keeps at most ONE of these per player (the
+    player's own most recent move) — a new move for that player overwrites
+    the previous snapshot, which is exactly "last move" semantics.
+
+    ``board_before``              — deep copy of the board immediately
+                                     before the move (captures piece
+                                     positions, monster_id, statuses —
+                                     reverting it also un-destroys any
+                                     Monster that move captured, for free).
+    ``victim_captured_len_before`` — length of the defender's (the
+                                     opponent-of-mover's) ``captured_pieces``
+                                     list before the move, so truncating
+                                     back to it undoes the bookkeeping
+                                     append from a capture, if any.
+    ``castling_rights_before``    — deep copy of the mover's own castling
+                                     rights before the move.
+    ``en_passant_before``         — state.en_passant_target before the move.
+    ``triggered_duel``            — True if this move triggered a Final
+                                     Duel (King capture / checkmate /
+                                     stalemate).  time_anchor refuses to
+                                     cancel such a move (per its own
+                                     design — see traps.yaml).
+    """
+
+    player_id: str
+    turn_number: int
+    source: "Position"       # type: ignore[name-defined]
+    target: "Position"       # type: ignore[name-defined]
+    board_before: "BoardState"
+    victim_captured_len_before: int
+    castling_rights_before: CastlingRights
+    en_passant_before: "Position | None"  # type: ignore[name-defined]
+    triggered_duel: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -253,6 +303,10 @@ class GameState:
 
     rng_seed: int = 0
     event_log: list = field(default_factory=list)  # list[Event] — avoids circular import
+
+    # Stage 6: one MoveSnapshot per player, keyed by player_id — their own
+    # most recent MovePiece.  Powers time_anchor's cancel_move effect.
+    move_history: "dict[str, MoveSnapshot | None]" = field(default_factory=dict)
 
     def get_player(self, player_id: str) -> PlayerState:
         if player_id not in self.players:

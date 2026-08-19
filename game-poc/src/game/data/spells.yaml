@@ -1,11 +1,19 @@
 # spells.yaml — PoC card set (5 Spells)
 # spell_type: instant | persistent | spatial
 # target_type: none | position | piece | trap | building | zone
+#
+# Stage 6 area-of-effect convention:
+#   radius defaults to 0 (the single square/piece targeted) if omitted —
+#   most Spells are surgical, unlike Traps.
+#   shape defaults to "square"; "row"/"column" cover a whole rank/file
+#   (see veil_of_stillness, which uses shape: column instead of a
+#   hand-rolled width/height/axis block).
 
 - id: arcane_reposition
   name: Arcane Reposition
   spell_type: instant
   target_type: piece
+  radius: 0
   effects:
     - type: reposition_unit
       params:
@@ -21,28 +29,26 @@
   name: Veil of Stillness
   spell_type: persistent
   target_type: zone
+  radius: 0
+  shape: column
   effects:
     - type: block_zone
       params:
-        width: 1
-        height: 8
-        axis: file
         duration_turns: 2
   description: >
-    Choose a file (column). For 2 turns no piece may move into or
-    through that file. Powerful for cutting board halves or protecting
-    a Ritual formation.
+    Choose a file (column). For 2 turns no piece may move into that
+    file. Powerful for cutting board halves or protecting a Ritual
+    formation.
 
 - id: cursed_ground
   name: Cursed Ground
   spell_type: spatial
   target_type: position
+  radius: 1
   effects:
-    - type: freeze_square
+    - type: immobilize_zone
       params:
-        radius: 1
         duration_turns: 3
-        affect_all: true
   description: >
     Place a 3×3 zone of cursed ground on the board. Any piece that
     ends its move inside the zone cannot move on its owner's next turn.
@@ -52,6 +58,7 @@
   name: Ritual Insight
   spell_type: instant
   target_type: none
+  radius: 0
   effects:
     - type: reveal_ritual
       params:
@@ -67,6 +74,7 @@
   name: Shatter Trap
   spell_type: instant
   target_type: trap
+  radius: 0
   effects:
     - type: destroy_trap
       params:
@@ -75,3 +83,298 @@
     Destroy one enemy Trap anywhere on the board. The Trap is removed
     from play (not returned to hand). Provides relief against defensive
     Trap formations.
+
+# ── POSITION / MOVEMENT SPELLS ─────────────────────────────────────────────
+
+- id: forced_march
+  name: Forced March
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: move_unit
+      params:
+        must_be_own: true
+        piece_types:
+          - pawn
+        direction: forward
+        distance: 1
+        destination_must_be_empty: true
+  description: >
+    Advance one of your Pawns by 1 legal forward square without consuming
+    your chess move. Cannot promote a Pawn through this effect.
+
+- id: knightfall
+  name: Knightfall
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: reposition_unit
+      params:
+        must_be_own: true
+        piece_types:
+          - knight
+        movement_pattern: knight
+        destination_must_be_empty: true
+  description: >
+    Move one allied Knight or Monster using a Knight Vessel to another
+    legal Knight destination without consuming the normal chess move.
+
+- id: magnetic_reversal
+  name: Magnetic Reversal
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: pull_unit
+      params:
+        target_owner: opponent
+        distance: 1
+        toward: caster_king
+        destination_must_be_empty: true
+  description: >
+    Pull one enemy unit 1 square toward your King if the resulting square
+    is empty. Useful for breaking formations or dragging units into Traps.
+
+- id: exchange_of_fates
+  name: Exchange of Fates
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: swap_units
+      params:
+        must_be_own: true
+        max_distance: 3
+        king_allowed: false
+  description: >
+    Swap the positions of two allied non-King units within 3 squares of
+    each other. Both positions must remain legal after the exchange.
+
+
+# ── BOARD CONTROL SPELLS ───────────────────────────────────────────────────
+
+- id: wall_of_mist
+  name: Wall of Mist
+  spell_type: spatial
+  target_type: zone
+  effects:
+    - type: block_line_of_sight
+      params:
+        length: 4
+        duration_turns: 2
+        affects:
+          - rook
+          - bishop
+          - queen
+  description: >
+    Create a 4-square wall. Sliding units cannot attack or move through
+    the wall, but Knights and effects that leap may cross it.
+
+- id: fractured_path
+  name: Fractured Path
+  spell_type: spatial
+  target_type: position
+  effects:
+    - type: movement_cost_zone
+      params:
+        radius: 1
+        max_movement_distance: 1
+        duration_turns: 2
+  description: >
+    Create a 3×3 zone of broken terrain. Units beginning their movement
+    inside the area may move at most 1 square that turn.
+
+- id: sanctuary
+  name: Sanctuary
+  spell_type: spatial
+  target_type: position
+  effects:
+    - type: prohibit_summoning
+      params:
+        radius: 1
+        affected_owner: both
+        duration_turns: 2
+  description: >
+    Neither player may transform a Vessel into a Monster inside this
+    3×3 area for 2 turns.
+
+- id: dispel_field
+  name: Dispel Field
+  spell_type: instant
+  target_type: position
+  effects:
+    - type: remove_spatial_effects
+      params:
+        radius: 1
+        include_own: true
+        include_enemy: true
+  description: >
+    Remove temporary Spell-generated zones from a 3×3 area. Buildings
+    and Traps are unaffected.
+
+
+# ── MONSTER / VESSEL SPELLS ────────────────────────────────────────────────
+
+- id: sever_the_bond
+  name: Sever the Bond
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: dismiss_monster
+      params:
+        target_owner: self
+        restore_vessel: true
+        monster_destination: hand
+  description: >
+    Dismiss one of your Monsters. Restore its original chess Vessel and
+    return the Monster card to your hand.
+
+- id: unstable_transmutation
+  name: Unstable Transmutation
+  spell_type: persistent
+  target_type: piece
+  effects:
+    - type: temporary_vessel_class
+      params:
+        target_owner: self
+        vessel_classes:
+          - pawn
+          - knight
+          - bishop
+          - rook
+        duration_turns: 1
+  description: >
+    One allied non-King piece counts as any standard Vessel class until
+    the end of the turn. It does not gain that class's movement.
+
+- id: monster_seal
+  name: Monster Seal
+  spell_type: persistent
+  target_type: piece
+  effects:
+    - type: suppress_monster_effects
+      params:
+        target_owner: opponent
+        duration_turns: 1
+        preserve_vessel_movement: true
+  description: >
+    Disable the abilities of one enemy Monster until the end of its
+    owner's next turn. Its underlying Vessel movement remains intact.
+
+
+# ── BUILDING SPELLS ────────────────────────────────────────────────────────
+
+- id: rapid_construction
+  name: Rapid Construction
+  spell_type: instant
+  target_type: building
+  effects:
+    - type: advance_construction
+      params:
+        turns: 1
+  description: >
+    Advance one Building currently under construction by 1 turn. It may
+    complete immediately if this satisfies its remaining construction time.
+
+- id: siege_order
+  name: Siege Order
+  spell_type: persistent
+  target_type: building
+  effects:
+    - type: building_vulnerability
+      params:
+        target_owner: opponent
+        duration_turns: 2
+        protection_reduction: 1
+  description: >
+    Mark one enemy Building for destruction. Its defensive protection is
+    reduced for 2 turns.
+
+- id: emergency_fortifications
+  name: Emergency Fortifications
+  spell_type: instant
+  target_type: building
+  effects:
+    - type: temporary_building_protection
+      params:
+        uses: 1
+        duration_turns: 2
+  description: >
+    Give one allied Building protection from the next effect that would
+    destroy it during the next 2 turns.
+
+
+# ── RITUAL / INFORMATION SPELLS ────────────────────────────────────────────
+
+- id: false_prophecy
+  name: False Prophecy
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: ritual_bluff
+      params:
+        reveal_false_requirement: true
+        duration_turns: 2
+  description: >
+    Select one SEALED Ritual. For 2 turns the opponent receives a false
+    FORETOLD requirement for that Ritual. The Ritual itself remains SEALED.
+
+- id: hasten_the_ritual
+  name: Hasten the Ritual
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: ritual_requirement_reduction
+      params:
+        amount: 1
+        cost:
+          reveal_to: revealed
+  description: >
+    Fully reveal one of your Rituals. For its next activation attempt,
+    one generic requirement is ignored.
+
+- id: forbidden_knowledge
+  name: Forbidden Knowledge
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: reveal_enemy_ritual
+      params:
+        from: sealed
+        to: foretold
+        selection: player
+    - type: reveal_own_hand_card
+      params:
+        selection: opponent
+  description: >
+    Force one enemy SEALED Ritual to become FORETOLD. In exchange, your
+    opponent chooses one card from your hand to reveal.
+
+
+# ── KING / ENDGAME SPELLS ──────────────────────────────────────────────────
+
+- id: rally_the_kingdom
+  name: Rally the Kingdom
+  spell_type: persistent
+  target_type: none
+  effects:
+    - type: royal_support_bonus
+      params:
+        amount: 1
+        duration_turns: 2
+  description: >
+    For 2 turns, allied units that already qualify as Royal Support count
+    as one additional level of support. Does not expand support range.
+
+- id: evacuation_order
+  name: Evacuation Order
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: reposition_unit
+      params:
+        target: own_king
+        max_distance: 1
+        destination_must_be_legal: true
+        only_when_not_in_check: true
+  description: >
+    Move your King to one adjacent legal square without consuming the
+    normal chess move. Cannot be activated while in Check.

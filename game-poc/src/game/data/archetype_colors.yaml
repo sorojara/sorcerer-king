@@ -1,0 +1,21 @@
+# archetype_colors.yaml — Stage 6: per-archetype aura color for summoned pieces
+#
+# Every Monster card has an `archetype` (see monsters.yaml). When a Monster
+# is summoned, the board renders a colored aura on its Vessel so archetypes
+# read at a glance. Colors are RGB triples, [0-255] each.
+#
+# `default` is used for any archetype NOT listed under `colors` — new
+# archetypes added to monsters.yaml don't need an entry here to render
+# something reasonable.
+
+default: [139, 90, 43]   # brown
+
+colors:
+  spellcaster: [90, 130, 230]    # arcane blue
+  dragon:      [230, 100, 40]    # fire orange
+  warrior:     [210, 60, 60]     # blood red
+  beast:       [150, 170, 70]    # earthy olive green
+  kingdom:     [220, 185, 70]    # royal gold
+  ritualist:   [170, 90, 220]    # mystic violet
+  assassin:    [70, 90, 110]     # shadow slate
+  necromancer: [90, 200, 150]    # ghostly teal-green

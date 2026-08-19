@@ -751,8 +751,10 @@ class TestFreezeSquare:
         sq = state2.board.get_square(Position.from_algebraic("d5"))
         frozen_effects = [e for e in sq.temporary_effects if e.startswith("frozen:")]
         assert len(frozen_effects) == 1
-        # Format: "frozen:<turns>:<owner>" — freeze owned by white, duration 1
-        assert frozen_effects[0] == "frozen:1:white"
+        # Format: "frozen:<turns>:<owner>:<source_card_id>" — freeze owned by
+        # white, duration 1, caused by iron_vanguard (Stage 6: CardViewer needs
+        # the source card_id to show "Active in this zone" entries).
+        assert frozen_effects[0] == "frozen:1:white:iron_vanguard"
 
     def test_frozen_square_blocks_entry(self, registry, rng):
         """

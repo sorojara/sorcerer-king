@@ -94,6 +94,27 @@ class PublicUnitInfo:
     activatable_effects: tuple[str, ...] = ()   # effect types requiring player action
 
 
+@dataclass(frozen=True)
+class PublicSquareEffect:
+    """
+    Stage 6 — one active temporary square effect (a visible battlefield
+    hazard/zone, never hidden information): "frozen" (iron_vanguard /
+    cursed_ground's un-enterable cousin), "scorched" (ember_drake),
+    "blocked" (veil_of_stillness), "cursed" (cursed_ground's
+    immobilize-on-entry zone).  ``owner`` is who set it (for UI framing —
+    "your ward" vs "their hazard" — not a privacy boundary; these are all
+    public board state).  ``card_id`` is the originating Monster/Spell
+    card, so the UI's CardViewer can show its description when the owner
+    right-clicks the zone (see AppController._collect_zone_entries).
+    """
+
+    position: Any           # Position
+    effect_type: str        # "frozen" | "scorched" | "blocked" | "cursed"
+    duration_turns: int
+    owner: str | None
+    card_id: str | None = None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PublicBoardState
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,6 +130,7 @@ class PublicBoardState:
     units: tuple[PublicUnitInfo, ...]   # all units currently on the board
     trap_locations: tuple[Any, ...]     # tuple[TrapInstance, ...] — public info
     building_locations: tuple[Any, ...]  # tuple[BuildingInstance, ...]
+    square_effects: tuple[PublicSquareEffect, ...] = ()  # Stage 6 — active zone hazards
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,10 +237,28 @@ def build_observation(
         for pos, unit in state.board.all_units()
     )
 
+    # Stage 6: active square effects (frozen/scorched/blocked/cursed) — all
+    # public battlefield state, never hidden information.
+    square_effects: list[PublicSquareEffect] = []
+    for pos, sq in state.board.squares.items():
+        for eff in sq.temporary_effects:
+            parts = eff.split(":")
+            effect_type = parts[0]
+            if effect_type not in ("frozen", "scorched", "blocked", "cursed"):
+                continue
+            duration = int(parts[1]) if len(parts) > 1 else 0
+            owner = parts[2] if len(parts) > 2 else None
+            card_id = parts[3] if len(parts) > 3 and parts[3] != "-" else None
+            square_effects.append(PublicSquareEffect(
+                position=pos, effect_type=effect_type,
+                duration_turns=duration, owner=owner, card_id=card_id,
+            ))
+
     pub_board = PublicBoardState(
         units=units,
         trap_locations=tuple(state.traps),
         building_locations=tuple(state.buildings),
+        square_effects=tuple(square_effects),
     )
 
     # ── Opponent King public info ──────────────────────────────────────────

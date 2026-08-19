@@ -128,18 +128,22 @@ class TestYAMLLoader:
         return load_registry_from_yaml(_DATA_DIR)
 
     def test_total_card_count_at_least_60(self, registry: CardRegistry):
-        # 10 original + 40 new monsters + 5 spells + 5 traps = 60
+        # 10 original + 40 new monsters + 5 base spells + 5 base traps = 60
+        # (Stage 6 also added expansion Spells/Traps beyond the base 5+5 —
+        # see the "ORIGINAL POC SET" / base-set comments in the YAML files.)
         assert len(registry) >= 60
 
     def test_monster_count_at_least_50(self, registry: CardRegistry):
         # 10 original + 40 new = 50 monsters minimum
         assert len(registry.all_monsters()) >= 50
 
-    def test_spell_count_is_5(self, registry: CardRegistry):
-        assert len(registry.all_spells()) == 5
+    def test_spell_count_at_least_5(self, registry: CardRegistry):
+        # 5 base Spells minimum; Stage 6 added an expansion set beyond these.
+        assert len(registry.all_spells()) >= 5
 
-    def test_trap_count_is_5(self, registry: CardRegistry):
-        assert len(registry.all_traps()) == 5
+    def test_trap_count_at_least_5(self, registry: CardRegistry):
+        # 5 base Traps minimum; Stage 6 added an expansion set beyond these.
+        assert len(registry.all_traps()) >= 5
 
     def test_all_ids_are_unique(self, registry: CardRegistry):
         monsters = [c.id for c in registry.all_monsters()]
