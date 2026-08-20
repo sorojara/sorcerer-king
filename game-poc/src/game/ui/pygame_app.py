@@ -51,6 +51,8 @@ from game.core.actions import (
     ActivateSpell,
     ActivateTrap,
     Castle,
+    ChangeKing,
+    CoronateKing,
     DeclareMercenary,
     DeclareRecompose,
     DiscardCard,
@@ -69,7 +71,7 @@ from game.core.actions import (
 )
 from game.core.phases import HAND_SIZE_LIMIT
 from game.core.game import Game
-from game.core.phases import Phase, PieceType
+from game.core.phases import KingCardStatus, Phase, PieceType
 from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
 from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView, BuildingSpriteCache
@@ -274,6 +276,21 @@ class AppController:
         self._build_positions: list[Position] = []
         self._build_picker: "_BuildPicker | None" = None
 
+        # Stage 10: King picker/dialog + Succession cost-payment flow.
+        # ``_king_picker`` is reused across every step (Coronate/Succeed
+        # target choice, cost-type choice, Building choice) — ``_king_picker_mode``
+        # says which step it's currently showing so the click handler knows
+        # how to interpret the returned key. Once a piece-sacrifice cost is
+        # pending, ``_king_sacrifice_positions`` highlights the valid board
+        # squares (mirrors ``_build_positions``).
+        self._king_picker: "_KingDialog | None" = None
+        self._king_picker_mode: str | None = None          # "coronate" | "succeed" | "cost_choice" | "building_choice"
+        self._king_picker_actions: list = []                # legal ChangeKing actions, filtered as the flow narrows
+        self._king_succession_target: str | None = None    # king_card_id being succeeded to
+        self._king_and_mode: bool = False                   # True = 2nd Succession (piece AND Building)
+        self._king_sacrifice_positions: list[Position] = []
+        self._king_sacrifice_building_id: str | None = None
+
         # Auto-advance past phases that need no user input
         self._auto_advance()
 
@@ -308,6 +325,9 @@ class AppController:
                 if self._build_picker is not None:
                     self._build_picker = None
                     return
+                if self._king_picker is not None or self._king_sacrifice_positions:
+                    self._cancel_king_mode()
+                    return
                 self._cancel_summon()
                 self._cancel_targeting_mode()
                 self._cancel_spell_piece_mode()
@@ -335,6 +355,8 @@ class AppController:
                 self._mercenary_picker._mouse_pos = event.pos
             if self._build_picker is not None:
                 self._build_picker._mouse_pos = event.pos
+            if self._king_picker is not None:
+                self._king_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
@@ -354,6 +376,13 @@ class AppController:
                 elif result is not None:
                     self._commit_build(result)
                 return
+            if self._king_picker is not None:
+                result = self._king_picker.handle_click(mx, my)
+                if result == "cancel":
+                    self._cancel_king_mode()
+                elif result is not None:
+                    self._on_king_picker_choice(result)
+                return
             if self._promotion_dialog is not None:
                 self._handle_promotion_click(mx, my)
             else:
@@ -361,9 +390,33 @@ class AppController:
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Stage 6 (corrected): right-click sets the CardViewer's active
-            # card. Priority: an "Active in this zone" list entry > a hand
-            # card > a board square (unit / Trap-or-zone area).
+            # card. Priority: a King-picker row > an "Active in this zone"
+            # list entry > a hand card > a board square (unit / Trap-or-
+            # zone area).
             mx, my = event.pos
+
+            # Stage 10: right-click a row on the King picker (Coronation /
+            # Succession target list, or a Building-cost choice) to inspect
+            # that card without selecting it.
+            if self._king_picker is not None:
+                king_row_key = self._king_picker.key_at(mx, my)
+                if king_row_key is not None:
+                    if self._king_picker_mode in ("coronate", "succeed"):
+                        self._viewer_card_id = king_row_key
+                        self._inspect_unit_pos = None
+                        self._zone_active_entries = None
+                        return
+                    if self._king_picker_mode == "building_choice":
+                        bld = next(
+                            (b for b in self._game.state.buildings if b.id == king_row_key),
+                            None,
+                        )
+                        if bld is not None:
+                            self._viewer_card_id = bld.building_card_id
+                            self._inspect_unit_pos = None
+                            self._zone_active_entries = None
+                        return
+
             zone_card_id = self._card_viewer.zone_entry_from_click(mx, my)
             if zone_card_id is not None:
                 self._viewer_card_id = zone_card_id
@@ -421,6 +474,9 @@ class AppController:
             return
         if btn == "build":
             self._do_build()
+            return
+        if btn == "king":
+            self._do_king()
             return
         if btn is not None and btn.startswith("trap:"):
             # Stage 6: "⚡ Activatable" section — fire a manual Trap directly.
@@ -570,7 +626,16 @@ class AppController:
 
         # ── PREPARATION phase ─────────────────────────────────────────────
         elif obs.phase == Phase.PREPARATION:
-            if self._build_card_id is not None:
+            if self._king_sacrifice_positions:
+                # Stage 10: Succession cost — click a highlighted piece to
+                # sacrifice (paired with a Building cost already chosen, if
+                # this is the 2nd Succession's AND cost).
+                if pos in self._king_sacrifice_positions:
+                    self._do_king_sacrifice(pos, active)
+                else:
+                    self._cancel_king_mode()
+                    self._show_toast("Succession cancelled.")
+            elif self._build_card_id is not None:
                 # Stage 8: Build mode — click on a highlighted builder Pawn
                 # → fire StartConstruction.
                 if pos in self._build_positions:
@@ -664,6 +729,8 @@ class AppController:
         # Stage 8: a hand card click always supersedes build mode (Buildings
         # aren't hand cards, so there's no matching "same card" toggle here).
         self._cancel_build_mode()
+        # Stage 10: likewise for any in-progress King Succession flow.
+        self._cancel_king_mode()
 
         # Look up the card in the registry
         if card_id not in self._registry:
@@ -749,6 +816,23 @@ class AppController:
                     archetype = None
             colors[unit_info.position] = aura_color_for(archetype)
         return colors
+
+    def _compute_crowned_kings(self, obs) -> "dict[Position, str]":
+        """
+        Stage 10 — Position → active king_card_id for every King currently
+        Coronated (README §17). The active King is public information the
+        moment Coronation happens, so this reads directly from GameState
+        (like _do_king's other direct reads) rather than needing a
+        King-specific Observation field.
+        """
+        crowned: dict[Position, str] = {}
+        for unit_info in obs.board.units:
+            if unit_info.piece_type != "king":
+                continue
+            active_king_id = self._game.state.get_player(unit_info.owner).active_king
+            if active_king_id is not None:
+                crowned[unit_info.position] = active_king_id
+        return crowned
 
     def _compute_playable_card_ids(self, obs) -> set[str]:
         """
@@ -1034,6 +1118,7 @@ class AppController:
         active = obs.active_player
         if self._player_modes.get(active) == "ai":
             return
+        self._cancel_king_mode()
         # Show the mercenary picker dialog — it will call _commit_mercenary() on selection.
         self._mercenary_selected = []
         self._mercenary_picker = _MercenaryPicker(
@@ -1071,6 +1156,7 @@ class AppController:
             return
         active = obs.active_player
         if self._player_modes.get(active) == "human":
+            self._cancel_king_mode()
             self._build_picker = _BuildPicker(
                 surface=self._screen,
                 font=self._font_small,
@@ -1109,6 +1195,217 @@ class AppController:
         """Exit build mode without firing any action."""
         self._build_card_id = None
         self._build_positions = []
+
+    # ── Stage 10: King (Coronation / Succession) ─────────────────────────
+
+    def _king_card_name(self, king_card_id: str) -> str:
+        if self._registry is not None and king_card_id in self._registry:
+            return self._registry.get(king_card_id).name
+        return king_card_id
+
+    def _do_king(self) -> None:
+        """
+        Sidebar button: open the King picker.
+
+        Shows Coronation targets (no active King yet) OR Succession targets
+        (an active King exists and a HIDDEN King remains) — whichever the
+        engine's legal actions currently offer. Only valid during
+        PREPARATION, before the preparation action is used.
+        """
+        obs = self._current_obs()
+        if obs.phase != Phase.PREPARATION:
+            return
+        active = obs.active_player
+        if self._player_modes.get(active) == "ai":
+            return
+        self._cancel_king_mode()
+        self._cancel_build_mode()
+        self._cancel_summon()
+        self._cancel_targeting_mode()
+        self._cancel_spell_piece_mode()
+
+        legal = self._game.get_legal_actions(active)
+        coronate_actions = [a for a in legal if isinstance(a, CoronateKing)]
+        change_actions = [a for a in legal if isinstance(a, ChangeKing)]
+
+        if coronate_actions:
+            seen: list[str] = []
+            for a in coronate_actions:
+                if a.king_card_id not in seen:
+                    seen.append(a.king_card_id)
+            rows = [(f"👑  Crown: {self._king_card_name(kid)}", kid) for kid in seen]
+            self._king_picker = _KingDialog(
+                self._screen, self._font_small, "👑  Coronation", rows,
+            )
+            self._king_picker_mode = "coronate"
+        elif change_actions:
+            seen = []
+            for a in change_actions:
+                if a.king_card_id not in seen:
+                    seen.append(a.king_card_id)
+            rows = [(f"⚔  Succeed: {self._king_card_name(kid)}", kid) for kid in seen]
+            self._king_picker = _KingDialog(
+                self._screen, self._font_small, "⚔  Succession", rows,
+            )
+            self._king_picker_mode = "succeed"
+            self._king_picker_actions = change_actions
+        else:
+            self._show_toast("No King action available right now.")
+
+    def _on_king_picker_choice(self, key: str) -> None:
+        """Route a completed _king_picker click by the flow's current step."""
+        mode = self._king_picker_mode
+        self._king_picker = None
+
+        obs = self._current_obs()
+        active = obs.active_player
+
+        if mode == "coronate":
+            self._execute_and_advance(
+                CoronateKing(player_id=active, king_card_id=key), active,
+            )
+            self._cancel_king_mode()
+            return
+
+        if mode == "succeed":
+            self._begin_king_succession_cost(key)
+            return
+
+        if mode == "cost_choice":
+            self._on_king_cost_choice(key)
+            return
+
+        if mode == "building_choice":
+            self._on_king_building_choice(key)
+            return
+
+    def _begin_king_succession_cost(self, king_card_id: str) -> None:
+        """
+        A Succession target King was chosen — figure out the cost shape
+        (README §19.1, see ChangeKing) and open whichever picker comes next.
+
+        1st Succession — OR cost: only pure-piece and/or pure-Building
+            ChangeKing actions exist for this King. Offer a choice between
+            the two.
+        2nd Succession — AND cost: every ChangeKing action for this King
+            carries both a sacrifice_position and a destroy_building_id.
+            Pick the Building first, then the piece.
+        """
+        actions = [a for a in self._king_picker_actions if a.king_card_id == king_card_id]
+        self._king_succession_target = king_card_id
+
+        pure_piece    = [a for a in actions if a.destroy_building_id is None and a.sacrifice_position is not None]
+        pure_building = [a for a in actions if a.sacrifice_position is None and a.destroy_building_id is not None]
+        combined      = [a for a in actions if a.sacrifice_position is not None and a.destroy_building_id is not None]
+
+        if combined:
+            self._king_and_mode = True
+            self._open_king_building_picker(combined)
+            return
+
+        self._king_and_mode = False
+        self._king_picker_actions = actions
+        rows: list[tuple[str, "Any"]] = []
+        if pure_piece:
+            rows.append(("🗡  Sacrifice a Piece", "piece"))
+        if pure_building:
+            rows.append(("🏛  Destroy a Building", "building"))
+        if not rows:
+            self._show_toast("No Succession cost available.")
+            self._cancel_king_mode()
+            return
+        self._king_picker = _KingDialog(
+            self._screen, self._font_small, "Succession Cost", rows,
+        )
+        self._king_picker_mode = "cost_choice"
+
+    def _on_king_cost_choice(self, choice: str) -> None:
+        """1st Succession only: the player picked which single cost to pay."""
+        self._king_picker = None
+        actions = self._king_picker_actions
+        if choice == "piece":
+            positions = list({
+                a.sacrifice_position for a in actions
+                if a.destroy_building_id is None and a.sacrifice_position is not None
+            })
+            self._king_sacrifice_positions = positions
+            self._king_sacrifice_building_id = None
+            self._show_toast("Succession — click a piece to sacrifice  (ESC to cancel)")
+        elif choice == "building":
+            pure_building = [
+                a for a in actions
+                if a.sacrifice_position is None and a.destroy_building_id is not None
+            ]
+            self._open_king_building_picker(pure_building)
+
+    def _building_display_name(self, building_id: str) -> str:
+        bld = next((b for b in self._game.state.buildings if b.id == building_id), None)
+        if bld is None:
+            return building_id
+        if self._registry is not None and bld.building_card_id in self._registry:
+            return self._registry.get(bld.building_card_id).name
+        return bld.building_card_id
+
+    def _open_king_building_picker(self, actions: list) -> None:
+        """
+        Open a picker listing the distinct Buildings named across ``actions``.
+
+        Used both for the 1st Succession's "Destroy a Building" cost choice
+        (picking a Building commits the Succession directly) and the 2nd
+        Succession's AND cost (picking a Building here is only step one —
+        the piece-sacrifice board-click mode follows).
+        """
+        self._king_picker_actions = actions
+        seen: list[str] = []
+        for a in actions:
+            if a.destroy_building_id not in seen:
+                seen.append(a.destroy_building_id)
+        rows = [(f"🏛  {self._building_display_name(bid)}", bid) for bid in seen]
+        self._king_picker = _KingDialog(
+            self._screen, self._font_small, "Choose a Building", rows,
+        )
+        self._king_picker_mode = "building_choice"
+
+    def _on_king_building_choice(self, building_id: str) -> None:
+        self._king_picker = None
+        actions = [a for a in self._king_picker_actions if a.destroy_building_id == building_id]
+
+        if self._king_and_mode:
+            # 2nd Succession: Building chosen — now pick the piece.
+            positions = list({
+                a.sacrifice_position for a in actions if a.sacrifice_position is not None
+            })
+            self._king_sacrifice_positions = positions
+            self._king_sacrifice_building_id = building_id
+            self._show_toast("Succession — click a piece to sacrifice  (ESC to cancel)")
+        else:
+            # 1st Succession, Building-only cost — commits directly.
+            obs = self._current_obs()
+            active = obs.active_player
+            self._execute_and_advance(ChangeKing(
+                player_id=active, king_card_id=self._king_succession_target,
+                destroy_building_id=building_id,
+            ), active)
+            self._cancel_king_mode()
+
+    def _do_king_sacrifice(self, pos: Position, player_id: str) -> None:
+        """Commit the ChangeKing action once the sacrifice piece is clicked."""
+        action = ChangeKing(
+            player_id=player_id, king_card_id=self._king_succession_target,
+            sacrifice_position=pos, destroy_building_id=self._king_sacrifice_building_id,
+        )
+        self._cancel_king_mode()
+        self._execute_and_advance(action, player_id)
+
+    def _cancel_king_mode(self) -> None:
+        """Exit every step of the King flow without firing any action."""
+        self._king_picker = None
+        self._king_picker_mode = None
+        self._king_picker_actions = []
+        self._king_succession_target = None
+        self._king_and_mode = False
+        self._king_sacrifice_positions = []
+        self._king_sacrifice_building_id = None
 
     def _handle_mercenary_card_click(self, card_id: str, obs: "object") -> None:
         """
@@ -1184,9 +1481,13 @@ class AppController:
 
         • A unit hosting a Monster → open it in the CardViewer directly
           (toggle off if that exact unit is already open).
-        • A plain unit (no Monster) → nothing of its own to view, but it
-          may be standing inside an active zone — falls through to the
-          zone check below rather than clearing outright.
+        • A Crowned King (Stage 10) → open its owner's ACTIVE King card
+          instead (README §17: the active King is public once Coronated,
+          so this is safe regardless of whose King it is).
+        • A plain unit (no Monster, King with no active policy yet) →
+          nothing of its own to view, but it may be standing inside an
+          active zone — falls through to the zone check below rather than
+          clearing outright.
         • The square is inside one or more of the player's OWN
           active Trap/zone effects → populate the "Active in this zone"
           list. This does NOT open the viewer itself — right-click one of
@@ -1210,8 +1511,20 @@ class AppController:
                 self._viewer_card_id = unit_here.monster_id
             return
 
-        # Either no unit here, or a plain (non-Monster) unit that has
-        # nothing of its own to view — either way, check what's in the zone.
+        if unit_here is not None and unit_here.piece_type == "king":
+            active_king_id = self._game.state.get_player(unit_here.owner).active_king
+            if active_king_id is not None:
+                self._zone_active_entries = None
+                if pos == self._inspect_unit_pos:
+                    self._inspect_unit_pos = None
+                    self._viewer_card_id = None
+                else:
+                    self._inspect_unit_pos = pos
+                    self._viewer_card_id = active_king_id
+                return
+
+        # Either no unit here, or a plain (non-Monster, uncrowned-King) unit
+        # that has nothing of its own to view — either way, check the zone.
         self._inspect_unit_pos = None
 
         entries = self._collect_zone_entries(pos, obs)
@@ -1895,6 +2208,9 @@ class AppController:
                 ]
         elif obs.phase == Phase.MERCENARY_PLACEMENT and self._player_modes.get(obs.active_player) == "human":
             board_summon_dests = list(self._mercenary_placement_squares)
+        elif self._king_sacrifice_positions:
+            # Stage 10: Succession piece-sacrifice mode — same gold-ring channel.
+            board_summon_dests = list(self._king_sacrifice_positions)
 
         self._board_view.draw(
             observation=obs,
@@ -1906,6 +2222,7 @@ class AppController:
             inspect_pos=self._inspect_unit_pos,
             aura_colors=self._compute_aura_colors(obs),
             show_territory=self._show_territory,
+            crowned_kings=self._compute_crowned_kings(obs),
         )
 
         # Stage 6: hover tooltip for Traps / active zone effects.
@@ -1961,6 +2278,22 @@ class AppController:
             has_pool = any(e.copies_available > 0 for e in ps.building_pool)
             show_build = has_builder and has_pool
 
+        # King button (Stage 10): same tri-state convention as Build/Mercenary.
+        #   None  = not in PREPARATION, or the King Pool is fully spent
+        #           (no HIDDEN King left ever again) → don't draw at all.
+        #   False = a Coronation/Succession is conceptually possible but not
+        #           legal right now (e.g. in check) → greyed out.
+        #   True  = at least one Coronation/Succession is legal this instant.
+        show_king: "bool | None" = None
+        if prep_available:
+            ps = self._game.state.get_player(active)
+            king_conceptually_possible = any(
+                kcs.status == KingCardStatus.HIDDEN for kcs in ps.king_pool
+            )
+            if king_conceptually_possible:
+                legal = self._game.get_legal_actions(active)
+                show_king = any(isinstance(a, (CoronateKing, ChangeKing)) for a in legal)
+
         # ── CardViewer (left sidebar) ───────────────────────────────────────
         # Stage 6 (corrected): right-click driven only — hand cards, board
         # units, and "Active in this zone" entries all set self._viewer_card_id
@@ -1978,6 +2311,14 @@ class AppController:
                 if unit_info.owner == active and obs.phase == Phase.CHESS and active_is_human:
                     ability_ids = list(unit_info.activatable_effects)
                 _unit_statuses = unit_info.statuses
+            elif (
+                unit_info is not None
+                and unit_info.piece_type == "king"
+                and self._game.state.get_player(unit_info.owner).active_king == self._viewer_card_id
+            ):
+                # Stage 10: a Crowned King has no live "statuses"/abilities
+                # of its own — just keep it selected (matched, not stale).
+                pass
             else:
                 # Stale — the unit moved/changed since the right-click.
                 self._inspect_unit_pos = None
@@ -1997,6 +2338,7 @@ class AppController:
             show_recompose_btn=show_recompose,
             show_mercenary_btn=show_mercenary,
             show_build_btn=show_build,
+            show_king_btn=show_king,
             show_territory=self._show_territory,
             activatable_entries=activatable_entries or None,
         )
@@ -2064,6 +2406,10 @@ class AppController:
         # Stage 8: Building Pool picker dialog
         if self._build_picker is not None:
             self._build_picker.draw()
+
+        # Stage 10: King (Coronation / Succession) picker dialog
+        if self._king_picker is not None:
+            self._king_picker.draw()
 
         # Game-over banner
         if self._game.is_over():
@@ -2378,6 +2724,132 @@ class _BuildPicker:
             name, cost = self._card_label(entry)
             label = f"{name}  —  {cost} pt(s)  ×{entry.copies_available} left"
             color = (170, 230, 185) if available else (75, 90, 80)
+            lbl_surf = self._font.render(label, True, color)
+            ly = row_rect.y + (self._ROW_H - lbl_surf.get_height()) // 2
+            self._surface.blit(lbl_surf, (row_rect.x + 6, ly))
+
+            y += self._ROW_H + 3
+
+        y += 6
+        cancel_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._CANCEL_H)
+        self._cancel_rect = cancel_rect
+        hover_c = cancel_rect.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, (50, 30, 30) if hover_c else (30, 20, 20),
+                         cancel_rect, border_radius=4)
+        pygame.draw.rect(self._surface, (160, 80, 80), cancel_rect, 1, border_radius=4)
+        cs = self._font.render("Cancel", True, (180, 100, 100))
+        self._surface.blit(cs, (
+            cancel_rect.x + (cancel_rect.width - cs.get_width()) // 2,
+            cancel_rect.y + (cancel_rect.height - cs.get_height()) // 2,
+        ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _KingDialog — generic modal list-picker for the King system (Stage 10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _KingDialog:
+    """
+    Generic modal list-picker reused across every step of the Coronation /
+    Succession flow: choosing which King to Crown or Succeed to, choosing
+    which cost to pay (1st Succession's piece-OR-Building choice), and
+    choosing which Building (either cost path).
+
+    Each row is ``(label, key)``; a row with ``key=None`` renders disabled
+    and is unclickable — not used today (every row built by the AppController
+    is always clickable) but kept for parity with _MercenaryPicker/_BuildPicker.
+
+    ``handle_click(mx, my)`` returns the clicked row's key, "cancel", or
+    None (missed everything).
+    """
+
+    _W = 300
+    _ROW_H = 32
+    _PADDING = 12
+    _CANCEL_H = 28
+
+    def __init__(
+        self,
+        surface: "pygame.Surface",
+        font: "Any",
+        title: str,
+        rows: "list[tuple[str, Any]]",
+        accent: tuple = (210, 180, 110),
+        border: tuple = (170, 140, 70),
+    ) -> None:
+        self._surface = surface
+        self._font = font
+        self._title = title
+        self._rows = rows
+        self._accent = accent
+        self._border = border
+        self._mouse_pos: tuple[int, int] = (0, 0)
+
+        h = (self._PADDING
+             + self._font.render("Ag", True, (0, 0, 0)).get_height() + 8   # title
+             + max(len(rows), 1) * (self._ROW_H + 3)
+             + 6 + self._CANCEL_H
+             + self._PADDING)
+        sw = surface.get_width()
+        sh = surface.get_height()
+        self._rect = pygame.Rect((sw - self._W) // 2, (sh - h) // 2, self._W, h)
+        self._row_rects: list[pygame.Rect] = []
+        self._cancel_rect: pygame.Rect | None = None
+
+    def handle_click(self, mx: int, my: int) -> "str | None":
+        for i, rect in enumerate(self._row_rects):
+            if rect.collidepoint(mx, my):
+                _label, key = self._rows[i]
+                if key is not None:
+                    return key
+                return None
+        if self._cancel_rect and self._cancel_rect.collidepoint(mx, my):
+            return "cancel"
+        if not self._rect.collidepoint(mx, my):
+            return "cancel"
+        return None
+
+    def key_at(self, mx: int, my: int) -> "str | None":
+        """
+        RIGHT-click hit-test: the row's key at (mx, my), regardless of
+        whether that row is enabled — used to inspect a King/Building card
+        in the CardViewer without selecting it. Returns None off any row.
+        """
+        for i, rect in enumerate(self._row_rects):
+            if rect.collidepoint(mx, my):
+                return self._rows[i][1]
+        return None
+
+    def draw(self) -> None:
+        overlay = pygame.Surface(
+            (self._surface.get_width(), self._surface.get_height()), pygame.SRCALPHA
+        )
+        overlay.fill((0, 0, 0, 140))
+        self._surface.blit(overlay, (0, 0))
+
+        pygame.draw.rect(self._surface, (28, 22, 32), self._rect, border_radius=6)
+        pygame.draw.rect(self._surface, self._border, self._rect, 2, border_radius=6)
+
+        x = self._rect.x + self._PADDING
+        y = self._rect.y + self._PADDING
+
+        title_surf = self._font.render(self._title, True, self._accent)
+        self._surface.blit(title_surf, (x, y))
+        y += title_surf.get_height() + 8
+
+        self._row_rects = []
+        for label, key in self._rows:
+            row_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._ROW_H)
+            self._row_rects.append(row_rect)
+            enabled = key is not None
+
+            hover = enabled and row_rect.collidepoint(self._mouse_pos)
+            bg = (48, 38, 22) if hover else (36, 28, 18)
+            pygame.draw.rect(self._surface, bg, row_rect, border_radius=4)
+            border = self._border if enabled else (60, 55, 45)
+            pygame.draw.rect(self._surface, border, row_rect, 1, border_radius=4)
+
+            color = self._accent if enabled else (85, 78, 65)
             lbl_surf = self._font.render(label, True, color)
             ly = row_rect.y + (self._ROW_H - lbl_surf.get_height()) // 2
             self._surface.blit(lbl_surf, (row_rect.x + 6, ly))
