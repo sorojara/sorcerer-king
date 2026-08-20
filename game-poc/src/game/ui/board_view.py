@@ -25,6 +25,7 @@ Piece glyphs (Unicode chess symbols):
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import pygame
@@ -51,6 +52,10 @@ from game.ui.colors import (
     BUILDING_MARKER_ENEMY,
     BUILDING_MARKER_OWN,
     BUILDING_MARKER_UNDER_CONSTR,
+    ROYAL_AURA_GOLD,
+    ROYAL_AURA_VIOLET,
+    ROYAL_BAR,
+    ROYAL_LABEL_BG,
     SUMMON_VESSEL_DOT,
     SUMMON_VESSEL_TINT,
     TERRITORY_BORDER_ENEMY,
@@ -174,6 +179,7 @@ class BoardView:
         inspect_pos: Position | None = None,
         aura_colors: "dict[Position, tuple[int, int, int]] | None" = None,
         show_territory: bool = True,
+        crowned_kings: "dict[Position, str] | None" = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -197,6 +203,15 @@ class BoardView:
                               Monster, or missing from the map, get no aura.
         show_territory      : Stage 9 — whether to draw the Territory base
                               tint (AppController's toggle button flips this).
+        crowned_kings       : Stage 10 — Position → active king_card_id for
+                              every King whose owner currently has an
+                              ACTIVE King Card (README §17 Coronation).
+                              Gets a richer, animated "royal" treatment —
+                              see _draw_pieces — distinct from (and
+                              grander than) a Monster's archetype aura,
+                              since there's only ever one Crowned King per
+                              side. Mirrors aura_colors: this module never
+                              looks the card up itself.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos,
@@ -204,7 +219,7 @@ class BoardView:
         self._draw_coordinates()
         self._draw_traps(observation)
         self._draw_buildings(observation)
-        self._draw_pieces(observation, aura_colors or {})
+        self._draw_pieces(observation, aura_colors or {}, crowned_kings or {})
 
     # ── Private draw helpers ──────────────────────────────────────────────
 
@@ -526,12 +541,15 @@ class BoardView:
         self,
         obs: "Observation",
         aura_colors: "dict[Position, tuple[int, int, int]]",
+        crowned_kings: "dict[Position, str]",
     ) -> None:
         """Render all pieces as Unicode glyphs centered on their squares.
 
         Stage 5: monster units get a gold underline bar and a tiny name label.
         Stage 6: monster units also get a colored aura keyed by archetype
         (see ui/archetype_colors.py) — drawn first so the glyph sits on top.
+        Stage 10: a Crowned King gets its own richer, animated aura, bar,
+        name label, and crown badge — see _draw_royal_aura below.
         """
         for unit_info in obs.board.units:
             pos = unit_info.position
@@ -540,6 +558,8 @@ class BoardView:
             glyph = glyph_pair[0] if unit_info.owner == "white" else glyph_pair[1]
 
             has_monster = bool(getattr(unit_info, "monster_id", None))
+            king_card_id = crowned_kings.get(pos) if unit_info.piece_type == "king" else None
+            is_crowned_king = king_card_id is not None
             text_color = WHITE_PIECE if unit_info.owner == "white" else BLACK_PIECE
             shadow_color = WHITE_PIECE_SHADOW if unit_info.owner == "white" else BLACK_PIECE_SHADOW
 
@@ -552,6 +572,12 @@ class BoardView:
                 pygame.draw.circle(aura, (*color, 70), (cx, cy), radius)
                 pygame.draw.circle(aura, (*color, 190), (cx, cy), radius, 3)
                 self._surface.blit(aura, (sx, sy))
+
+            # Stage 10: Crowned King — richer, animated "royal" aura,
+            # behind the glyph (same channel as the Monster aura above,
+            # but a King is never also a Monster so the two never overlap).
+            if is_crowned_king:
+                self._draw_royal_aura(sx, sy)
 
             # Shadow (offset by 1 pixel)
             shadow = self._font_large.render(glyph, True, shadow_color)
@@ -605,6 +631,59 @@ class BoardView:
                         self._surface, WHITE_PIECE,
                         (badge_cx, badge_cy), badge_r, 1,
                     )
+
+            # Stage 10: Crowned King — gold underline bar + King-name label
+            # (mirrors the Monster treatment above) plus a crown badge in
+            # the corner (a King has no activatable-ability badge to
+            # collide with there).
+            if is_crowned_king:
+                bar_h = 4
+                bar_y = sy + SQUARE_SIZE - bar_h - 1
+                pygame.draw.rect(
+                    self._surface, ROYAL_BAR,
+                    pygame.Rect(sx + 3, bar_y, SQUARE_SIZE - 6, bar_h),
+                    border_radius=2,
+                )
+                short_name = king_card_id.replace("_", " ").title()
+                lbl = self._font_small.render(short_name, True, ROYAL_BAR)
+                lbl_bg = pygame.Surface((lbl.get_width() + 4, lbl.get_height() + 2), pygame.SRCALPHA)
+                lbl_bg.fill(ROYAL_LABEL_BG)
+                lbl_x = sx + (SQUARE_SIZE - lbl.get_width()) // 2
+                lbl_y = bar_y - lbl.get_height() - 1
+                self._surface.blit(lbl_bg, (lbl_x - 2, lbl_y - 1))
+                self._surface.blit(lbl, (lbl_x, lbl_y))
+
+                crown = self._font_small.render("\U0001F451", True, ROYAL_AURA_GOLD)
+                self._surface.blit(crown, (
+                    sx + SQUARE_SIZE - crown.get_width() - 2,
+                    sy + 1,
+                ))
+
+    def _draw_royal_aura(self, sx: int, sy: int) -> None:
+        """
+        Stage 10 — a Crowned King's aura, behind the glyph.
+
+        Deliberately more elaborate than a Monster's static single ring +
+        glow (ui/colors.py ROYAL_AURA_* docstring): a slow breathing pulse
+        (via ``pygame.time.get_ticks()``) drives the outer glow's radius
+        and alpha, layered under a solid gold ring and a thinner inner
+        violet ring — there's only ever one Crowned King per side, so it
+        should read as singular, not just "another archetype colour".
+        """
+        t = pygame.time.get_ticks() / 1000.0
+        pulse = (math.sin(t * 2.4) + 1) / 2   # 0..1, ~2.6s breathing cycle
+
+        aura = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
+        cx, cy = SQUARE_SIZE // 2, SQUARE_SIZE // 2
+        glow_radius = SQUARE_SIZE // 2 - 3 + int(pulse * 2)
+        outer_radius = SQUARE_SIZE // 2 - 3
+        inner_radius = SQUARE_SIZE // 2 - 8
+        glow_alpha = int(55 + pulse * 45)
+
+        pygame.draw.circle(aura, (*ROYAL_AURA_GOLD, glow_alpha), (cx, cy), glow_radius)
+        pygame.draw.circle(aura, (*ROYAL_AURA_GOLD, 210), (cx, cy), outer_radius, 3)
+        pygame.draw.circle(aura, (*ROYAL_AURA_VIOLET, 180), (cx, cy), inner_radius, 1)
+        self._surface.blit(aura, (sx, sy))
 
     # ── Hit-test helper ───────────────────────────────────────────────────
 

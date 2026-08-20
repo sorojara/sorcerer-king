@@ -89,6 +89,8 @@ class SidebarOverlay:
         self._btn_mercenary_enabled: bool = False
         self._btn_build: pygame.Rect | None = None
         self._btn_build_enabled: bool = False
+        self._btn_king: pygame.Rect | None = None
+        self._btn_king_enabled: bool = False
         self._mouse_pos: tuple[int, int] = (0, 0)
         # Stage 6: cached "Activatable" row rects: list of (token, Rect)
         self._activatable_btn_rects: list[tuple[str, pygame.Rect]] = []
@@ -108,6 +110,7 @@ class SidebarOverlay:
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
             'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
             'build'             — Stage 8: Open the Building Pool picker (PREPARATION only)
+            'king'              — Stage 10: Open the King picker (Coronation/Succession, PREPARATION only)
             'trap:<id>'         — Stage 6: Activatable-section Trap button (id = trap_instance_id)
             'ability_at:<f>:<r>:<id>' — Stage 6: Activatable-section monster ability
                                  button, naming the piece's position since the
@@ -136,6 +139,8 @@ class SidebarOverlay:
             return "mercenary"
         if self._btn_build and getattr(self, "_btn_build_enabled", False) and self._btn_build.collidepoint(mx, my):
             return "build"
+        if self._btn_king and getattr(self, "_btn_king_enabled", False) and self._btn_king.collidepoint(mx, my):
+            return "king"
         for token, rect in self._activatable_btn_rects:
             if rect.collidepoint(mx, my):
                 return token
@@ -149,6 +154,7 @@ class SidebarOverlay:
         show_recompose_btn: bool = False,
         show_mercenary_btn: "bool | None" = None,
         show_build_btn: "bool | None" = None,
+        show_king_btn: "bool | None" = None,
         show_territory: bool = True,
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
@@ -164,6 +170,11 @@ class SidebarOverlay:
         ``show_build_btn``      — Stage 8: same tri-state convention as
                                   ``show_mercenary_btn`` for the Building
                                   Pool picker button.
+        ``show_king_btn``       — Stage 10: same tri-state convention as
+                                  ``show_mercenary_btn`` for the Coronation /
+                                  Succession picker button. None hides the
+                                  button entirely once the King Pool is
+                                  fully spent (no HIDDEN King left).
         ``show_territory``      — Stage 9: current on/off state of the
                                   Territory board tint, shown as the toggle
                                   button's label (always drawn, unlike the
@@ -410,6 +421,29 @@ class SidebarOverlay:
             ))
         else:
             self._btn_build = None
+
+        # King button — Stage 10: opens the Coronation/Succession picker.
+        if show_king_btn is not None:
+            kg_enabled = bool(show_king_btn)
+            self._btn_king_enabled = kg_enabled
+            kg_label = "👑  King"
+            kg_color  = (210, 180, 110) if kg_enabled else (80, 72, 55)
+            kg_border = (170, 140, 70) if kg_enabled else (60, 55, 45)
+            y += self.BTN_H + 4
+            self._btn_king = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+            hover_kg = kg_enabled and self._btn_king.collidepoint(self._mouse_pos)
+            pygame.draw.rect(self._surface,
+                             DIALOG_HOVER if hover_kg else DIALOG_BG,
+                             self._btn_king, border_radius=4)
+            pygame.draw.rect(self._surface, kg_border,
+                             self._btn_king, 1, border_radius=4)
+            kgs = self._font_small.render(kg_label, True, kg_color)
+            self._surface.blit(kgs, (
+                self._btn_king.x + (btn_w - kgs.get_width()) // 2,
+                self._btn_king.y + (self.BTN_H - kgs.get_height()) // 2,
+            ))
+        else:
+            self._btn_king = None
 
         # Controls hint + Export/Import buttons at the fixed bottom position.
         # (Card detail now lives entirely in the left CardViewer.)
@@ -745,6 +779,10 @@ class CardViewer:
             badge_color = (80, 140, 220)
             spell_type = getattr(card, "spell_type", None)
             arch_line = f"SPC  {spell_type.value}" if spell_type else "SPC"
+        elif card.card_type == CardType.KING:
+            badge_color = (210, 180, 110)
+            title = getattr(card, "title", "")
+            arch_line = f"KNG  {title}" if title else "KNG"
         else:
             badge_color = (160, 100, 220)
             trigger = getattr(card, "trigger", None)

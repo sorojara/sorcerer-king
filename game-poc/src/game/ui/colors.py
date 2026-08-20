@@ -114,3 +114,15 @@ COORD_DARK     = (240, 217, 181)   # labels on dark squares  (use light sq colou
 # ── General ────────────────────────────────────────────────────────────────
 BLACK          = (  0,   0,   0)
 WHITE          = (255, 255, 255)
+
+# ── Stage 10: Crowned King (Coronation) ─────────────────────────────────────
+# Deliberately its own palette rather than reusing SUMMON_VESSEL_DOT/
+# ACTIVATABLE_DOT — a Crowned King should read as grander than an ordinary
+# summoned Monster (there is only ever one per side), not merely "another
+# aura colour". Two tones (gold outer, violet inner) give the pulsing
+# double-ring in board_view.py a richer, layered look than the Monster
+# aura's single ring + glow.
+ROYAL_AURA_GOLD    = (255, 215,  90)   # outer pulsing ring + glow
+ROYAL_AURA_VIOLET  = (200, 140, 255)   # inner ring accent
+ROYAL_BAR          = (255, 215,  90)   # underline bar (mirrors SUMMON_VESSEL_DOT's role)
+ROYAL_LABEL_BG     = ( 40,  30,  10, 200)  # RGBA backing for the King-name label
