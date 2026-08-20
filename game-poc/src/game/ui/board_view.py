@@ -51,11 +51,17 @@ from game.ui.colors import (
     SUMMON_VESSEL_TINT,
     TRAP_LABEL_BG,
     TRAP_MARKER_ENEMY,
+    TRAP_MARKER_ENEMY_ACTIVE,
     TRAP_MARKER_OWN,
+    TRAP_MARKER_OWN_ACTIVE,
     WHITE_PIECE,
     WHITE_PIECE_SHADOW,
     ZONE_TINT_ENEMY,
+    ZONE_TINT_ENEMY_ACTIVE,
     ZONE_TINT_OWN,
+    ZONE_TINT_OWN_ACTIVE,
+    ZONE_TINT_SPELL_ENEMY,
+    ZONE_TINT_SPELL_OWN,
 )
 
 if TYPE_CHECKING:
@@ -213,25 +219,33 @@ class BoardView:
 
         vessel_set: set[Position] = set(summon_vessel_dests or [])
 
-        # Stage 6: every Trap's full activation area (always visible — Traps
-        # are never secret) + every active persistent zone effect.  Tinted
-        # by OWNERSHIP relative to the viewer (obs.player_id), not by effect
-        # type — an opponent's zone shows only that a hazard exists there,
-        # never what it actually does (see _draw_traps for the matching
-        # identity-hiding on the marker/label).
-        own_zone_squares: set[Position] = set()
-        enemy_zone_squares: set[Position] = set()
+        # Stage 6: zones split by source so each gets a distinct tint.
+        #
+        # • Dormant Trap zones  → muted blue/red   (ZONE_TINT_OWN/ENEMY)
+        # • Activated Trap zones→ vivid gold/orange (ZONE_TINT_*_ACTIVE)
+        # • Active Spell zones  → purple/magenta    (ZONE_TINT_SPELL_*)
+        #
+        # Ownership framing is always relative to obs.player_id (the viewer).
+        # Priority when a square falls in multiple sets (highest → lowest):
+        #   activated trap > spell zone > dormant trap
+        own_trap_active_squares:   set[Position] = set()
+        enemy_trap_active_squares: set[Position] = set()
+        own_trap_squares:          set[Position] = set()
+        enemy_trap_squares:        set[Position] = set()
+        own_spell_squares:         set[Position] = set()
+        enemy_spell_squares:       set[Position] = set()
+
         for trap in obs.board.trap_locations:
             area = expand_area(trap.position, trap.radius, trap.shape)
-            if trap.owner == obs.player_id:
-                own_zone_squares.update(area)
+            is_own = trap.owner == obs.player_id
+            if getattr(trap, "activated", False):
+                (own_trap_active_squares if is_own else enemy_trap_active_squares).update(area)
             else:
-                enemy_zone_squares.update(area)
+                (own_trap_squares if is_own else enemy_trap_squares).update(area)
+
         for eff in obs.board.square_effects:
-            if eff.owner == obs.player_id:
-                own_zone_squares.add(eff.position)
-            else:
-                enemy_zone_squares.add(eff.position)
+            is_own = eff.owner == obs.player_id
+            (own_spell_squares if is_own else enemy_spell_squares).add(eff.position)
 
         for file in range(8):
             for rank in range(8):
@@ -242,14 +256,26 @@ class BoardView:
                 rect = pygame.Rect(sx, sy, SQUARE_SIZE, SQUARE_SIZE)
                 pygame.draw.rect(self._surface, color, rect)
 
-                # Stage 6: Trap danger zone + active effect zone (drawn first
-                # so selection/check/inspect highlights stay visually on top).
-                # A square can be both (e.g. own Trap area overlapping an
-                # enemy zone) — own tint wins so you always see your own info.
-                if pos in own_zone_squares:
+                # Stage 6: zone tints — drawn before selection/check so those
+                # highlights always read on top.  Priority: activated trap >
+                # spell zone > dormant trap.  Own tint beats enemy tint when
+                # both would apply to the same square.
+                if pos in own_trap_active_squares:
+                    self._overlay.fill(ZONE_TINT_OWN_ACTIVE)
+                    self._surface.blit(self._overlay, (sx, sy))
+                elif pos in enemy_trap_active_squares:
+                    self._overlay.fill(ZONE_TINT_ENEMY_ACTIVE)
+                    self._surface.blit(self._overlay, (sx, sy))
+                elif pos in own_spell_squares:
+                    self._overlay.fill(ZONE_TINT_SPELL_OWN)
+                    self._surface.blit(self._overlay, (sx, sy))
+                elif pos in enemy_spell_squares:
+                    self._overlay.fill(ZONE_TINT_SPELL_ENEMY)
+                    self._surface.blit(self._overlay, (sx, sy))
+                elif pos in own_trap_squares:
                     self._overlay.fill(ZONE_TINT_OWN)
                     self._surface.blit(self._overlay, (sx, sy))
-                elif pos in enemy_zone_squares:
+                elif pos in enemy_trap_squares:
                     self._overlay.fill(ZONE_TINT_ENEMY)
                     self._surface.blit(self._overlay, (sx, sy))
 
@@ -361,7 +387,11 @@ class BoardView:
             cx = sx + SQUARE_SIZE // 2
             cy = sy + SQUARE_SIZE // 2
             is_own = trap.owner == obs.player_id
-            ring_color = TRAP_MARKER_OWN if is_own else TRAP_MARKER_ENEMY
+            is_active = getattr(trap, "activated", False)
+            if is_own:
+                ring_color = TRAP_MARKER_OWN_ACTIVE if is_active else TRAP_MARKER_OWN
+            else:
+                ring_color = TRAP_MARKER_ENEMY_ACTIVE if is_active else TRAP_MARKER_ENEMY
             pygame.draw.circle(
                 self._surface, ring_color, (cx, cy),
                 SQUARE_SIZE // 2 - 3, 3,

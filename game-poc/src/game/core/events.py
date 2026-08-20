@@ -34,6 +34,9 @@ v0.1 events (minimal required set for Stage 0 invariant tests):
     Recompose:
         RecomposeInitiated, RecomposeResolved
 
+    Mercenary:
+        MercenaryContractFired, MercenaryPiecePlaced
+
     Building:
         ConstructionStarted, BuildingCompleted, BuildingDestroyed
 
@@ -352,6 +355,29 @@ class RecomposeResolved(Event):
     player_id: str
     returned_card_ids: tuple[str, ...]
     drawn_card_ids: tuple[str, ...]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mercenary Events
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class MercenaryContractFired(Event):
+    """Fired when SelectMercenaryCards is executed; cards are removed from game."""
+
+    player_id: str
+    sacrificed_card_ids: tuple[str, ...]   # Monster cards removed from game
+    piece_type: str                         # piece type the player is purchasing
+
+
+@dataclass(frozen=True)
+class MercenaryPiecePlaced(Event):
+    """Fired when PlaceMercenaryPiece is executed; new piece is on the board."""
+
+    player_id: str
+    piece_type: str
+    position: Position
+    piece_id: str                           # canonical ID of the new piece
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -84,6 +84,8 @@ class SidebarOverlay:
         self._btn_black_mode: pygame.Rect | None = None
         self._btn_black_hand: pygame.Rect | None = None
         self._btn_recompose: pygame.Rect | None = None
+        self._btn_mercenary: pygame.Rect | None = None
+        self._btn_mercenary_enabled: bool = False
         self._mouse_pos: tuple[int, int] = (0, 0)
         # Stage 6: cached "Activatable" row rects: list of (token, Rect)
         self._activatable_btn_rects: list[tuple[str, pygame.Rect]] = []
@@ -100,6 +102,7 @@ class SidebarOverlay:
             'toggle_black'      — Toggle black player mode
             'toggle_black_hand' — Toggle black-hand debug view
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
+            'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
             'trap:<id>'         — Stage 6: Activatable-section Trap button (id = trap_instance_id)
             'ability_at:<f>:<r>:<id>' — Stage 6: Activatable-section monster ability
                                  button, naming the piece's position since the
@@ -118,6 +121,12 @@ class SidebarOverlay:
             return "toggle_black_hand"
         if self._btn_recompose and self._btn_recompose.collidepoint(mx, my):
             return "recompose"
+        # Mercenary: only fire if enabled (the button rect exists but may be
+        # rendered as disabled — check by comparing colour isn't possible, so
+        # the AppController passes show_mercenary_btn=False when disabled and we
+        # skip the click by checking against an "enabled" sentinel we store below).
+        if self._btn_mercenary and getattr(self, "_btn_mercenary_enabled", False) and self._btn_mercenary.collidepoint(mx, my):
+            return "mercenary"
         for token, rect in self._activatable_btn_rects:
             if rect.collidepoint(mx, my):
                 return token
@@ -129,6 +138,7 @@ class SidebarOverlay:
         player_modes: dict | None = None,
         show_black_hand: bool = False,
         show_recompose_btn: bool = False,
+        show_mercenary_btn: "bool | None" = None,
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
         """
@@ -136,8 +146,11 @@ class SidebarOverlay:
 
         ``player_modes``       — optional dict mapping player_id → "human" | "ai".
         ``show_black_hand``    — when True, the black-hand toggle button is shown active.
-        ``show_recompose_btn`` — when True, the Recompose button is drawn and clickable.
-        ``activatable_entries``— Stage 6: (label, token) pairs for every currently
+        ``show_recompose_btn``  — when True, the Recompose button is drawn and clickable.
+        ``show_mercenary_btn``  — None = don't draw (non-PREPARATION phases).
+                                  True = draw enabled (clickable, gold).
+                                  False = draw disabled (greyed out, not clickable).
+        ``activatable_entries`` — Stage 6: (label, token) pairs for every currently
                                  activatable Trap/Monster-ability "in the field".
                                  One clickable row per entry; ``handle_click``
                                  returns the token verbatim. (Card detail itself
@@ -248,9 +261,21 @@ class SidebarOverlay:
             y = self._draw_line("Choose promotion", self._font_small, HUD_TEXT, y, center=True)
             y += 4
 
-        # Recompose pending notice
+        # Recompose pending notice — shown for both human and AI turns.
+        # For a human player the hand strip already shows the selection counter;
+        # this overlay adds a second, board-level reminder.
         if obs.phase == Phase.RECOMPOSE_SELECTION:
-            y = self._draw_line("Recompose: auto-resolving…", self._font_small, HUD_WARN, y, center=True)
+            n = getattr(obs, "pending_decision_min", 0)
+            y = self._draw_line(f"♻  Return {n} card(s) — click hand to pick", self._font_small, HUD_WARN, y, center=True)
+            y += 4
+
+        # Mercenary pending notices
+        if obs.phase == Phase.MERCENARY_SELECTION:
+            n = getattr(obs, "pending_decision_min", 0)
+            y = self._draw_line(f"⚔  Pick {n} Monster card(s) to sacrifice", self._font_small, (200, 160, 80), y, center=True)
+            y += 4
+        if obs.phase == Phase.MERCENARY_PLACEMENT:
+            y = self._draw_line("⚔  Click a square in your first 2 ranks", self._font_small, (200, 160, 80), y, center=True)
             y += 4
 
         # Reposition pending notice (blade_dancer after-capture)
@@ -294,7 +319,8 @@ class SidebarOverlay:
                 self._activatable_btn_rects.append((token, row_rect))
                 y += self.BTN_H + 3
 
-        # Recompose button — only shown during PREPARATION for a human player
+        # Recompose button — shown during PREPARATION for a human player.
+        # Always rendered when show_recompose_btn is True.
         if show_recompose_btn:
             y += 8
             rc_label = "♻  Recompose"
@@ -311,8 +337,32 @@ class SidebarOverlay:
                 self._btn_recompose.x + (btn_w - rcs.get_width()) // 2,
                 self._btn_recompose.y + (self.BTN_H - rcs.get_height()) // 2,
             ))
+            y += self.BTN_H + 4
         else:
             self._btn_recompose = None
+
+        # Mercenary button — always rendered during PREPARATION for a human player
+        # (show_mercenary_btn is always True during prep); enabled/disabled via colour.
+        if show_mercenary_btn is not None:  # None = don't show at all (non-PREPARATION)
+            mc_enabled = bool(show_mercenary_btn)  # True = clickable, False = greyed out
+            self._btn_mercenary_enabled = mc_enabled
+            mc_label = "⚔  Mercenary"
+            mc_color  = (200, 160, 80) if mc_enabled else (80, 70, 50)
+            mc_border = (160, 120, 40) if mc_enabled else (60, 50, 30)
+            self._btn_mercenary = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+            hover_mc = mc_enabled and self._btn_mercenary.collidepoint(self._mouse_pos)
+            pygame.draw.rect(self._surface,
+                             DIALOG_HOVER if hover_mc else DIALOG_BG,
+                             self._btn_mercenary, border_radius=4)
+            pygame.draw.rect(self._surface, mc_border,
+                             self._btn_mercenary, 1, border_radius=4)
+            mcs = self._font_small.render(mc_label, True, mc_color)
+            self._surface.blit(mcs, (
+                self._btn_mercenary.x + (btn_w - mcs.get_width()) // 2,
+                self._btn_mercenary.y + (self.BTN_H - mcs.get_height()) // 2,
+            ))
+        else:
+            self._btn_mercenary = None
 
         # Controls hint + Export/Import buttons at the fixed bottom position.
         # (Card detail now lives entirely in the left CardViewer.)
@@ -432,7 +482,7 @@ class CardViewer:
 
     PADDING: int = 10
     BTN_H: int = 26
-    IMAGE_BOX_H: int = 130
+    IMAGE_BOX_H: int = 200
     _TYPE_BADGES: dict = {
         "monster": ("MON", (200, 100, 100)),
         "spell":   ("SPC", (80, 140, 220)),

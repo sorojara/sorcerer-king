@@ -32,6 +32,7 @@ Layout for a single card tile:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pygame
@@ -64,7 +65,12 @@ _CARD_BG: dict[CardType, tuple[int, int, int]] = {
 _UNKNOWN_COLOR = (90, 90, 90)
 _UNKNOWN_BG    = (30, 30, 30)
 
-_DISCARD_BORDER = (220, 60, 60)   # red border in discard mode
+_DISCARD_BORDER  = (220, 60, 60)   # red border in discard mode
+_RECOMPOSE_SELECTED_BORDER = (60, 220, 200)   # teal border — card chosen for recompose
+_RECOMPOSE_IDLE_BORDER     = (80, 140, 130)   # muted teal border — card not yet chosen
+_MERCENARY_CHOSEN_BORDER   = (200, 160, 80)   # gold border — Monster card queued for sacrifice
+_MERCENARY_IDLE_BORDER     = (120, 90,  40)   # muted gold — valid but not yet chosen
+_MERCENARY_INVALID_BORDER  = (60,  60,  60)   # grey — card cannot be sacrificed (not a Monster)
 
 
 class HandView:
@@ -98,6 +104,7 @@ class HandView:
         strip_width: int,
         registry: "CardRegistry | None" = None,
         x_offset: int = 0,
+        images_dir: "Path | None" = None,
     ) -> None:
         self._surface = surface
         self._font = font
@@ -105,6 +112,9 @@ class HandView:
         self._x = x_offset
         self._width = strip_width
         self._registry = registry
+        self._images_dir = images_dir
+        # image_path -> loaded Surface, or None if load failed/missing
+        self._image_cache: "dict[str, Any]" = {}
         # Cached tile rects for the own-hand row; updated each draw() call.
         self._own_tile_rects: list[tuple[str, pygame.Rect]] = []
 
@@ -129,16 +139,30 @@ class HandView:
         discard_mode: bool = False,
         selected_card_id: str | None = None,
         playable_card_ids: "set[str] | None" = None,
+        recompose_mode: bool = False,
+        recompose_selected_ids: "set[str] | None" = None,
+        mercenary_mode: bool = False,
+        mercenary_selected_ids: "set[str] | None" = None,
+        mercenary_valid_ids: "set[str] | None" = None,
     ) -> None:
         """
         Render the hand strip below the board.
 
-        ``opponent_cards``    — if given, an extra debug row is drawn above.
-        ``discard_mode``      — when True, cards show red border (must discard).
-        ``selected_card_id``  — card held for summon targeting (gold border).
-        ``playable_card_ids`` — Stage 6: when given, any own-hand card_id NOT
-                                in this set is drawn dimmed/greyed — there's no
-                                legal action for it right now.  None = don't dim.
+        ``opponent_cards``       — if given, an extra debug row is drawn above.
+        ``discard_mode``         — when True, cards show red border (must discard).
+        ``selected_card_id``     — card held for summon targeting (gold border).
+        ``playable_card_ids``    — Stage 6: when given, any own-hand card_id NOT
+                                   in this set is drawn dimmed/greyed — there's no
+                                   legal action for it right now.  None = don't dim.
+        ``recompose_mode``       — Stage 7: True while the human is picking cards
+                                   to return during RECOMPOSE_SELECTION.
+        ``recompose_selected_ids`` — card IDs the player has toggled for return;
+                                   selected cards get a bright teal border, others
+                                   a muted teal border.
+        ``mercenary_mode``       — Stage 7: True while picking Monster cards to sacrifice.
+        ``mercenary_selected_ids`` — card IDs chosen for sacrifice (gold border).
+        ``mercenary_valid_ids``  — card IDs that are valid Monster cards to sacrifice;
+                                   others are shown greyed out.
         """
         if opponent_cards is not None:
             opp_y = self._y - self.HEIGHT
@@ -153,6 +177,16 @@ class HandView:
             remaining = len(obs.own_hand) - HAND_SIZE_LIMIT
             label = f"DISCARD {remaining} — pick a card"
             label_color = _DISCARD_BORDER
+        elif recompose_mode:
+            n = obs.pending_decision_min if hasattr(obs, "pending_decision_min") else 0
+            already = len(recompose_selected_ids) if recompose_selected_ids else 0
+            label = f"RECOMPOSE — pick {n} card(s) to return  ({already}/{n})"
+            label_color = _RECOMPOSE_SELECTED_BORDER
+        elif mercenary_mode:
+            n = obs.pending_decision_min if hasattr(obs, "pending_decision_min") else 0
+            already = len(mercenary_selected_ids) if mercenary_selected_ids else 0
+            label = f"MERCENARY — sacrifice {n} Monster(s)  ({already}/{n})"
+            label_color = _MERCENARY_CHOSEN_BORDER
         else:
             label = f"{obs.active_player.capitalize()}  hand  ({len(obs.own_hand)})"
             label_color = HUD_LABEL
@@ -165,6 +199,11 @@ class HandView:
             discard_mode=discard_mode,
             selected_card_id=selected_card_id,
             playable_card_ids=playable_card_ids,
+            recompose_mode=recompose_mode,
+            recompose_selected_ids=recompose_selected_ids,
+            mercenary_mode=mercenary_mode,
+            mercenary_selected_ids=mercenary_selected_ids,
+            mercenary_valid_ids=mercenary_valid_ids,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────
@@ -178,6 +217,11 @@ class HandView:
         discard_mode: bool = False,
         selected_card_id: str | None = None,
         playable_card_ids: "set[str] | None" = None,
+        recompose_mode: bool = False,
+        recompose_selected_ids: "set[str] | None" = None,
+        mercenary_mode: bool = False,
+        mercenary_selected_ids: "set[str] | None" = None,
+        mercenary_valid_ids: "set[str] | None" = None,
     ) -> list[tuple[str, pygame.Rect]]:
         """
         Draw one hand row at vertical position ``y``.
@@ -187,12 +231,26 @@ class HandView:
         x0 = self._x   # left edge of the strip (Stage 6: board may be offset)
 
         # Background strip
-        strip_bg = (45, 20, 20) if discard_mode else SIDEBAR_BG
+        if discard_mode:
+            strip_bg = (45, 20, 20)
+        elif recompose_mode:
+            strip_bg = (15, 40, 40)
+        elif mercenary_mode:
+            strip_bg = (40, 30, 10)
+        else:
+            strip_bg = SIDEBAR_BG
         strip_rect = pygame.Rect(x0, y, self._width, self.HEIGHT)
         pygame.draw.rect(self._surface, strip_bg, strip_rect)
-        border_color = _DISCARD_BORDER if discard_mode else DIALOG_BORDER
+        if discard_mode:
+            border_color = _DISCARD_BORDER
+        elif recompose_mode:
+            border_color = _RECOMPOSE_SELECTED_BORDER
+        elif mercenary_mode:
+            border_color = _MERCENARY_CHOSEN_BORDER
+        else:
+            border_color = DIALOG_BORDER
         pygame.draw.line(self._surface, border_color, (x0, y), (x0 + self._width, y),
-                         2 if discard_mode else 1)
+                         2 if (discard_mode or recompose_mode or mercenary_mode) else 1)
 
         # Small label in top-left corner of the strip (doesn't push cards right)
         label_surf = self._font.render(label, True, label_color)
@@ -222,14 +280,45 @@ class HandView:
                 break
             is_selected = (selected_card_id is not None and card_id == selected_card_id)
             is_playable = playable_card_ids is None or card_id in playable_card_ids
+            is_recompose_chosen = recompose_mode and (
+                recompose_selected_ids is not None and card_id in recompose_selected_ids
+            )
+            is_merc_chosen = mercenary_mode and (
+                mercenary_selected_ids is not None and card_id in mercenary_selected_ids
+            )
+            is_merc_valid = (not mercenary_mode) or (
+                mercenary_valid_ids is not None and card_id in mercenary_valid_ids
+            )
             self._draw_card_tile(x, card_top, card_id,
                                  discard_mode=discard_mode,
                                  selected=is_selected,
-                                 playable=is_playable)
+                                 playable=is_playable,
+                                 recompose_mode=recompose_mode,
+                                 recompose_chosen=is_recompose_chosen,
+                                 mercenary_mode=mercenary_mode,
+                                 mercenary_chosen=is_merc_chosen,
+                                 mercenary_valid=is_merc_valid)
             tile_rects.append((card_id, pygame.Rect(x, card_top, self.CARD_W, self.CARD_H)))
             x += self.CARD_W + self.CARD_GAP
 
         return tile_rects
+
+    def _get_card_image(self, card: "AnyCard") -> "pygame.Surface | None":
+        """Load and cache a card's artwork, or return None if unavailable."""
+        path = getattr(card, "image_path", "") or ""
+        if not path or self._images_dir is None:
+            return None
+        if path in self._image_cache:
+            return self._image_cache[path]
+        surf = None
+        try:
+            full_path = self._images_dir / path
+            if full_path.is_file():
+                surf = pygame.image.load(str(full_path)).convert_alpha()
+        except Exception:
+            surf = None
+        self._image_cache[path] = surf
+        return surf
 
     def _draw_card_tile(
         self,
@@ -239,11 +328,23 @@ class HandView:
         discard_mode: bool = False,
         selected: bool = False,
         playable: bool = True,
+        recompose_mode: bool = False,
+        recompose_chosen: bool = False,
+        mercenary_mode: bool = False,
+        mercenary_chosen: bool = False,
+        mercenary_valid: bool = True,
     ) -> None:
         """Render a single card thumbnail at (x, y).
 
+        When the card has artwork available the tile shows the image scaled
+        to fill the tile with the name in a small bar at the bottom.
+        Otherwise falls back to the text-only badge + name layout.
+
         Stage 6: ``playable=False`` greys the tile out — there's no legal
         action for this card right now (no valid vessel/square/target).
+        Stage 7: ``recompose_mode=True`` overrides the border colour —
+        ``recompose_chosen=True`` → bright teal (card queued for return),
+        ``recompose_chosen=False`` → muted teal (card not yet chosen).
         """
         card: AnyCard | None = None
         if self._registry is not None and card_id in self._registry:
@@ -261,29 +362,86 @@ class HandView:
         if selected:
             border = self._SELECTED_BORDER
             border_w = 3
+        elif recompose_chosen:
+            border = _RECOMPOSE_SELECTED_BORDER
+            border_w = 3
+        elif recompose_mode:
+            border = _RECOMPOSE_IDLE_BORDER
+            border_w = 1
+        elif mercenary_chosen:
+            border = _MERCENARY_CHOSEN_BORDER
+            border_w = 3
+        elif mercenary_mode and mercenary_valid:
+            border = _MERCENARY_IDLE_BORDER
+            border_w = 1
+        elif mercenary_mode:
+            border = _MERCENARY_INVALID_BORDER
+            border_w = 1
         elif discard_mode:
             border = _DISCARD_BORDER
             border_w = 2
         else:
             border = badge_color
             border_w = 1
+
+        img = self._get_card_image(card) if card is not None else None
+        if img is not None:
+            # Scale image to fill the tile (cover, centered) then clip to tile.
+            iw, ih = img.get_size()
+            scale = max(self.CARD_W / iw, self.CARD_H / ih)
+            new_w = max(1, int(iw * scale))
+            new_h = max(1, int(ih * scale))
+            scaled = pygame.transform.smoothscale(img, (new_w, new_h))
+            blit_x = x + (self.CARD_W - new_w) // 2
+            blit_y = y + (self.CARD_H - new_h) // 2
+            prev_clip = self._surface.get_clip()
+            self._surface.set_clip(tile)
+            self._surface.blit(scaled, (blit_x, blit_y))
+            self._surface.set_clip(prev_clip)
+
+            # Thin semi-transparent name bar at the bottom of the tile.
+            bar_h = self._font.render(name, True, (0, 0, 0)).get_height() + 4
+            bar_surf = pygame.Surface((self.CARD_W, bar_h), pygame.SRCALPHA)
+            bar_surf.fill((0, 0, 0, 170))
+            self._surface.blit(bar_surf, (x, y + self.CARD_H - bar_h))
+            name_surf = self._font.render(
+                _truncate(name, self.CARD_W - 6, self._font), True, HUD_TEXT
+            )
+            name_x = x + (self.CARD_W - name_surf.get_width()) // 2
+            name_y = y + self.CARD_H - bar_h + (bar_h - name_surf.get_height()) // 2
+            self._surface.blit(name_surf, (name_x, name_y))
+        else:
+            # Text-only fallback: badge + name.
+            badge_surf = self._font.render(badge_label, True, badge_color)
+            self._surface.blit(badge_surf, (x + 3, y + 2))
+            name_surf = self._font.render(
+                _truncate(name, self.CARD_W - 6, self._font), True, HUD_TEXT
+            )
+            name_y = y + 2 + badge_surf.get_height() + 1
+            self._surface.blit(name_surf, (x + 3, name_y))
+
         pygame.draw.rect(self._surface, border, tile, border_w, border_radius=4)
-
-        # Badge (top-left inside tile)
-        badge_surf = self._font.render(badge_label, True, badge_color)
-        self._surface.blit(badge_surf, (x + 3, y + 2))
-
-        # Name (below badge, truncated to tile width)
-        name_surf = self._font.render(
-            _truncate(name, self.CARD_W - 6, self._font), True, HUD_TEXT
-        )
-        name_y = y + 2 + badge_surf.get_height() + 1
-        self._surface.blit(name_surf, (x + 3, name_y))
 
         # Stage 6: grey overlay for unplayable cards, drawn last (on top).
         if not playable:
             dim = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
             dim.fill((15, 15, 15, 165))
+            self._surface.blit(dim, (x, y))
+
+        # Stage 7: dim unchosen cards during recompose selection so chosen ones pop.
+        if recompose_mode and not recompose_chosen:
+            dim = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 100))
+            self._surface.blit(dim, (x, y))
+
+        # Stage 7: in mercenary mode, heavily dim invalid cards (not Monsters).
+        if mercenary_mode and not mercenary_valid:
+            dim = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 160))
+            self._surface.blit(dim, (x, y))
+        elif mercenary_mode and not mercenary_chosen:
+            dim = pygame.Surface((self.CARD_W, self.CARD_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 80))
             self._surface.blit(dim, (x, y))
 
 

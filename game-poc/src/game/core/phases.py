@@ -28,10 +28,12 @@ Every normal turn follows exactly this sequence:
        └── 6. END        — Resolve end-of-turn effects
 
     SPECIAL STATES (not a normal turn phase)
-       ├── RECOMPOSE_SELECTION  — Player choosing which cards to return
-       ├── PROMOTION_SELECTION  — Pawn reached back-rank, picking piece type
-       ├── FINAL_DUEL           — King capture / checkmate triggered the Duel
-       └── GAME_OVER            — A winner has been determined
+       ├── RECOMPOSE_SELECTION    — Player choosing which cards to return
+       ├── MERCENARY_SELECTION    — Player choosing which Monster cards to sacrifice
+       ├── MERCENARY_PLACEMENT    — Player choosing the square for the new piece
+       ├── PROMOTION_SELECTION    — Pawn reached back-rank, picking piece type
+       ├── FINAL_DUEL             — King capture / checkmate triggered the Duel
+       └── GAME_OVER              — A winner has been determined
 
 Invariants (locked for v0.1):
   • At most ONE major preparation action per normal turn.
@@ -57,6 +59,8 @@ class Phase(Enum):
     # ── Special interrupt / sub-states ─────────────────────────────────────
     DISCARD = "discard"            # hand > HAND_SIZE_LIMIT: player must discard
     RECOMPOSE_SELECTION = "recompose_selection"
+    MERCENARY_SELECTION = "mercenary_selection"   # Stage 7: choosing cards to sacrifice
+    MERCENARY_PLACEMENT = "mercenary_placement"   # Stage 7: choosing square for new piece
     PROMOTION_SELECTION = "promotion_selection"
 
     # ── Terminal / macro states ─────────────────────────────────────────────
@@ -127,6 +131,8 @@ class DecisionType(Enum):
     """Types of pending decisions that require a player response."""
 
     RECOMPOSE_CARDS = "recompose_cards"
+    MERCENARY_CARDS = "mercenary_cards"      # Stage 7: which Monster cards to sacrifice
+    MERCENARY_PLACE = "mercenary_place"      # Stage 7: which square to place the piece
     PROMOTION = "promotion"
     CHOOSE_TARGET = "choose_target"
     CHOOSE_SACRIFICE = "choose_sacrifice"

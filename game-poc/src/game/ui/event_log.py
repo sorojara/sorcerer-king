@@ -132,6 +132,15 @@ def format_event(event: "ev.Event", registry: "object | None" = None) -> str:
             f"{event.player_id} recomposed: returned {len(event.returned_card_ids)}, "
             f"drew {len(event.drawn_card_ids)}"
         )
+    if isinstance(event, ev.MercenaryContractFired):
+        return (
+            f"{event.player_id} hired a Mercenary {event.piece_type} — "
+            f"sacrificed {len(event.sacrificed_card_ids)} Monster(s)"
+        )
+    if isinstance(event, ev.MercenaryPiecePlaced):
+        return (
+            f"{event.player_id}'s Mercenary {event.piece_type} placed at {_pos(event.position)}"
+        )
 
     if isinstance(event, ev.ConstructionStarted):
         return f"{event.player_id} started building {name(event.building_card_id)} at {_pos(event.position)}"

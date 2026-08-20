@@ -34,17 +34,30 @@ INSPECT_TINT        = (160,  80, 220,  80)  # RGBA purple tint
 # belongs to the player whose Observation is currently being rendered
 # (this is a hotseat app — obs.player_id is always the active player);
 # "ENEMY" = belongs to the other player.
-TRAP_MARKER_OWN      = ( 90, 170, 255)       # bright blue ring  — your own Trap
-TRAP_MARKER_ENEMY    = (255,  90,  70)       # bright red ring   — enemy Trap (identity hidden)
+TRAP_MARKER_OWN      = ( 90, 170, 255)       # bright blue ring  — your own Trap (dormant)
+TRAP_MARKER_ENEMY    = (255,  90,  70)       # bright red ring   — enemy Trap (dormant, identity hidden)
 TRAP_LABEL_BG        = ( 20,  15,  35, 170)  # RGBA backing for the trap name label (own only)
 
-# Stage 6: Trap activation areas + persistent Spell/Trap zone effects
-# (frozen/scorched/blocked/cursed) all share this own/enemy tint pair —
-# deliberately NOT color-coded per effect type, since that would leak what
-# an enemy zone actually does.  Your own zones' exact effect is available
-# via hover tooltip instead.
-ZONE_TINT_OWN        = ( 70, 150, 230,  65)  # RGBA — your own Trap/Spell zones
-ZONE_TINT_ENEMY       = (230,  70,  55,  65)  # RGBA — enemy Trap/Spell zones
+# Activated Trap markers — vivid gold/orange so it's immediately obvious
+# the trap is hot and can fire this turn.
+TRAP_MARKER_OWN_ACTIVE   = (255, 210,   0)  # gold ring   — your own Trap is activated
+TRAP_MARKER_ENEMY_ACTIVE = (255, 130,   0)  # orange ring — enemy Trap is activated
+
+# Stage 6: Trap danger zones (dormant) — muted blue/red tint shows the area
+# of effect but doesn't scream urgency for a trap that hasn't fired yet.
+ZONE_TINT_OWN        = ( 70, 150, 230,  55)  # RGBA — your own dormant Trap zone
+ZONE_TINT_ENEMY      = (230,  70,  55,  55)  # RGBA — enemy dormant Trap zone
+
+# Activated Trap zones — vivid gold/orange, clearly distinct from dormant.
+ZONE_TINT_OWN_ACTIVE   = (255, 210,   0,  70)  # RGBA gold   — your activated Trap zone
+ZONE_TINT_ENEMY_ACTIVE = (255, 130,   0,  70)  # RGBA orange — enemy activated Trap zone
+
+# Active persistent/spatial Spell zones (square_effects: frozen/scorched/
+# blocked/cursed) — these are always "on" while they exist, so they get a
+# distinct purple tint to read differently from both dormant and activated
+# Trap zones.  Own/enemy follow the same ownership framing convention.
+ZONE_TINT_SPELL_OWN   = (160,  80, 230,  60)  # RGBA purple — your active Spell zone
+ZONE_TINT_SPELL_ENEMY = (200,  50, 180,  60)  # RGBA magenta — enemy active Spell zone
 
 # Stage 6: hover tooltip (Trap/zone info on mouseover)
 TOOLTIP_BG          = ( 20,  20,  28, 235)  # RGBA near-opaque backing

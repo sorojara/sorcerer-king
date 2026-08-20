@@ -70,15 +70,18 @@ from game.core.actions import (
     Castle,
     ChangeKing,
     CoronateKing,
+    DeclareMercenary,
     DeclareRecompose,
     DiscardCard,
     DismissMonster,
     EndPreparation,
     EndTurn,
     MovePiece,
+    PlaceMercenaryPiece,
     PlaceTrap,
     PromotePawn,
     RepositionUnit,
+    SelectMercenaryCards,
     SelectRecomposeCards,
     StartConstruction,
     SummonMonster,
@@ -94,6 +97,8 @@ from game.core.events import (
     EnPassantCapture,
     Event,
     FinalDuelTriggered,
+    MercenaryContractFired,
+    MercenaryPiecePlaced,
     MonsterAbilityActivated,
     MonsterDestroyed,
     MonsterDismissed,
@@ -114,6 +119,7 @@ from game.core.phases import (
     KingCardStatus,
     Phase,
     PieceType,
+    VALID_VESSEL_TYPES,
 )
 from game.core.rng import DeterministicRNG
 from game.core.state import (
@@ -240,6 +246,12 @@ class RulesEngine:
                 events = self._execute_declare_recompose(state, action, rng)
             elif isinstance(action, SelectRecomposeCards):
                 events = self._execute_select_recompose(state, action, rng)
+            elif isinstance(action, DeclareMercenary):
+                events = self._execute_declare_mercenary(state, action)
+            elif isinstance(action, SelectMercenaryCards):
+                events = self._execute_select_mercenary_cards(state, action)
+            elif isinstance(action, PlaceMercenaryPiece):
+                events = self._execute_place_mercenary_piece(state, action)
             elif isinstance(action, PromotePawn):
                 events = self._execute_promote_pawn(state, action)
             elif isinstance(action, DiscardCard):
@@ -325,6 +337,38 @@ class RulesEngine:
                     )
             return actions
 
+        if phase == Phase.MERCENARY_SELECTION:
+            pd = state.pending_decision
+            if pd is not None and pd.player_id == player_id:
+                from itertools import combinations
+                n = pd.min_choices
+                monster_ids = [cid for cid in ps.hand if cid in pd.options]
+                for combo in combinations(monster_ids, n):
+                    actions.append(
+                        SelectMercenaryCards(
+                            player_id=player_id,
+                            card_ids=list(combo),
+                        )
+                    )
+            return actions
+
+        if phase == Phase.MERCENARY_PLACEMENT:
+            pd = state.pending_decision
+            if pd is not None and pd.player_id == player_id:
+                piece_type = pd.context.get("piece_type", "pawn")
+                own_ranks = (0, 1) if player_id == "white" else (6, 7)
+                for f in range(8):
+                    for r in own_ranks:
+                        pos = Position(f, r)
+                        if state.board.get_unit(pos) is None:
+                            actions.append(
+                                PlaceMercenaryPiece(
+                                    player_id=player_id,
+                                    position=pos,
+                                )
+                            )
+            return actions
+
         if phase == Phase.PROMOTION_SELECTION:
             pd = state.pending_decision
             if pd is not None and pd.player_id == player_id:
@@ -382,6 +426,30 @@ class RulesEngine:
                 # Declare Recompose (always available, risky)
                 if ps.hand:
                     actions.append(DeclareRecompose(player_id=player_id))
+                # Declare Mercenary — only if the player has enough Monster cards
+                # AND at least one empty square in their first two ranks.
+                _mercenary_costs = {
+                    "pawn": 4, "knight": 6, "bishop": 6, "rook": 6, "queen": 8,
+                }
+                if registry is not None:
+                    from game.cards.card import MonsterCard
+                    monster_count = sum(
+                        1 for cid in ps.hand
+                        if cid in registry and isinstance(registry.get(cid), MonsterCard)
+                    )
+                    own_ranks = (0, 1) if player_id == "white" else (6, 7)
+                    has_empty_placement = any(
+                        state.board.get_unit(Position(f, r)) is None
+                        for f in range(8)
+                        for r in own_ranks
+                    )
+                    if has_empty_placement:
+                        for piece_type, cost in _mercenary_costs.items():
+                            if monster_count >= cost:
+                                actions.append(DeclareMercenary(
+                                    player_id=player_id,
+                                    piece_type=piece_type,
+                                ))
                 # Coronate King (if no active king and not in check)
                 if ps.active_king is None and not ps.is_in_check():
                     for kcs in ps.king_pool:
@@ -580,9 +648,13 @@ class RulesEngine:
 
     def _validate_ownership(self, state: GameState, action: Action) -> None:
         """Invariant: only active_player may submit voluntary actions."""
-        # SelectRecomposeCards and PromotePawn can come from either player
-        # during interrupt phases, but player_id must still match pending.
-        if state.phase in (Phase.RECOMPOSE_SELECTION, Phase.PROMOTION_SELECTION):
+        # Follow-up actions during interrupt phases must match the pending player.
+        if state.phase in (
+            Phase.RECOMPOSE_SELECTION,
+            Phase.MERCENARY_SELECTION,
+            Phase.MERCENARY_PLACEMENT,
+            Phase.PROMOTION_SELECTION,
+        ):
             pd = state.pending_decision
             if pd and action.player_id != pd.player_id:
                 raise IllegalActionError(
@@ -1975,6 +2047,182 @@ class RulesEngine:
             ),
         ]
         return events
+
+    # ── Mercenary executors (Stage 7) ────────────────────────────────────
+
+    # Cost table: piece_type → number of Monster cards required.
+    _MERCENARY_COST: dict[str, int] = {
+        "pawn": 4, "knight": 6, "bishop": 6, "rook": 6, "queen": 8,
+    }
+
+    def _execute_declare_mercenary(
+        self,
+        state: GameState,
+        action: DeclareMercenary,
+    ) -> list[Event]:
+        """
+        Validate the piece type and that enough Monster cards are in hand,
+        then set up MERCENARY_SELECTION so the player picks which ones to sacrifice.
+        """
+        from game.cards.card import MonsterCard
+
+        self._require_phase(state, Phase.PREPARATION)
+        self._require_no_prep_used(state, action.player_id)
+
+        pt = action.piece_type.lower()
+        if pt not in self._MERCENARY_COST:
+            raise IllegalActionError(
+                f"Invalid piece type {action.piece_type!r}. "
+                f"Must be one of: {list(self._MERCENARY_COST)}"
+            )
+
+        ps = state.get_player(action.player_id)
+        cost = self._MERCENARY_COST[pt]
+
+        registry = self._registry
+        monster_ids_in_hand = [
+            cid for cid in ps.hand
+            if registry and cid in registry and isinstance(registry.get(cid), MonsterCard)
+        ]
+        if len(monster_ids_in_hand) < cost:
+            raise IllegalActionError(
+                f"Mercenary {pt} costs {cost} Monster card(s); "
+                f"you only have {len(monster_ids_in_hand)} Monster card(s) in hand."
+            )
+
+        # Ensure at least one empty square exists in the player's first two ranks.
+        own_ranks = (0, 1) if action.player_id == "white" else (6, 7)
+        has_empty = any(
+            state.board.get_unit(Position(f, r)) is None
+            for f in range(8)
+            for r in own_ranks
+        )
+        if not has_empty:
+            raise IllegalActionError(
+                "No empty squares in your first two ranks to place a Mercenary piece."
+            )
+
+        state.pending_decision = PendingDecision(
+            player_id=action.player_id,
+            decision_type=DecisionType.MERCENARY_CARDS,
+            options=monster_ids_in_hand,
+            min_choices=cost,
+            max_choices=cost,
+            context={"piece_type": pt},
+        )
+        state.phase = Phase.MERCENARY_SELECTION
+
+        events: list[Event] = []
+        self._mark_prep_used(state, action.player_id, "DeclareMercenary", events)
+        return events
+
+    def _execute_select_mercenary_cards(
+        self,
+        state: GameState,
+        action: SelectMercenaryCards,
+    ) -> list[Event]:
+        """
+        Validate the sacrificed cards, remove them from game (not graveyard),
+        then advance to MERCENARY_PLACEMENT.
+        """
+        from game.cards.card import MonsterCard
+
+        self._require_phase(state, Phase.MERCENARY_SELECTION)
+        pd = state.pending_decision
+        if pd is None or pd.decision_type != DecisionType.MERCENARY_CARDS:
+            raise IllegalActionError("No pending Mercenary card-selection decision.")
+
+        n = pd.min_choices
+        if len(action.card_ids) != n:
+            raise IllegalActionError(
+                f"Must sacrifice exactly {n} Monster card(s); got {len(action.card_ids)}."
+            )
+
+        ps = state.get_player(action.player_id)
+        registry = self._registry
+        for cid in action.card_ids:
+            if cid not in ps.hand:
+                raise IllegalActionError(f"Card {cid!r} is not in hand.")
+            if not (registry and cid in registry and isinstance(registry.get(cid), MonsterCard)):
+                raise IllegalActionError(f"Card {cid!r} is not a Monster card.")
+
+        # Remove from game — do NOT add to graveyard.
+        for cid in action.card_ids:
+            ps.hand.remove(cid)
+
+        piece_type = pd.context.get("piece_type", "pawn")
+
+        # Set up MERCENARY_PLACEMENT pending decision.
+        state.pending_decision = PendingDecision(
+            player_id=action.player_id,
+            decision_type=DecisionType.MERCENARY_PLACE,
+            options=[],        # placement squares enumerated by get_legal_actions
+            min_choices=1,
+            max_choices=1,
+            context={"piece_type": piece_type},
+        )
+        state.phase = Phase.MERCENARY_PLACEMENT
+
+        return [
+            MercenaryContractFired(
+                player_id=action.player_id,
+                sacrificed_card_ids=tuple(action.card_ids),
+                piece_type=piece_type,
+            )
+        ]
+
+    def _execute_place_mercenary_piece(
+        self,
+        state: GameState,
+        action: PlaceMercenaryPiece,
+    ) -> list[Event]:
+        """
+        Place the new piece on the chosen empty square in the player's first two ranks.
+        """
+        from game.chess.pieces import ChessPiece
+
+        self._require_phase(state, Phase.MERCENARY_PLACEMENT)
+        pd = state.pending_decision
+        if pd is None or pd.decision_type != DecisionType.MERCENARY_PLACE:
+            raise IllegalActionError("No pending Mercenary placement decision.")
+
+        player_id = action.player_id
+        pos = action.position
+        own_ranks = (0, 1) if player_id == "white" else (6, 7)
+        if pos.rank not in own_ranks:
+            raise IllegalActionError(
+                f"Mercenary piece must be placed in {player_id}'s first two ranks."
+            )
+        if state.board.get_unit(pos) is not None:
+            raise IllegalActionError(f"Square {pos.to_algebraic()!r} is occupied.")
+
+        piece_type_str = pd.context.get("piece_type", "pawn")
+        pt_enum = PieceType(piece_type_str)
+
+        # Generate a unique piece ID (e.g. "white-merc-knight-3")
+        existing_merc = [
+            sq.unit.piece.id
+            for sq in state.board.squares.values()
+            if sq.unit is not None and sq.unit.owner == player_id
+            and sq.unit.piece.id.startswith(f"{player_id}-merc-")
+        ]
+        piece_id = f"{player_id}-merc-{piece_type_str}-{len(existing_merc) + 1}"
+
+        piece = ChessPiece(id=piece_id, owner=player_id, piece_type=pt_enum)
+        unit = UnitInstance(piece=piece)
+        state.board.place_unit(pos, unit)
+
+        state.pending_decision = None
+        state.phase = Phase.CHESS   # advance to chess phase
+
+        return [
+            MercenaryPiecePlaced(
+                player_id=player_id,
+                piece_type=piece_type_str,
+                position=pos,
+                piece_id=piece_id,
+            )
+        ]
 
     def _execute_promote_pawn(
         self,

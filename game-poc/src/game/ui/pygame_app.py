@@ -51,15 +51,19 @@ from game.core.actions import (
     ActivateSpell,
     ActivateTrap,
     Castle,
+    DeclareMercenary,
     DeclareRecompose,
     DiscardCard,
     DismissMonster,
     EndPreparation,
     EndTurn,
     MovePiece,
+    PlaceMercenaryPiece,
     PlaceTrap,
     PromotePawn,
     RepositionUnit,
+    SelectMercenaryCards,
+    SelectRecomposeCards,
     SummonMonster,
 )
 from game.core.phases import HAND_SIZE_LIMIT
@@ -164,6 +168,7 @@ class AppController:
             strip_width=_BOARD_W,
             registry=self._registry,
             x_offset=BOARD_OFFSET_X,
+            images_dir=_data_dir / "images",
         )
         self._card_viewer = CardViewer(
             surface=self._screen,
@@ -200,6 +205,19 @@ class AppController:
 
         # Index of card highlighted for discard (-1 = none)
         self._discard_highlight: int = -1
+
+        # Stage 7: recompose card selection — cards the human has toggled for return
+        self._recompose_selected: list[str] = []
+
+        # Stage 7: mercenary flow state
+        # _mercenary_selected    — Monster card IDs the human has toggled for sacrifice
+        # _mercenary_piece_type  — chosen piece type ("pawn" | "knight" | …); set by
+        #                           the piece-type picker dialog before entering
+        #                           MERCENARY_SELECTION phase
+        self._mercenary_selected: list[str] = []
+        self._mercenary_piece_type: str | None = None
+        # Valid placement squares — highlighted on the board during MERCENARY_PLACEMENT
+        self._mercenary_placement_squares: list[Position] = []
 
         # Stage 5: summon mode — card selected from hand awaiting vessel click
         # None = not in summon mode; str = card_id of the monster being summoned
@@ -239,6 +257,9 @@ class AppController:
         # Promotion dialog — created on demand, destroyed after selection
         self._promotion_dialog: PromotionDialog | None = None
 
+        # Stage 7: Mercenary piece-type picker dialog
+        self._mercenary_picker: "_MercenaryPicker | None" = None
+
         # Auto-advance past phases that need no user input
         self._auto_advance()
 
@@ -267,6 +288,9 @@ class AppController:
                 pygame.quit()
                 sys.exit()
             elif event.key == pygame.K_ESCAPE:
+                if self._mercenary_picker is not None:
+                    self._mercenary_picker = None
+                    return
                 self._cancel_summon()
                 self._cancel_targeting_mode()
                 self._cancel_spell_piece_mode()
@@ -289,11 +313,20 @@ class AppController:
             self._mouse_pos = event.pos
             if self._promotion_dialog is not None:
                 self._promotion_dialog.update_mouse(event.pos)
+            if self._mercenary_picker is not None:
+                self._mercenary_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+            if self._mercenary_picker is not None:
+                result = self._mercenary_picker.handle_click(mx, my)
+                if result == "cancel":
+                    self._mercenary_picker = None
+                elif result is not None:
+                    self._commit_mercenary(result)
+                return
             if self._promotion_dialog is not None:
                 self._handle_promotion_click(mx, my)
             else:
@@ -353,6 +386,9 @@ class AppController:
         if btn == "recompose":
             self._do_recompose()
             return
+        if btn == "mercenary":
+            self._do_mercenary()
+            return
         if btn is not None and btn.startswith("trap:"):
             # Stage 6: "⚡ Activatable" section — fire a manual Trap directly.
             trap_instance_id = btn[len("trap:"):]
@@ -385,6 +421,31 @@ class AppController:
                     DiscardCard(player_id=active, card_id=card_id),
                     active,
                 )
+                return
+
+        # Stage 7: Recompose card selection — human picks N cards to return.
+        if obs.phase == Phase.RECOMPOSE_SELECTION:
+            card_id = self._hand_view.card_from_click(mx, my, list(obs.own_hand))
+            if card_id is not None:
+                self._handle_recompose_card_click(card_id, obs)
+                return
+
+        # Stage 7: Mercenary card selection — human picks N Monster cards to sacrifice.
+        if obs.phase == Phase.MERCENARY_SELECTION:
+            card_id = self._hand_view.card_from_click(mx, my, list(obs.own_hand))
+            if card_id is not None:
+                self._handle_mercenary_card_click(card_id, obs)
+                return
+
+        # Stage 7: Mercenary placement — human clicks a square in their first 2 ranks.
+        if obs.phase == Phase.MERCENARY_PLACEMENT:
+            pos = self._board_view.pos_from_click(mx, my)
+            if pos is not None and pos in self._mercenary_placement_squares:
+                self._execute_and_advance(
+                    PlaceMercenaryPiece(player_id=active, position=pos),
+                    active,
+                )
+                self._mercenary_placement_squares = []
                 return
 
         # Stage 5: During PREPARATION a hand click may start summon mode
@@ -836,7 +897,8 @@ class AppController:
         """
         Sidebar button: declare Recompose for the active human player.
         Only valid during PREPARATION when the preparation action hasn't been used.
-        The card selection that follows is auto-resolved randomly by _auto_advance.
+        After DeclareRecompose the engine moves to RECOMPOSE_SELECTION; _auto_advance
+        stops there so the human can interactively pick which cards to return.
         """
         obs = self._current_obs()
         if obs.phase != Phase.PREPARATION:
@@ -844,7 +906,108 @@ class AppController:
         active = obs.active_player
         if self._player_modes.get(active) == "ai":
             return
+        self._recompose_selected = []
         self._execute_and_advance(DeclareRecompose(player_id=active), active)
+
+    def _handle_recompose_card_click(self, card_id: str, obs: "object") -> None:
+        """
+        Toggle a card in/out of the recompose selection.
+
+        When the player has selected exactly N cards (pending_decision_min),
+        SelectRecomposeCards is submitted automatically.
+        """
+        n = obs.pending_decision_min
+
+        if card_id in self._recompose_selected:
+            self._recompose_selected.remove(card_id)
+        else:
+            if len(self._recompose_selected) < n:
+                self._recompose_selected.append(card_id)
+
+        if len(self._recompose_selected) == n:
+            active = obs.active_player
+            action = SelectRecomposeCards(
+                player_id=active,
+                card_ids=list(self._recompose_selected),
+            )
+            self._recompose_selected = []
+            self._execute_and_advance(action, active)
+
+    def _do_mercenary(self) -> None:
+        """
+        Sidebar button: open the Mercenary piece-type picker for the active human player.
+        Only valid during PREPARATION when the preparation action hasn't been used.
+        Shows a small on-board picker so the player selects which piece type to buy.
+        """
+        obs = self._current_obs()
+        if obs.phase != Phase.PREPARATION:
+            return
+        active = obs.active_player
+        if self._player_modes.get(active) == "ai":
+            return
+        # Show the mercenary picker dialog — it will call _commit_mercenary() on selection.
+        self._mercenary_selected = []
+        self._mercenary_picker = _MercenaryPicker(
+            surface=self._screen,
+            font=self._font_small,
+            player_id=active,
+            registry=self._registry,
+            hand=list(self._game.state.get_player(active).hand),
+        )
+
+    def _commit_mercenary(self, piece_type: str) -> None:
+        """Called by the MercenaryPicker when the human picks a piece type."""
+        obs = self._current_obs()
+        active = obs.active_player
+        self._mercenary_picker = None
+        self._mercenary_selected = []
+        try:
+            self._execute_and_advance(
+                DeclareMercenary(player_id=active, piece_type=piece_type),
+                active,
+            )
+        except Exception as exc:
+            self._show_toast(f"Mercenary: {exc}")
+
+    def _handle_mercenary_card_click(self, card_id: str, obs: "object") -> None:
+        """
+        Toggle a Monster card in/out of the mercenary sacrifice selection.
+        Auto-submits SelectMercenaryCards when exactly N are chosen.
+        Only Monster cards (present in options) may be toggled.
+        """
+        if card_id not in obs.pending_decision_options:
+            return   # not a valid Monster card for sacrifice
+
+        n = obs.pending_decision_min
+
+        if card_id in self._mercenary_selected:
+            self._mercenary_selected.remove(card_id)
+        else:
+            if len(self._mercenary_selected) < n:
+                self._mercenary_selected.append(card_id)
+
+        if len(self._mercenary_selected) == n:
+            active = obs.active_player
+            action = SelectMercenaryCards(
+                player_id=active,
+                card_ids=list(self._mercenary_selected),
+            )
+            self._mercenary_selected = []
+            # After SelectMercenaryCards the engine enters MERCENARY_PLACEMENT;
+            # compute the valid placement squares now for board highlighting.
+            self._execute_and_advance(action, active)
+            self._update_mercenary_placement_squares()
+
+    def _update_mercenary_placement_squares(self) -> None:
+        """Populate _mercenary_placement_squares from the current legal actions."""
+        obs = self._current_obs()
+        if obs.phase != Phase.MERCENARY_PLACEMENT:
+            self._mercenary_placement_squares = []
+            return
+        legal = self._game.get_legal_actions(obs.active_player)
+        self._mercenary_placement_squares = [
+            a.position for a in legal if isinstance(a, PlaceMercenaryPiece)
+        ]
 
     def _try_dismiss_selected(self) -> None:
         """
@@ -1298,30 +1461,58 @@ class AppController:
         """
         if self._game.is_over():
             return
-        if self._promotion_dialog is not None:
-            # Promotion: if it's an AI's turn, auto-pick queen
-            obs = self._current_obs()
-            active = obs.active_player
-            if (obs.phase == Phase.PROMOTION_SELECTION and
-                    self._player_modes.get(active) == "ai"):
-                back_rank = 7 if active == "white" else 0
-                pawn_pos = self._find_pawn_on_rank(back_rank, active, obs)
-                if pawn_pos:
-                    try:
-                        self._game.execute(
-                            PromotePawn(player_id=active,
-                                        position=pawn_pos,
-                                        piece_type="queen")
-                        )
-                    except Exception:
-                        pass
-                    self._promotion_dialog = None
-                    self._deselect()
-                    self._auto_advance()
-            return
 
         obs = self._current_obs()
         active = obs.active_player
+
+        # AI promotion: auto-pick queen whenever it's an AI's turn in
+        # PROMOTION_SELECTION — regardless of whether a dialog is showing.
+        # (The dialog is only created for human players in _execute_and_advance.)
+        if obs.phase == Phase.PROMOTION_SELECTION and self._player_modes.get(active) == "ai":
+            back_rank = 7 if active == "white" else 0
+            pawn_pos = self._find_pawn_on_rank(back_rank, active, obs)
+            if pawn_pos:
+                try:
+                    self._game.execute(
+                        PromotePawn(player_id=active,
+                                    position=pawn_pos,
+                                    piece_type="queen")
+                    )
+                except Exception:
+                    pass
+                self._promotion_dialog = None
+                self._deselect()
+                self._auto_advance()
+            return
+
+        if self._promotion_dialog is not None:
+            return  # human promotion dialog is open — nothing else to do
+
+        # AI mercenary selection: pick the first N Monster cards from legal actions.
+        if obs.phase == Phase.MERCENARY_SELECTION and self._player_modes.get(active) == "ai":
+            legal = self._game.get_legal_actions(active)
+            if legal:
+                import random as _random
+                action = _random.choice(legal)
+                try:
+                    self._game.execute(action)
+                except Exception:
+                    pass
+                self._auto_advance()
+            return
+
+        # AI mercenary placement: pick a random valid square.
+        if obs.phase == Phase.MERCENARY_PLACEMENT and self._player_modes.get(active) == "ai":
+            legal = self._game.get_legal_actions(active)
+            if legal:
+                import random as _random
+                action = _random.choice(legal)
+                try:
+                    self._game.execute(action)
+                except Exception:
+                    pass
+                self._auto_advance()
+            return
 
         # AI discard: no think-delay, just pick a random card immediately
         if obs.phase == Phase.DISCARD and self._player_modes.get(active) == "ai":
@@ -1409,7 +1600,8 @@ class AppController:
           • Phase is PROMOTION_SELECTION (dialog is showing).
           • game.is_over()       (GAME_OVER or winner set)
         """
-        _stop = {Phase.PREPARATION, Phase.CHESS, Phase.PROMOTION_SELECTION, Phase.DISCARD}
+        _stop = {Phase.PREPARATION, Phase.CHESS, Phase.PROMOTION_SELECTION, Phase.DISCARD,
+                 Phase.RECOMPOSE_SELECTION, Phase.MERCENARY_SELECTION, Phase.MERCENARY_PLACEMENT}
         _max_iters = 20   # safety valve — never loop forever
         for _ in range(_max_iters):
             if self._game.is_over():
@@ -1472,18 +1664,10 @@ class AppController:
                 break
 
             elif obs.phase == Phase.RECOMPOSE_SELECTION:
-                # Auto-resolve by picking a random SelectRecomposeCards from legal actions.
-                # This handles both human and AI players — Recompose selection requires
-                # no spatial decision, so random is acceptable for the PoC.
-                legal = self._game.get_legal_actions(active)
-                if not legal:
-                    break
-                import random as _random_rc
-                action = _random_rc.choice(legal)
-                try:
-                    self._game.execute(action)
-                except Exception:
-                    break
+                # Human players stop here — they pick cards interactively via
+                # hand-strip clicks (_handle_recompose_card_click).
+                # AI players are handled in _tick_ai and never reach this path.
+                break
 
             else:
                 # Unknown / unexpected phase — stop to avoid infinite loop
@@ -1559,6 +1743,8 @@ class AppController:
                     Position(*a.target["destination"]) for a in self._spell_piece_actions
                     if tuple(a.target["position"]) == src_tuple
                 ]
+        elif obs.phase == Phase.MERCENARY_PLACEMENT and self._player_modes.get(obs.active_player) == "human":
+            board_summon_dests = list(self._mercenary_placement_squares)
 
         self._board_view.draw(
             observation=obs,
@@ -1581,11 +1767,36 @@ class AppController:
         # Sidebar (pass player modes, black-hand flag, and recompose button flag)
         active = obs.active_player
         active_is_human = self._player_modes.get(active) == "human"
-        show_recompose = (
+        prep_available = (
             obs.phase == Phase.PREPARATION
             and active_is_human
             and not self._game.state.get_player(active).preparation_action_used
         )
+        show_recompose = prep_available
+
+        # Mercenary button:
+        #   None  = not in PREPARATION → don't draw at all
+        #   False = in PREPARATION but can't afford / no empty squares → greyed out
+        #   True  = in PREPARATION and at least one tier is affordable with empty square
+        show_mercenary: "bool | None" = None
+        if prep_available and self._registry is not None:
+            from game.cards.card import MonsterCard
+            from game.chess.pieces import Position as _Pos
+            ps = self._game.state.get_player(active)
+            monster_count = sum(
+                1 for cid in ps.hand
+                if cid in self._registry and isinstance(self._registry.get(cid), MonsterCard)
+            )
+            own_ranks = (0, 1) if active == "white" else (6, 7)
+            has_empty = any(
+                self._game.state.board.get_unit(_Pos(f, r)) is None
+                for f in range(8)
+                for r in own_ranks
+            )
+            show_mercenary = (monster_count >= 4 and has_empty)
+        elif prep_available:
+            # registry not loaded yet — show disabled rather than hidden
+            show_mercenary = False
 
         # ── CardViewer (left sidebar) ───────────────────────────────────────
         # Stage 6 (corrected): right-click driven only — hand cards, board
@@ -1621,6 +1832,7 @@ class AppController:
             player_modes=self._player_modes,
             show_black_hand=self._show_black_hand,
             show_recompose_btn=show_recompose,
+            show_mercenary_btn=show_mercenary,
             activatable_entries=activatable_entries or None,
         )
         self._card_viewer.draw(
@@ -1661,17 +1873,28 @@ class AppController:
         selected_card_id = (
             self._summon_card_id or self._targeting_card_id or self._spell_piece_card_id
         )
+        recompose_mode = obs.phase == Phase.RECOMPOSE_SELECTION and active_is_human
+        mercenary_mode = obs.phase == Phase.MERCENARY_SELECTION and active_is_human
         self._hand_view.draw(
             hand_obs,
             opponent_cards=black_cards,
             discard_mode=(obs.phase == Phase.DISCARD and active_is_human),
             selected_card_id=selected_card_id if active_is_human else None,
             playable_card_ids=playable_card_ids,
+            recompose_mode=recompose_mode,
+            recompose_selected_ids=set(self._recompose_selected) if recompose_mode else None,
+            mercenary_mode=mercenary_mode,
+            mercenary_selected_ids=set(self._mercenary_selected) if mercenary_mode else None,
+            mercenary_valid_ids=set(obs.pending_decision_options) if mercenary_mode else None,
         )
 
         # Promotion dialog (on-board overlay)
         if self._promotion_dialog is not None:
             self._promotion_dialog.draw()
+
+        # Stage 7: Mercenary piece-type picker dialog
+        if self._mercenary_picker is not None:
+            self._mercenary_picker.draw()
 
         # Game-over banner
         if self._game.is_over():
@@ -1737,3 +1960,145 @@ class AppController:
             if u.owner == owner and u.piece_type == "pawn" and u.position.rank == rank:
                 return u.position
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _MercenaryPicker — a small on-board dialog for selecting the piece type
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _MercenaryPicker:
+    """
+    Modal dialog drawn over the centre of the board.
+
+    Displays the five buyable piece types with their Monster-card costs.
+    Dims out options the player cannot afford.
+
+    ``handle_click(mx, my)``
+        Returns the selected piece type string, "cancel", or None (missed).
+    ``draw()``
+        Renders the dialog each frame.
+    """
+
+    _COSTS: list[tuple[str, int]] = [
+        ("pawn",   4),
+        ("knight", 6),
+        ("bishop", 6),
+        ("rook",   6),
+        ("queen",  8),
+    ]
+    _PIECE_GLYPH: dict[str, str] = {
+        "pawn":   "♟",
+        "knight": "♞",
+        "bishop": "♝",
+        "rook":   "♜",
+        "queen":  "♛",
+    }
+
+    _W = 260
+    _ROW_H = 32
+    _PADDING = 12
+    _CANCEL_H = 28
+
+    def __init__(
+        self,
+        surface: "pygame.Surface",
+        font: "Any",
+        player_id: str,
+        registry: "Any",
+        hand: list[str],
+    ) -> None:
+        self._surface = surface
+        self._font = font
+        self._monster_count = 0
+        if registry is not None:
+            from game.cards.card import MonsterCard
+            self._monster_count = sum(
+                1 for cid in hand
+                if cid in registry and isinstance(registry.get(cid), MonsterCard)
+            )
+        self._player_id = player_id
+        self._mouse_pos: tuple[int, int] = (0, 0)
+
+        # Dialog geometry — centred on the board area
+        h = (self._PADDING
+             + self._font.render("Ag", True, (0, 0, 0)).get_height() + 8   # title
+             + len(self._COSTS) * (self._ROW_H + 3)
+             + 6 + self._CANCEL_H
+             + self._PADDING)
+        sw = surface.get_width()
+        sh = surface.get_height()
+        self._rect = pygame.Rect(
+            (sw - self._W) // 2,
+            (sh - h) // 2,
+            self._W,
+            h,
+        )
+        self._row_rects: list[pygame.Rect] = []
+        self._cancel_rect: pygame.Rect | None = None
+
+    def handle_click(self, mx: int, my: int) -> "str | None":
+        for i, rect in enumerate(self._row_rects):
+            if rect.collidepoint(mx, my):
+                piece_type, cost = self._COSTS[i]
+                if self._monster_count >= cost:
+                    return piece_type
+        if self._cancel_rect and self._cancel_rect.collidepoint(mx, my):
+            return "cancel"
+        # Click outside dialog = cancel
+        if not self._rect.collidepoint(mx, my):
+            return "cancel"
+        return None
+
+    def draw(self) -> None:
+        # Semi-transparent backdrop
+        overlay = pygame.Surface(
+            (self._surface.get_width(), self._surface.get_height()), pygame.SRCALPHA
+        )
+        overlay.fill((0, 0, 0, 140))
+        self._surface.blit(overlay, (0, 0))
+
+        # Dialog background
+        pygame.draw.rect(self._surface, (30, 24, 16), self._rect, border_radius=6)
+        pygame.draw.rect(self._surface, (160, 120, 40), self._rect, 2, border_radius=6)
+
+        x = self._rect.x + self._PADDING
+        y = self._rect.y + self._PADDING
+
+        title = self._font.render("⚔  Hire a Mercenary", True, (200, 160, 80))
+        self._surface.blit(title, (x, y))
+        y += title.get_height() + 8
+
+        self._row_rects = []
+        for piece_type, cost in self._COSTS:
+            row_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._ROW_H)
+            self._row_rects.append(row_rect)
+            affordable = self._monster_count >= cost
+
+            hover = affordable and row_rect.collidepoint(self._mouse_pos)
+            bg = (60, 48, 20) if hover else (40, 30, 10)
+            pygame.draw.rect(self._surface, bg, row_rect, border_radius=4)
+            border = (200, 160, 80) if affordable else (60, 50, 30)
+            pygame.draw.rect(self._surface, border, row_rect, 1, border_radius=4)
+
+            glyph = self._PIECE_GLYPH.get(piece_type, "?")
+            label = f"{glyph}  {piece_type.capitalize()}   —  {cost} Monsters"
+            color = (220, 180, 80) if affordable else (80, 70, 50)
+            lbl_surf = self._font.render(label, True, color)
+            ly = row_rect.y + (self._ROW_H - lbl_surf.get_height()) // 2
+            self._surface.blit(lbl_surf, (row_rect.x + 6, ly))
+
+            y += self._ROW_H + 3
+
+        # Cancel button
+        y += 6
+        cancel_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._CANCEL_H)
+        self._cancel_rect = cancel_rect
+        hover_c = cancel_rect.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, (50, 30, 30) if hover_c else (30, 20, 20),
+                         cancel_rect, border_radius=4)
+        pygame.draw.rect(self._surface, (160, 80, 80), cancel_rect, 1, border_radius=4)
+        cs = self._font.render("Cancel", True, (180, 100, 100))
+        self._surface.blit(cs, (
+            cancel_rect.x + (cancel_rect.width - cs.get_width()) // 2,
+            cancel_rect.y + (cancel_rect.height - cs.get_height()) // 2,
+        ))

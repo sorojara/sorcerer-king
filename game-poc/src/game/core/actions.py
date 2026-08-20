@@ -22,6 +22,9 @@ v0.1 action set (locked for Stage 0):
     ChangeKing          — Succession: switch to a different King card
     DeclareRecompose    — commit to Recompose (RNG fires after this)
     SelectRecomposeCards— follow-up: choose exactly N cards to return
+    DeclareMercenary    — commit to hiring a Mercenary piece
+    SelectMercenaryCards— follow-up: choose the Monster cards to sacrifice
+    PlaceMercenaryPiece — follow-up: choose the square to place the new piece
     PromotePawn         — follow-up: choose piece type after back-rank advance
     EndPreparation      — explicitly pass the preparation action
     EndTurn             — signal end of the player's full turn
@@ -215,6 +218,50 @@ class SelectRecomposeCards(Action):
 
 
 @dataclass
+class DeclareMercenary(Action):
+    """
+    Commit to hiring a Mercenary piece.
+
+    The player chooses the piece type they want (pawn / knight / bishop /
+    rook / queen).  The engine validates that the player has enough Monster
+    cards in hand to pay the cost and sets up a MERCENARY_SELECTION
+    PendingDecision so the player can choose which Monster cards to sacrifice.
+
+    Cost table (from README §9.2):
+        4 Monster cards → Pawn
+        6 Monster cards → Knight, Bishop, or Rook
+        8 Monster cards → Queen
+
+    Consumes the preparation action.
+    """
+
+    piece_type: str   # "pawn" | "knight" | "bishop" | "rook" | "queen"
+
+
+@dataclass
+class SelectMercenaryCards(Action):
+    """
+    Follow-up to DeclareMercenary.
+    ``card_ids`` must be exactly the required Monster cards to sacrifice.
+    Those cards are removed from the game (NOT the graveyard).
+    Advances to MERCENARY_PLACEMENT so the player can pick the target square.
+    """
+
+    card_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PlaceMercenaryPiece(Action):
+    """
+    Follow-up to SelectMercenaryCards.
+    ``position`` must be an empty square in the player's own first two ranks.
+    Places the new chess piece there; completes the Mercenary action.
+    """
+
+    position: Position
+
+
+@dataclass
 class PromotePawn(Action):
     """
     Follow-up to a Pawn reaching the back rank.
@@ -324,6 +371,9 @@ STAGE0_ACTIONS = (
     ChangeKing,
     DeclareRecompose,
     SelectRecomposeCards,
+    DeclareMercenary,
+    SelectMercenaryCards,
+    PlaceMercenaryPiece,
     PromotePawn,
     EndPreparation,
     DiscardCard,
