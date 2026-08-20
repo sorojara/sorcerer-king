@@ -218,6 +218,12 @@ class PlayerState:
     king_pool: list[KingCardState] = field(default_factory=list)
     active_king: str | None = None
     retired_kings: list[str] = field(default_factory=list)
+    # Stage 10: the archetype randomly assigned to this player at setup —
+    # guarantees their King Pool contains that archetype's "home" King (see
+    # mechanics/kings.py assign_random_king_pool). Internal bookkeeping only,
+    # not exposed via Observation (own_king_pool already reveals card IDs to
+    # the owner; the archetype label adds nothing an opponent could exploit).
+    archetype: str | None = None
 
     ritual_pool: list[RitualState] = field(default_factory=list)
 
@@ -234,11 +240,16 @@ class PlayerState:
     # Turn-scoped flags, reset at start of each player's turn.
     preparation_action_used: bool = False
     chess_move_used: bool = False
+    # Stage 10: Grave-Crowned King's graveyard_recycle policy only fires for
+    # the FIRST allied Monster destroyed each turn (README-style "once per
+    # turn" cap — see mechanics/kings.py maybe_recycle_destroyed_monster).
+    king_recycle_used_this_turn: bool = False
 
     def reset_turn_flags(self) -> None:
         """Call at the start of this player's turn."""
         self.preparation_action_used = False
         self.chess_move_used = False
+        self.king_recycle_used_this_turn = False
 
     def is_in_check(self) -> bool:
         """

@@ -77,6 +77,7 @@ class CardType(Enum):
     SPELL = "spell"
     TRAP = "trap"
     BUILDING = "building"
+    KING = "king"
 
 
 class BuildingSize(Enum):
@@ -271,8 +272,45 @@ class BuildingCard:
         return BUILDING_TERRITORY_RADIUS[self.size]
 
 
+@dataclass(frozen=True)
+class KingCard:
+    """
+    Stage 10 — one entry in the King Pool pre-match selection (README §16-§20).
+
+    Each player selects a pool of 3 King Cards before the match, drawn from
+    the shared roster in data/kings.yaml (see mechanics/kings.py for the
+    random-assignment algorithm). All begin hidden; the first Coronation is
+    free (README §17); later Succession has an increasing cost (README §19).
+
+    ``effects``     — passive kingdom-wide policy effects while this King is
+                       ACTIVE. Dispatched by mechanics/kings.py, NOT the
+                       per-unit EFFECT_REGISTRY (registry.py) — King effects
+                       are global player-level auras, not attached to a card
+                       instance on the board. Only a subset are wired to
+                       real systems today; the rest are documented stubs
+                       (mirrors the Building/Monster STUB convention).
+    ``duel_effect`` — single effect used only during the Final Duel
+                       (Stage 12+). Always a stub today — Final Duel doesn't
+                       exist yet.
+    """
+
+    id: str
+    name: str
+    title: str = ""
+    archetype_support: tuple[str, ...] = ()
+    effects: tuple[EffectEntry, ...] = ()
+    duel_ability: str | None = None
+    duel_effect: EffectEntry | None = None
+    description: str = ""
+    image_path: str = ""
+
+    @property
+    def card_type(self) -> CardType:
+        return CardType.KING
+
+
 # Union
-AnyCard = MonsterCard | SpellCard | TrapCard | BuildingCard
+AnyCard = MonsterCard | SpellCard | TrapCard | BuildingCard | KingCard
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,6 +348,9 @@ class CardRegistry:
     def all_buildings(self) -> list[BuildingCard]:
         return [c for c in self._cards.values() if isinstance(c, BuildingCard)]
 
+    def all_kings(self) -> list[KingCard]:
+        return [c for c in self._cards.values() if isinstance(c, KingCard)]
+
     def __len__(self) -> int:
         return len(self._cards)
 
@@ -326,6 +367,13 @@ def _build_effects(raw: list[dict[str, Any]]) -> tuple[EffectEntry, ...]:
         EffectEntry(type=e["type"], params=e.get("params", {}))
         for e in (raw or [])
     )
+
+
+def _build_single_effect(raw: "dict[str, Any] | None") -> "EffectEntry | None":
+    """King cards carry ``duel_effect`` as one mapping, not a list."""
+    if not raw:
+        return None
+    return EffectEntry(type=raw["type"], params=raw.get("params", {}))
 
 
 def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ignore[name-defined]
@@ -413,6 +461,25 @@ def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ig
                     construction_turns=d.get("construction_turns", 2),
                     radius=d.get("radius", 1),
                     effects=_build_effects(d.get("effects", [])),
+                    description=d.get("description", ""),
+                    image_path=d.get("image", f"{d['id']}.png"),
+                )
+            )
+
+    # ── Kings (Stage 10) ──────────────────────────────────────────────────
+    kings_path = data_dir / "kings.yaml"
+    if kings_path.exists():
+        docs = yaml.safe_load(kings_path.read_text())
+        for d in (docs or []):
+            registry.register(
+                KingCard(
+                    id=d["id"],
+                    name=d["name"],
+                    title=d.get("title", ""),
+                    archetype_support=tuple(d.get("archetype_support", [])),
+                    effects=_build_effects(d.get("effects", [])),
+                    duel_ability=d.get("duel_ability"),
+                    duel_effect=_build_single_effect(d.get("duel_effect")),
                     description=d.get("description", ""),
                     image_path=d.get("image", f"{d['id']}.png"),
                 )

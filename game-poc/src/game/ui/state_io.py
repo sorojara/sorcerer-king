@@ -156,11 +156,13 @@ def _player_to_d(ps: PlayerState) -> dict:
         "king_pool": [_king_card_to_d(k) for k in ps.king_pool],
         "active_king": ps.active_king,
         "retired_kings": list(ps.retired_kings),
+        "archetype": ps.archetype,
         "ritual_pool": [_ritual_to_d(r) for r in ps.ritual_pool],
         "building_pool": [_building_pool_entry_to_d(b) for b in ps.building_pool],
         "castling_rights": _castling_to_d(ps.castling_rights),
         "preparation_action_used": ps.preparation_action_used,
         "chess_move_used": ps.chess_move_used,
+        "king_recycle_used_this_turn": ps.king_recycle_used_this_turn,
         "in_check": ps._in_check,
     }
 
@@ -174,11 +176,13 @@ def _player_from_d(d: dict) -> PlayerState:
         king_pool=[_king_card_from_d(k) for k in d.get("king_pool", [])],
         active_king=d.get("active_king"),
         retired_kings=d.get("retired_kings", []),
+        archetype=d.get("archetype"),
         ritual_pool=[_ritual_from_d(r) for r in d.get("ritual_pool", [])],
         building_pool=[_building_pool_entry_from_d(b) for b in d.get("building_pool", [])],
         castling_rights=_castling_from_d(d["castling_rights"]),
         preparation_action_used=d.get("preparation_action_used", False),
         chess_move_used=d.get("chess_move_used", False),
+        king_recycle_used_this_turn=d.get("king_recycle_used_this_turn", False),
     )
     ps._in_check = d.get("in_check", False)
     return ps

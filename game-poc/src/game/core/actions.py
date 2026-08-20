@@ -184,13 +184,25 @@ class CoronateKing(Action):
 class ChangeKing(Action):
     """
     Succession: replace the active King policy with another one.
-    Has an increasing cost each time.
     Cannot be performed while in check.
     ``king_card_id`` must be HIDDEN (never RETIRED).
     Consumes the preparation action.
+
+    Cost escalates with each Succession (README §19.1 — reuses existing
+    resources rather than a new one):
+        1st Succession — pay EITHER a piece sacrifice OR a Building
+            destruction (player's choice: set exactly one of
+            ``sacrifice_position`` / ``destroy_building_id``).
+        2nd Succession — pay BOTH (set both fields). Since the King Pool
+            only ever holds 3 cards, this is also the last possible
+            Succession.
+    The succession number is derived from ``len(player.retired_kings) + 1``
+    at execution time — not carried on the action.
     """
 
     king_card_id: str
+    sacrifice_position: Position | None = None   # piece-sacrifice cost payment
+    destroy_building_id: str | None = None       # Building-destruction cost payment
 
 
 @dataclass

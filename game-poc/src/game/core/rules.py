@@ -512,6 +512,48 @@ class RulesEngine:
                                     king_card_id=kcs.king_card_id,
                                 )
                             )
+                # Stage 10: Succession (if an active king exists, not in
+                # check, and a HIDDEN king remains). Cost escalates with the
+                # succession number (README §19.1) — see ChangeKing docstring.
+                elif ps.active_king is not None and not ps.is_in_check():
+                    from game.core.phases import ConstructionStatus
+                    hidden_kings = [
+                        kcs.king_card_id for kcs in ps.king_pool
+                        if kcs.status == KingCardStatus.HIDDEN
+                    ]
+                    if hidden_kings:
+                        succession_number = len(ps.retired_kings) + 1
+                        own_pieces = [
+                            pos for pos, u in state.board.all_units_for(player_id)
+                            if u.piece.piece_type != PieceType.KING
+                        ]
+                        own_buildings = [
+                            b.id for b in state.buildings
+                            if b.owner == player_id and b.status == ConstructionStatus.COMPLETE
+                        ]
+                        for king_card_id in hidden_kings:
+                            if succession_number == 1:
+                                # OR cost: either a piece sacrifice or a Building.
+                                for pos in own_pieces:
+                                    actions.append(ChangeKing(
+                                        player_id=player_id, king_card_id=king_card_id,
+                                        sacrifice_position=pos,
+                                    ))
+                                for bld_id in own_buildings:
+                                    actions.append(ChangeKing(
+                                        player_id=player_id, king_card_id=king_card_id,
+                                        destroy_building_id=bld_id,
+                                    ))
+                            elif succession_number == 2:
+                                # AND cost: both a piece sacrifice and a Building.
+                                for pos in own_pieces:
+                                    for bld_id in own_buildings:
+                                        actions.append(ChangeKing(
+                                            player_id=player_id, king_card_id=king_card_id,
+                                            sacrifice_position=pos, destroy_building_id=bld_id,
+                                        ))
+                            # succession_number >= 3 is structurally
+                            # impossible (the King Pool only holds 3 cards).
                 # Stage 6/9: Place Trap — one per Trap card in hand × every
                 # square that qualifies EITHER way (TRAP_MONSTER_ANCHOR OR
                 # Trap-zone Building coverage — see the RulesEngine
@@ -1039,6 +1081,11 @@ class RulesEngine:
                             position=action.target,
                             destroyed_by_piece_id=unit.piece.id,
                         ))
+                        # Stage 10: grave_crowned_king's graveyard_recycle policy.
+                        from game.mechanics.kings import maybe_recycle_destroyed_monster
+                        maybe_recycle_destroyed_monster(
+                            state, captured.owner, captured.monster_id, events, self._registry,
+                        )
                     events.append(PieceCaptured(
                         piece_id=captured.piece.id,
                         owner=captured.owner,
@@ -1381,14 +1428,9 @@ class RulesEngine:
         if is_committed_builder(state, unit.piece.id):
             raise IllegalActionError("This Pawn is committed to a Building under construction.")
 
-        # ── Stage 9: VESSEL_TERRITORY — summoning only in own Territory ──
-        from game.mechanics.territory import is_in_territory
-        if not is_in_territory(state, action.vessel_position, action.player_id, registry):
-            raise IllegalActionError(
-                f"Vessel at {action.vessel_position} is outside your Territory."
-            )  # VESSEL_TERRITORY
-
         # ── Stage 5: vessel compatibility check via registry ─────────────
+        # (looked up before the Territory check so a Stage 10 King's
+        # territory_summon_bonus can be scoped to this card's archetype.)
         if registry is not None:
             try:
                 card = registry.get(action.card_id)
@@ -1398,6 +1440,23 @@ class RulesEngine:
                 raise IllegalActionError(
                     f"Card {action.card_id!r} is not a Monster card."
                 )
+        else:
+            card = None
+
+        # ── Stage 9/10: VESSEL_TERRITORY — summoning only in own Territory,
+        # extended by a Stage 10 King's territory_summon_bonus policy
+        # (dragon_high_king: Dragons may summon slightly past the boundary
+        # while inside friendly Territory).
+        from game.mechanics.kings import is_in_territory_with_king_bonus
+        archetype = card.archetype if card is not None else None
+        if not is_in_territory_with_king_bonus(
+            state, action.vessel_position, action.player_id, archetype, registry
+        ):
+            raise IllegalActionError(
+                f"Vessel at {action.vessel_position} is outside your Territory."
+            )  # VESSEL_TERRITORY
+
+        if registry is not None:
             pt = unit.piece.piece_type.value
             compatible = card.supports_vessel(pt)
             if not compatible:
@@ -1409,13 +1468,18 @@ class RulesEngine:
                     card.archetype, registry,
                 )
             if not compatible:
+                # Stage 10: vessel_support (King policy) — a matching
+                # archetype King may extend the compatible vessel set too.
+                from game.mechanics.kings import king_extra_vessel_types
+                compatible = pt in king_extra_vessel_types(
+                    state, action.player_id, card.archetype, registry,
+                )
+            if not compatible:
                 raise IllegalActionError(
                     f"Monster {action.card_id!r} cannot use "
                     f"{unit.piece.piece_type.value!r} as a vessel. "
                     f"Supported: {list(card.supported_vessels)}"
                 )  # VESSEL_COMPATIBILITY
-        else:
-            card = None
 
         unit.monster_id = action.card_id
         ps.hand.remove(action.card_id)
@@ -2051,6 +2115,13 @@ class RulesEngine:
             if isinstance(card, BuildingCard):
                 construction_turns = card.construction_turns
 
+        # Stage 10: architect_king's construction_speed_bonus policy.
+        from game.mechanics.kings import apply_construction_speed_bonus
+        construction_turns = apply_construction_speed_bonus(
+            state, action.player_id, unit.piece.piece_type.value,
+            construction_turns, self._registry,
+        )
+
         building_id = f"bld-{action.player_id}-{len(state.buildings)+1:03d}"
         building = BuildingInstance(
             id=building_id,
@@ -2111,7 +2182,8 @@ class RulesEngine:
         state: GameState,
         action: ChangeKing,
     ) -> list[Event]:
-        from game.core.events import KingSuccession
+        from game.core.events import BuildingDestroyed, KingSuccession
+        from game.core.phases import ConstructionStatus
 
         self._require_phase(state, Phase.PREPARATION)
         self._require_no_prep_used(state, action.player_id)
@@ -2131,6 +2203,64 @@ class RulesEngine:
         if new_kcs is None or new_kcs.status != KingCardStatus.HIDDEN:
             raise IllegalActionError(f"King card {action.king_card_id!r} unavailable for succession.")
 
+        # ── Stage 10: escalating Succession cost (README §19.1) ──────────
+        # 1st Succession: piece sacrifice OR Building destruction (exactly
+        # one). 2nd Succession: BOTH. The King Pool only ever holds 3 cards,
+        # so 2 is also the highest possible succession number.
+        succession_number = len(ps.retired_kings) + 1
+        if succession_number == 1:
+            provided = (
+                (action.sacrifice_position is not None)
+                + (action.destroy_building_id is not None)
+            )
+            if provided != 1:
+                raise IllegalActionError(
+                    "1st Succession costs exactly one of: a piece sacrifice OR "
+                    "a Building destruction."
+                )
+        elif succession_number == 2:
+            if action.sacrifice_position is None or action.destroy_building_id is None:
+                raise IllegalActionError(
+                    "2nd Succession costs BOTH a piece sacrifice AND a Building destruction."
+                )
+        else:
+            raise IllegalActionError("No further Succession is possible — King Pool exhausted.")
+
+        sacrificed_piece_id: str | None = None
+        if action.sacrifice_position is not None:
+            victim = state.board.get_unit(action.sacrifice_position)
+            if victim is None or victim.owner != action.player_id:
+                raise IllegalActionError("Succession sacrifice must be your own piece.")
+            if victim.piece.piece_type == PieceType.KING:
+                raise IllegalActionError("The King cannot be sacrificed for Succession.")
+            sacrificed_piece_id = victim.piece.id
+            state.board.remove_unit(action.sacrifice_position)
+
+        destroyed_building_id: str | None = None
+        events: list[Event] = []
+        if action.destroy_building_id is not None:
+            building = next(
+                (b for b in state.buildings if b.id == action.destroy_building_id), None
+            )
+            if (
+                building is None
+                or building.owner != action.player_id
+                or building.status != ConstructionStatus.COMPLETE
+            ):
+                raise IllegalActionError(
+                    "Succession Building cost must be one of your own COMPLETE Buildings."
+                )
+            building.status = ConstructionStatus.DESTROYED
+            sq = state.board.get_square(building.position)
+            if sq.building_id == building.id:
+                sq.building_id = None
+            destroyed_building_id = building.id
+            events.append(BuildingDestroyed(
+                building_instance_id=building.id,
+                position=building.position,
+                destroyed_by=action.player_id,
+            ))
+
         # Retire old king
         if old_kcs:
             old_kcs.status = KingCardStatus.RETIRED
@@ -2140,12 +2270,13 @@ class RulesEngine:
         old_id = ps.active_king
         ps.active_king = action.king_card_id
 
-        events: list[Event] = []
         self._mark_prep_used(state, action.player_id, "ChangeKing", events)
         events.append(KingSuccession(
             player_id=action.player_id,
             retired_king_card_id=old_id,
             new_king_card_id=action.king_card_id,
+            sacrificed_piece_id=sacrificed_piece_id,
+            destroyed_building_id=destroyed_building_id,
         ))
         return events
 

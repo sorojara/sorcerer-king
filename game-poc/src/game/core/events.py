@@ -439,6 +439,9 @@ class KingSuccession(Event):
     player_id: str
     retired_king_card_id: str
     new_king_card_id: str
+    # Stage 10: cost payment for telemetry (README §42 "King Successions").
+    sacrificed_piece_id: str | None = None
+    destroyed_building_id: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

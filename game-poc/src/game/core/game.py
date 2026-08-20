@@ -257,6 +257,14 @@ class Game:
             castling_rights=CastlingRights(),
         )
 
+        # Stage 10: replace the placeholder King Pool above with a real,
+        # randomly-assigned one drawn from data/kings.yaml (README §16). A
+        # no-op — the placeholders above stand — when no registry is given
+        # (e.g. registry-less unit tests).
+        from game.mechanics.kings import assign_random_king_pool
+        assign_random_king_pool(white, registry, rng)
+        assign_random_king_pool(black, registry, rng)
+
         board = BoardState.make_standard_start()
         state = GameState(
             game_id=gid,
@@ -394,6 +402,10 @@ class Game:
         # (Fortress capture-protection, Shrine spell-radius) for this player.
         from game.mechanics.buildings import apply_building_auras
         apply_building_auras(self._state, player_id, self._registry)
+        # Stage 10: refresh the ACTIVE King's aura-style policy effects
+        # (formation_support, graveyard_threshold_bonus, spell_radius_bonus).
+        from game.mechanics.kings import apply_king_policy_auras
+        apply_king_policy_auras(self._state, player_id, self._registry)
         # START → DRAW
         self._state.phase = Phase.DRAW
         events.append(PhaseAdvanced(

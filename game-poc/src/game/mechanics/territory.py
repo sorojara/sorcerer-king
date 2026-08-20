@@ -111,6 +111,12 @@ def _building_zone_squares(
                 if effect.type == bonus_effect_type:
                     radius += effect.params.get("bonus", 1)
 
+        # Stage 10: architect_king's building_territory_bonus policy —
+        # every COMPLETE Building the owner controls projects a larger
+        # Territory while that King is active (README §12.4 / §20).
+        from game.mechanics.kings import building_territory_radius_bonus
+        radius += building_territory_radius_bonus(state, player_id, registry)
+
         squares.update(expand_area(b.position, radius, "square"))
     return squares
 

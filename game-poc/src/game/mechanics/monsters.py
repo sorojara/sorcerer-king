@@ -290,6 +290,11 @@ def check_damage_aura(
                             position=target_pos,
                             destroyed_by_piece_id=unit.piece.id,
                         ))
+                        # Stage 10: grave_crowned_king's graveyard_recycle policy.
+                        from game.mechanics.kings import maybe_recycle_destroyed_monster
+                        maybe_recycle_destroyed_monster(
+                            state, removed.owner, removed.monster_id, events, registry,
+                        )
                     else:
                         events.append(PieceCaptured(
                             piece_id=removed.piece.id,
