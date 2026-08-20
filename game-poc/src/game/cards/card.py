@@ -33,6 +33,29 @@ Trap:
     effects:        list[EffectEntry]
     description:    str
 
+Building (Stage 8):
+    id, name, type: "building"
+    size:           "small" | "medium" | "major" — determines its Building
+                     Pool point cost (see BUILDING_POINT_COST). Buildings are
+                     NOT part of the Main Deck (README §12) — they live in a
+                     player's separate, public Building Pool and are loaded
+                     from data/buildings.yaml, not sampled into a deck.
+    construction_turns: int — number of the owner's own end-of-turn ticks
+                     the Builder Pawn must survive before the Building
+                     completes (README §12.2).
+    radius:         int — the Building's own custom aura range (Stage 8:
+                     capture-protection / spell-radius / trap-radius
+                     bonuses), used by its ``effects``. Distinct from
+                     ``territory_radius`` below.
+    effects:        list[EffectEntry] — see mechanics/buildings.py for the
+                     currently-dispatched effect types.
+    description:    str
+
+    Derived (Stage 9, see BuildingCard properties):
+        territory_radius — how far this Building's own Territory extends,
+                     derived from ``size`` via BUILDING_TERRITORY_RADIUS
+                     (README §13).
+
 EffectEntry:
     type:     string tag matched by the EffectResolver
     params:   dict[str, Any] of effect parameters
@@ -53,6 +76,34 @@ class CardType(Enum):
     MONSTER = "monster"
     SPELL = "spell"
     TRAP = "trap"
+    BUILDING = "building"
+
+
+class BuildingSize(Enum):
+    """README §12.1 — Building Pool budget tiers."""
+
+    SMALL = "small"
+    MEDIUM = "medium"
+    MAJOR = "major"
+
+
+# README §12.1 example budget: Small=1, Medium=2, Major=3 points.
+BUILDING_POINT_COST: dict[BuildingSize, int] = {
+    BuildingSize.SMALL: 1,
+    BuildingSize.MEDIUM: 2,
+    BuildingSize.MAJOR: 3,
+}
+
+# Stage 9 — Territory radius derived from Building size (README §13 /
+# user brief: "increase size of radius over size of building"). Kept
+# separate from BuildingCard.radius (each Building's own custom aura
+# range from Stage 8 — capture-protection, spell-radius, trap-radius
+# bonuses) so retuning one never silently retunes the other.
+BUILDING_TERRITORY_RADIUS: dict[BuildingSize, int] = {
+    BuildingSize.SMALL: 1,
+    BuildingSize.MEDIUM: 2,
+    BuildingSize.MAJOR: 3,
+}
 
 
 class SpellType(Enum):
@@ -181,8 +232,47 @@ class TrapCard:
         return CardType.TRAP
 
 
+@dataclass(frozen=True)
+class BuildingCard:
+    """
+    Stage 8 — a Building Pool entry definition (README §11–§12).
+
+    Buildings are never drawn — a player's Building Pool is a fixed,
+    public pre-match selection (see PlayerState.building_pool /
+    BuildingPoolEntry in core/state.py), loaded from data/buildings.yaml
+    rather than sampled into a Main Deck.
+    """
+
+    id: str
+    name: str
+    size: BuildingSize
+    construction_turns: int
+    radius: int                          # area of influence
+    effects: tuple[EffectEntry, ...]
+    description: str = ""
+    image_path: str = ""
+
+    @property
+    def card_type(self) -> CardType:
+        return CardType.BUILDING
+
+    @property
+    def cost(self) -> int:
+        """Building Pool point cost, derived from ``size`` (README §12.1)."""
+        return BUILDING_POINT_COST[self.size]
+
+    @property
+    def territory_radius(self) -> int:
+        """
+        Stage 9 — how far this Building's own Territory extends beyond its
+        square, derived from ``size`` (README §13 / user brief: "increase
+        size of radius over size of building").
+        """
+        return BUILDING_TERRITORY_RADIUS[self.size]
+
+
 # Union
-AnyCard = MonsterCard | SpellCard | TrapCard
+AnyCard = MonsterCard | SpellCard | TrapCard | BuildingCard
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +307,9 @@ class CardRegistry:
     def all_traps(self) -> list[TrapCard]:
         return [c for c in self._cards.values() if isinstance(c, TrapCard)]
 
+    def all_buildings(self) -> list[BuildingCard]:
+        return [c for c in self._cards.values() if isinstance(c, BuildingCard)]
+
     def __len__(self) -> int:
         return len(self._cards)
 
@@ -243,6 +336,7 @@ def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ig
         {data_dir}/monsters.yaml
         {data_dir}/spells.yaml
         {data_dir}/traps.yaml
+        {data_dir}/buildings.yaml
     """
     import yaml  # type: ignore[import]
     from pathlib import Path
@@ -300,6 +394,24 @@ def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ig
                     radius=d.get("radius", 1),
                     shape=d.get("shape", "square"),
                     charges=d.get("charges", 1),
+                    effects=_build_effects(d.get("effects", [])),
+                    description=d.get("description", ""),
+                    image_path=d.get("image", f"{d['id']}.png"),
+                )
+            )
+
+    # ── Buildings (Stage 8) ───────────────────────────────────────────────
+    buildings_path = data_dir / "buildings.yaml"
+    if buildings_path.exists():
+        docs = yaml.safe_load(buildings_path.read_text())
+        for d in (docs or []):
+            registry.register(
+                BuildingCard(
+                    id=d["id"],
+                    name=d["name"],
+                    size=BuildingSize(d.get("size", "small")),
+                    construction_turns=d.get("construction_turns", 2),
+                    radius=d.get("radius", 1),
                     effects=_build_effects(d.get("effects", [])),
                     description=d.get("description", ""),
                     image_path=d.get("image", f"{d['id']}.png"),

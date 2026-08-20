@@ -188,6 +188,11 @@ def _reposition_unit(ctx: "EffectContext") -> None:
             return
         if params.get("must_be_own", True) and ctx.unit.piece.piece_type == PieceType.KING:
             raise IllegalActionError("reposition_unit cannot target the King.")
+        # Stage 8: a Pawn committed to Building construction cannot be
+        # relocated by any means, including this Spell.
+        from game.mechanics.buildings import is_committed_builder
+        if is_committed_builder(ctx.state, ctx.unit.piece.id):
+            raise IllegalActionError("This Pawn is committed to a Building under construction.")
         max_dist = params.get("max_distance")
         if max_dist is not None:
             dist = max(

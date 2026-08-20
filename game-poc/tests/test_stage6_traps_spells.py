@@ -100,6 +100,10 @@ class TestPlaceTrap:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wr = _place(board, "white", PieceType.ROOK, "d4", "wr")
+        wr.monster_id = "stone_golem"
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black")
         state = _game_state(board, white, black)
@@ -127,6 +131,10 @@ class TestPitTrap:
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.ROOK, "d8", "br")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wr = _place(board, "white", PieceType.ROOK, "d4", "wr")
+        wr.monster_id = "stone_golem"
 
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black")
@@ -160,6 +168,10 @@ class TestPitTrap:
         rook = _place(board, "black", PieceType.ROOK, "d8", "br")
         rook.monster_id = "stone_golem"
         rook.add_status("shield:2")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "d4", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black")
@@ -188,6 +200,10 @@ class TestPitTrap:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         black_king = _place(board, "black", PieceType.KING, "d6", "bk")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "d4", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black")
@@ -215,6 +231,10 @@ class TestPitTrap:
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.ROOK, "d8", "br")
         _place(board, "black", PieceType.ROOK, "a8", "br2")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "d4", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["ward_of_binding"])
         black = _make_player("black")
@@ -247,6 +267,12 @@ class TestCounterStrike:
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.PAWN, "d5", "bp")   # protected by the trap
         _place(board, "white", PieceType.ROOK, "d1", "wr")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster — off the d-file so it doesn't block the
+        # white Rook's slide from d1 to d5. c4's radius-1 area still
+        # covers d5.
+        bn = _place(board, "black", PieceType.KNIGHT, "c4", "bn")
+        bn.monster_id = "shadow_wolf"
 
         white = _make_player("white")
         black = _make_player("black", hand=["counter_strike"])
@@ -254,7 +280,7 @@ class TestCounterStrike:
         state.active_player = "black"
         engine = RulesEngine(registry=registry)
         engine.execute(state, PlaceTrap(
-            player_id="black", card_id="counter_strike", position=Position.from_algebraic("d4"),
+            player_id="black", card_id="counter_strike", position=Position.from_algebraic("c4"),
         ), rng)
 
         state.phase = Phase.CHESS
@@ -280,6 +306,10 @@ class TestAlarmBeacon:
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.ROOK, "d8", "br")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "d4", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["alarm_beacon"])
         white.deck = ["ward_of_binding"]
@@ -333,6 +363,10 @@ class TestTrapImmunity:
         _place(board, "black", PieceType.KING, "h8", "bk")
         rook = _place(board, "black", PieceType.ROOK, "d8", "br")
         rook.add_status("trap_immune:1")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "d4", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black")
@@ -366,6 +400,10 @@ class TestShatterTrap:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wr = _place(board, "white", PieceType.ROOK, "d4", "wr")
+        wr.monster_id = "stone_golem"
 
         white = _make_player("white", hand=["pit_trap"])
         black = _make_player("black", hand=["shatter_trap"])
@@ -387,6 +425,10 @@ class TestShatterTrap:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wr = _place(board, "white", PieceType.ROOK, "d4", "wr")
+        wr.monster_id = "stone_golem"
 
         white = _make_player("white", hand=["pit_trap", "shatter_trap"])
         black = _make_player("black")
@@ -409,6 +451,9 @@ class TestCursedGround:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
+        # Stage 9: a Spell may only target a square one of the caster's own
+        # non-Pawn pieces could move into — a Rook on d1 reaches d4.
+        _place(board, "white", PieceType.ROOK, "d1", "wr")
 
         white = _make_player("white", hand=["cursed_ground"])
         black = _make_player("black")
@@ -437,6 +482,9 @@ class TestCursedGround:
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.PAWN, "d6", "bp")
+        # Stage 9: a Spell may only target a square one of the caster's own
+        # non-Pawn pieces could move into — a Rook on d1 reaches d4.
+        _place(board, "white", PieceType.ROOK, "d1", "wr")
 
         white = _make_player("white", hand=["cursed_ground"])
         black = _make_player("black")
@@ -464,6 +512,9 @@ class TestVeilOfStillness:
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
+        # Stage 9: a Spell may only target a square one of the caster's own
+        # non-Pawn pieces could move into — a Rook on h1 reaches d1.
+        _place(board, "white", PieceType.ROOK, "h1", "wr")
 
         white = _make_player("white", hand=["veil_of_stillness"])
         black = _make_player("black")
@@ -485,6 +536,9 @@ class TestVeilOfStillness:
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         rook = _place(board, "black", PieceType.ROOK, "d8", "br")
+        # Stage 9: a Spell may only target a square one of the caster's own
+        # non-Pawn pieces could move into — a Rook on h1 reaches d1.
+        _place(board, "white", PieceType.ROOK, "h1", "wr")
 
         white = _make_player("white", hand=["veil_of_stillness"])
         black = _make_player("black")
@@ -564,6 +618,10 @@ class TestTimeAnchor:
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "black", PieceType.PAWN, "d7", "bp")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "a2", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["time_anchor"])
         black = _make_player("black")
@@ -621,6 +679,10 @@ class TestTimeAnchor:
         _place(board, "white", PieceType.KING, "a1", "wk")
         black_king = _place(board, "black", PieceType.KING, "h1", "bk")
         _place(board, "black", PieceType.ROOK, "h8", "br")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster.
+        wn = _place(board, "white", PieceType.KNIGHT, "a2", "wn")
+        wn.monster_id = "dark_magician"
 
         white = _make_player("white", hand=["time_anchor"])
         black = _make_player("black")
@@ -649,12 +711,17 @@ class TestTimeAnchor:
         _place(board2, "white", PieceType.KING, "a1", "wk2")
         _place(board2, "black", PieceType.KING, "h8", "bk2")
         _place(board2, "black", PieceType.ROOK, "a8", "br2")
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster — b2 (not a2) so it doesn't block the black
+        # Rook's capture slide down the a-file below.
+        wn2 = _place(board2, "white", PieceType.KNIGHT, "b2", "wn2")
+        wn2.monster_id = "dark_magician"
         white2 = _make_player("white", hand=["time_anchor"])
         black2 = _make_player("black")
         state2 = _game_state(board2, white2, black2)
         engine2 = RulesEngine(registry=registry)
         engine2.execute(state2, PlaceTrap(
-            player_id="white", card_id="time_anchor", position=Position.from_algebraic("a2"),
+            player_id="white", card_id="time_anchor", position=Position.from_algebraic("b2"),
         ), rng)
         trap_id2 = state2.traps[0].id
 
@@ -673,4 +740,168 @@ class TestTimeAnchor:
         with pytest.raises(IllegalActionError):
             engine2.execute(state2, ActivateTrap(
                 player_id="white", trap_instance_id=trap_id2,
+            ), rng)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 9 — targeting restrictions
+#   • Spells (target_type "position"/"zone") may be aimed at a square
+#     EITHER one of the caster's own non-Pawn pieces could move into right
+#     now, OR one covered by one of the caster's own COMPLETE Buildings.
+#   • Traps may be set EITHER on a square hosting one of the caster's own
+#     summoned Monsters, OR on an empty square covered by one of the
+#     caster's own COMPLETE Buildings.
+# In both cases only ONE of the two needs to hold — see
+# mechanics/territory.py. Building coverage is deliberately NARROWER than
+# plain Territory (user correction): the bare home three ranks do NOT
+# qualify on their own — only squares an actual Building's radius reaches
+# do. These tests use minimal boards with no Buildings at all, so the
+# Building-coverage half of the OR is always empty here — only the
+# piece-reach / Monster-anchor half is ever exercised.
+# Both restrictions are enforced in TWO places: get_legal_actions() (so the
+# AI/UI never offers an illegal target) and the executor (so a hand-built
+# illegal action is still rejected).
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSpellTargetingRestriction:
+    def test_legal_actions_exclude_unreachable_squares(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        # Only a Rook on d1 — reaches the whole d-file and rank 1, nothing else.
+        _place(board, "white", PieceType.ROOK, "d1", "wr")
+
+        white = _make_player("white", hand=["cursed_ground"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        legal = engine.get_legal_actions(state, "white", registry=registry)
+        targets = {
+            a.target for a in legal
+            if isinstance(a, ActivateSpell) and a.card_id == "cursed_ground"
+        }
+        assert (3, 3) in targets, "d4 is reachable by the Rook on d1"
+        assert (7, 7) not in targets, "h8 is nowhere near the Rook's reach"
+        # No Buildings exist on this board, so Building coverage is empty —
+        # a1 is occupied by white's own King (not reachable by "a non-Pawn
+        # piece could move into") and isn't covered by anything else either.
+        assert (0, 0) not in targets, "a1 is unreachable and there is no Building to cover it"
+        assert (4, 3) not in targets, "e4 is outside both the Rook's reach and any Building"
+
+    def test_execute_rejects_unreachable_square(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        _place(board, "white", PieceType.ROOK, "d1", "wr")
+
+        white = _make_player("white", hand=["cursed_ground"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        with pytest.raises(IllegalActionError):
+            engine.execute(state, ActivateSpell(
+                player_id="white", card_id="cursed_ground", target=(7, 7),  # h8 — unreachable
+            ), rng)
+
+    def test_a_second_non_pawn_piece_widens_the_reachable_set(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        _place(board, "white", PieceType.KNIGHT, "g6", "wn")   # reaches e5, among others
+
+        white = _make_player("white", hand=["cursed_ground"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        legal = engine.get_legal_actions(state, "white", registry=registry)
+        targets = {
+            a.target for a in legal
+            if isinstance(a, ActivateSpell) and a.card_id == "cursed_ground"
+        }
+        e5 = Position.from_algebraic("e5")
+        assert (e5.file, e5.rank) in targets, "e5 is a Knight move away from g6"
+
+    def test_piece_target_spells_unaffected(self, registry, rng):
+        """
+        The non-Pawn-movement restriction only gates "position"/"zone"
+        Spells — a "piece" target_type Spell like arcane_reposition is
+        untouched, even with no non-Pawn piece anywhere on the board.
+        """
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        _place(board, "white", PieceType.PAWN, "d4", "wp")
+
+        white = _make_player("white", hand=["arcane_reposition"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        engine.execute(state, ActivateSpell(
+            player_id="white", card_id="arcane_reposition",
+            target={"position": (3, 3), "destination": (3, 6)},  # d4 -> d7
+        ), rng)
+        assert state.board.get_unit(Position.from_algebraic("d7")) is not None
+
+
+class TestTrapPlacementRestriction:
+    def test_legal_actions_exclude_empty_and_foreign_squares(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        wn = _place(board, "white", PieceType.KNIGHT, "b1", "wn")
+        wn.monster_id = "dark_magician"
+        bn = _place(board, "black", PieceType.KNIGHT, "g8", "bn")
+        bn.monster_id = "shadow_wolf"
+
+        white = _make_player("white", hand=["pit_trap"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        legal = engine.get_legal_actions(state, "white", registry=registry)
+        positions = {
+            a.position for a in legal
+            if isinstance(a, PlaceTrap) and a.card_id == "pit_trap"
+        }
+        assert Position.from_algebraic("b1") in positions, \
+            "white's own summoned Monster is a legal Trap square"
+        assert Position.from_algebraic("g8") not in positions, \
+            "an enemy Monster is not a legal Trap square"
+        assert Position.from_algebraic("d4") not in positions, \
+            "an empty square is not a legal Trap square"
+
+    def test_execute_rejects_empty_square(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+
+        white = _make_player("white", hand=["pit_trap"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        with pytest.raises(IllegalActionError):
+            engine.execute(state, PlaceTrap(
+                player_id="white", card_id="pit_trap", position=Position.from_algebraic("d4"),
+            ), rng)
+
+    def test_execute_rejects_opponents_monster(self, registry, rng):
+        board = BoardState()
+        _place(board, "white", PieceType.KING, "a1", "wk")
+        _place(board, "black", PieceType.KING, "h8", "bk")
+        bn = _place(board, "black", PieceType.KNIGHT, "d4", "bn")
+        bn.monster_id = "shadow_wolf"
+
+        white = _make_player("white", hand=["pit_trap"])
+        black = _make_player("black")
+        state = _game_state(board, white, black)
+        engine = RulesEngine(registry=registry)
+
+        with pytest.raises(IllegalActionError):
+            engine.execute(state, PlaceTrap(
+                player_id="white", card_id="pit_trap", position=Position.from_algebraic("d4"),
             ), rng)

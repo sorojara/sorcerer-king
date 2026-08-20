@@ -36,6 +36,7 @@ Public API:
     get_pseudo_legal_moves(board, pos, unit, en_passant_target=None) → list[Position]
     get_legal_moves(board, pos, unit, en_passant_target=None,
                     castling_rights=None, player_id="") → list[Position]
+    get_non_pawn_movement_squares(board, player_id, registry=None) → set[Position]
     can_castle_kingside(board, player_id, castling_rights) → bool
     can_castle_queenside(board, player_id, castling_rights) → bool
     is_in_check(board, player_id) → bool
@@ -239,6 +240,32 @@ def get_pseudo_legal_moves(
             ]
 
     return moves
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: Spell targeting — non-Pawn zone of influence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_non_pawn_movement_squares(
+    board: BoardState,
+    player_id: str,
+    registry: "object | None" = None,
+) -> set[Position]:
+    """
+    Squares any of ``player_id``'s own non-Pawn pieces could move into right
+    now (pseudo-legal: respects blockers, monster movement additions, frozen/
+    blocked squares, and movement caps — ignores check/whose-turn-it-is).
+
+    A Spell that targets a board square (target_type "position"/"zone") may
+    only be aimed at one of these squares — it reflects the caster's current
+    zone of tactical influence rather than the whole board.
+    """
+    squares: set[Position] = set()
+    for pos, unit in board.all_units_for(player_id):
+        if unit.piece.piece_type == PieceType.PAWN:
+            continue
+        squares.update(get_pseudo_legal_moves(board, pos, unit, registry=registry))
+    return squares
 
 
 # ─────────────────────────────────────────────────────────────────────────────

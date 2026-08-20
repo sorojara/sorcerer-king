@@ -585,7 +585,11 @@ class TestDamageAura:
         board = BoardState()
         _place(board, "white", PieceType.KING, "e1", "wk")
         _place(board, "black", PieceType.KING, "e8", "bk")
-        rook_unit = _place(board, "black", PieceType.ROOK, "d5", "br")
+        # Stage 9: summon inside black's home Territory (rank 7), then
+        # reposition to d5 (a plain board mutation, not a chess move — the
+        # rest of this test suite is unaffected by Territory since it only
+        # gates the SummonMonster action itself).
+        rook_unit = _place(board, "black", PieceType.ROOK, "d7", "br")
         white_unit = _place(board, "white", PieceType.PAWN, "a5", "wp")
 
         engine = RulesEngine(registry=registry)
@@ -597,8 +601,9 @@ class TestDamageAura:
         engine.execute(state, SummonMonster(
             player_id="black",
             card_id="dragon_herald",
-            vessel_position=Position.from_algebraic("d5"),
+            vessel_position=Position.from_algebraic("d7"),
         ), rng)
+        state.board.move_unit(Position.from_algebraic("d7"), Position.from_algebraic("d5"))
         return state, engine
 
     def test_enemy_entering_aura_is_destroyed(self, registry, rng):
@@ -711,14 +716,6 @@ class TestFreezeSquare:
         """
         from game.core.events import SquareFrozen
 
-        state, engine, attacker_pos, target_pos = self._setup_with_iron_vanguard(
-            registry, rng, vessel_alg="d4", target_alg="e6"
-        )
-        # Knight on d4 can reach e6 (knight move: +1 file, +2 rank)
-        # Adjust placement so knight can capture
-        # Knight d4 → f5 (valid knight move) but we need an enemy there
-        # Use c2 → d4 (knight move) then d4 → e6
-        # Let's place on c3 and capture d5
         board = BoardState()
         _place(board, "white", PieceType.KING, "e1", "wk")
         _place(board, "black", PieceType.KING, "e8", "bk")

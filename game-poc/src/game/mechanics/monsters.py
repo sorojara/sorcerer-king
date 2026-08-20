@@ -540,6 +540,12 @@ def try_push_unit(
             target=push_dest,
             pushed_by_piece_id=attacker_unit.piece.id,
         ))
+        # Stage 8: forcibly displacing a committed Builder Pawn off its
+        # construction square is disruption too — the Building is lost.
+        from game.mechanics.buildings import find_committed_building, cancel_construction
+        disrupted = find_committed_building(state, defender.piece.id)
+        if disrupted is not None:
+            cancel_construction(state, disrupted, events, destroyed_by=attacker_unit.piece.id)
 
         state.board.move_unit(attacker_pos, target_pos)
         events.append(PieceMoved(
@@ -712,7 +718,10 @@ def check_enter_radius_traps(
             continue
         if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.ENTER_RADIUS:
             continue
-        if not in_area(target_pos, trap.position, card.radius, card.shape):
+        # Stage 8: Watchtower extends the owner's Trap influence radius.
+        from game.mechanics.buildings import trap_radius_bonus
+        radius = card.radius + trap_radius_bonus(state, trap, registry)
+        if not in_area(target_pos, trap.position, radius, card.shape):
             continue
         _fire_trap(state, trap, moving_unit, target_pos, "enter_radius", events, registry, rng=rng)
 
@@ -747,6 +756,9 @@ def check_capture_traps(
             continue
         if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.CAPTURE:
             continue
-        if not in_area(position, trap.position, card.radius, card.shape):
+        # Stage 8: Watchtower extends the owner's Trap influence radius.
+        from game.mechanics.buildings import trap_radius_bonus
+        radius = card.radius + trap_radius_bonus(state, trap, registry)
+        if not in_area(position, trap.position, radius, card.shape):
             continue
         _fire_trap(state, trap, capturing_unit, position, "capture", events, registry, rng=rng)

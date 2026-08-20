@@ -74,6 +74,7 @@ def make_player(
     ps.building_pool = [
         BuildingPoolEntry(building_card_id="fortress", copies_available=2),
         BuildingPoolEntry(building_card_id="shrine", copies_available=1),
+        BuildingPoolEntry(building_card_id="watchtower", copies_available=1),
     ]
     return ps
 

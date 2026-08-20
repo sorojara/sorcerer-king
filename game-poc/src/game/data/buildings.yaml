@@ -1,0 +1,96 @@
+# Building Pool definitions — Stage 8 (README §11–§12).
+#
+# Buildings are NEVER part of the Main Deck. A player's Building Pool is a
+# fixed, public pre-match selection (PlayerState.building_pool) built from
+# these definitions by Game.new() — see core/game.py's
+# _DEFAULT_BUILDING_POOL. They are only referenced here by id/size/cost;
+# a player never "draws" one.
+#
+# size determines the Building Pool point cost (README §12.1):
+#   small = 1, medium = 2, major = 3
+#
+# construction_turns is how many of the owner's OWN end-of-turn ticks the
+# Builder Pawn must survive (uninterrupted, immobile — see README §12.2
+# "Pawn is committed for a period of time") before the Building completes.
+#
+# radius is the Building's own custom aura range, consumed by its effects
+# (see mechanics/buildings.py for the currently-dispatched effect types;
+# any other type is inert today and reserved for a later stage, matching
+# the STUB convention already used elsewhere in mechanics/effects/).
+#
+# Stage 9: every COMPLETE Building also projects Territory — a separate
+# radius derived from `size` (BUILDING_TERRITORY_RADIUS: small=1,
+# medium=2, major=3 — see cards/card.py), NOT the `radius` field above.
+# Trap placement / Spell targeting draw on Building coverage specifically
+# (NOT plain home-rank Territory — a Building's own radius is the whole
+# story there). A `trap_territory_bonus` / `spell_territory_bonus` effect
+# (params: {bonus: N}) extends that Building's Trap-placement /
+# Spell-targeting reach further still (mechanics/territory.py).
+
+- id: fortress
+  name: Fortress
+  size: medium
+  construction_turns: 3
+  radius: 2
+  effects:
+    # Real today: refreshes a one-hit capture shield onto the owner's
+    # Monsters standing within `radius` squares (mechanics/buildings.py
+    # apply_building_auras, run at the start of the owner's turn) — a
+    # first, board-level slice of README §12.4's "protect King area /
+    # improve Final Duel defense".
+    - type: capture_protection_aura
+    # STUB — awaits the Final Duel (Stage 12) for its full "Gain an
+    # additional Guard" payoff (README §29).
+    - type: final_duel_guard_bonus
+      params: {amount: 1}
+  description: >
+    A defensive strongpoint. Its allied Monsters are shielded from the
+    first capture attempt against them while standing in its shadow.
+    Its true strength — reinforcing the King's Final Duel — awaits the
+    Final Duel system.
+
+- id: shrine
+  name: Shrine
+  size: small
+  construction_turns: 2
+  radius: 2
+  effects:
+    # Real today: refreshes a spell_radius_bonus flag onto the owner's
+    # Monsters within `radius` — the same "flag only" mechanism already
+    # used by dark_magician (mechanics/effects/_meta.py).
+    - type: spell_radius_aura
+    # STUB — awaits the Ritual system (Stage 11) for its real payoff
+    # (README §12.4: "Ritual support / Ritual radius").
+    - type: ritual_support
+    # Stage 9: Spells may target a square in this bonus zone (on top of
+    # Shrine's own base coverage / the pre-existing piece-reach rule —
+    # see mechanics/territory.py::spell_zone_squares).
+    - type: spell_territory_bonus
+      params: {bonus: 2}
+  description: >
+    A place of arcane focus. Spells cast near it carry further, and it
+    will one day widen the reach of Rituals performed nearby.
+
+- id: watchtower
+  name: Watchtower
+  size: small
+  construction_turns: 2
+  radius: 3
+  effects:
+    # Real today: extends the owner's Traps within `radius` by +bonus
+    # (mechanics/buildings.py trap_radius_bonus, consumed by
+    # mechanics/monsters.py's enter_radius/capture Trap checks).
+    - type: trap_radius_bonus
+      params: {bonus: 1}
+    # STUB — awaits the Final Duel (Stage 12) for "extend Royal Support
+    # range" (README §12.4 / §29).
+    - type: final_duel_support_range
+      params: {bonus: 1}
+    # Stage 9: Traps may be PLACED in this bonus zone (on top of
+    # Watchtower's own base coverage / the pre-existing Monster-anchor
+    # rule — see mechanics/territory.py::trap_zone_squares).
+    - type: trap_territory_bonus
+      params: {bonus: 2}
+  description: >
+    A tall outpost extending the kingdom's reach. Traps built in its
+    shadow watch a wider stretch of ground.

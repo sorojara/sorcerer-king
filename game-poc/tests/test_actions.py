@@ -120,13 +120,16 @@ class TestPreparationLimit:
         self, game_state: GameState, rng: DeterministicRNG
     ):
         engine = RulesEngine()
+        # Stage 9: a Trap can only be set on a square hosting the caster's
+        # own summoned Monster — mark white's b1 Knight as a Monster vessel.
+        game_state.board.get_unit(Position.from_algebraic("b1")).monster_id = "dark_magician"
         # First prep action: place trap
         engine.execute(
             game_state,
             PlaceTrap(
                 player_id="white",
                 card_id="pit_trap",
-                position=Position.from_algebraic("d4"),
+                position=Position.from_algebraic("b1"),
             ),
             rng,
         )

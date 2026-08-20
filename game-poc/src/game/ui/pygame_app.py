@@ -64,11 +64,13 @@ from game.core.actions import (
     RepositionUnit,
     SelectMercenaryCards,
     SelectRecomposeCards,
+    StartConstruction,
     SummonMonster,
 )
 from game.core.phases import HAND_SIZE_LIMIT
 from game.core.game import Game
-from game.core.phases import Phase
+from game.core.phases import Phase, PieceType
+from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
 from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView
 from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
@@ -132,6 +134,8 @@ class AppController:
         pygame.display.set_caption("Sorcerer King — Stage 4 PoC")
 
         self._show_black_hand: bool = False
+        # Stage 9: toggle the Territory board tint on/off.
+        self._show_territory: bool = True
         self._screen = pygame.display.set_mode((WIN_W, WIN_H))
         self._clock = pygame.time.Clock()
 
@@ -260,6 +264,13 @@ class AppController:
         # Stage 7: Mercenary piece-type picker dialog
         self._mercenary_picker: "_MercenaryPicker | None" = None
 
+        # Stage 8: Build mode — a Building Pool entry selected via the
+        # picker, awaiting a click on a highlighted builder-Pawn square.
+        # None = not in build mode; str = the building_card_id being built.
+        self._build_card_id: str | None = None
+        self._build_positions: list[Position] = []
+        self._build_picker: "_BuildPicker | None" = None
+
         # Auto-advance past phases that need no user input
         self._auto_advance()
 
@@ -291,9 +302,13 @@ class AppController:
                 if self._mercenary_picker is not None:
                     self._mercenary_picker = None
                     return
+                if self._build_picker is not None:
+                    self._build_picker = None
+                    return
                 self._cancel_summon()
                 self._cancel_targeting_mode()
                 self._cancel_spell_piece_mode()
+                self._cancel_build_mode()
                 self._deselect()
                 self._inspect_unit_pos = None
                 self._viewer_card_id = None
@@ -315,6 +330,8 @@ class AppController:
                 self._promotion_dialog.update_mouse(event.pos)
             if self._mercenary_picker is not None:
                 self._mercenary_picker._mouse_pos = event.pos
+            if self._build_picker is not None:
+                self._build_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
@@ -326,6 +343,13 @@ class AppController:
                     self._mercenary_picker = None
                 elif result is not None:
                     self._commit_mercenary(result)
+                return
+            if self._build_picker is not None:
+                result = self._build_picker.handle_click(mx, my)
+                if result == "cancel":
+                    self._build_picker = None
+                elif result is not None:
+                    self._commit_build(result)
                 return
             if self._promotion_dialog is not None:
                 self._handle_promotion_click(mx, my)
@@ -383,11 +407,17 @@ class AppController:
         if btn == "toggle_black_hand":
             self._toggle_black_hand()
             return
+        if btn == "toggle_territory":
+            self._toggle_territory()
+            return
         if btn == "recompose":
             self._do_recompose()
             return
         if btn == "mercenary":
             self._do_mercenary()
+            return
+        if btn == "build":
+            self._do_build()
             return
         if btn is not None and btn.startswith("trap:"):
             # Stage 6: "⚡ Activatable" section — fire a manual Trap directly.
@@ -537,7 +567,15 @@ class AppController:
 
         # ── PREPARATION phase ─────────────────────────────────────────────
         elif obs.phase == Phase.PREPARATION:
-            if self._summon_card_id is not None:
+            if self._build_card_id is not None:
+                # Stage 8: Build mode — click on a highlighted builder Pawn
+                # → fire StartConstruction.
+                if pos in self._build_positions:
+                    self._do_build_construction(self._build_card_id, pos, active)
+                else:
+                    self._cancel_build_mode()
+                    self._show_toast("Construction cancelled.")
+            elif self._summon_card_id is not None:
                 # Summon mode: click on a valid vessel → fire SummonMonster
                 if pos in self._summon_vessel_positions:
                     self._do_summon(self._summon_card_id, pos, active)
@@ -619,6 +657,10 @@ class AppController:
             self._cancel_targeting_mode()
             self._cancel_spell_piece_mode()
             return
+
+        # Stage 8: a hand card click always supersedes build mode (Buildings
+        # aren't hand cards, so there's no matching "same card" toggle here).
+        self._cancel_build_mode()
 
         # Look up the card in the registry
         if card_id not in self._registry:
@@ -968,6 +1010,58 @@ class AppController:
             )
         except Exception as exc:
             self._show_toast(f"Mercenary: {exc}")
+
+    def _do_build(self) -> None:
+        """
+        Sidebar button: open the Building Pool picker for the active human
+        player.  Only valid during PREPARATION when the preparation action
+        hasn't been used.  Shows a small on-board picker listing the
+        player's public Building Pool entries (README §12); selecting one
+        enters build mode (highlighted builder-Pawn squares on the board).
+        """
+        obs = self._current_obs()
+        if obs.phase != Phase.PREPARATION:
+            return
+        active = obs.active_player
+        if self._player_modes.get(active) == "human":
+            self._build_picker = _BuildPicker(
+                surface=self._screen,
+                font=self._font_small,
+                registry=self._registry,
+                pool=list(self._game.state.get_player(active).building_pool),
+            )
+
+    def _commit_build(self, building_card_id: str) -> None:
+        """Called by the BuildPicker when the human picks a Building. Enters build mode."""
+        self._build_picker = None
+        obs = self._current_obs()
+        legal = self._game.get_legal_actions(obs.active_player)
+        positions = [
+            a.pawn_position for a in legal
+            if isinstance(a, StartConstruction) and a.building_card_id == building_card_id
+        ]
+        if not positions:
+            self._show_toast("No eligible builder Pawn for that Building.")
+            return
+        self._build_card_id = building_card_id
+        self._build_positions = positions
+        name = building_card_id
+        if self._registry is not None and building_card_id in self._registry:
+            name = self._registry.get(building_card_id).name
+        self._show_toast(f"Building {name} — click a highlighted Pawn  (ESC to cancel)")
+
+    def _do_build_construction(self, building_card_id: str, pawn_pos: Position, player_id: str) -> None:
+        """Execute StartConstruction and exit build mode."""
+        self._cancel_build_mode()
+        action = StartConstruction(
+            player_id=player_id, pawn_position=pawn_pos, building_card_id=building_card_id,
+        )
+        self._execute_and_advance(action, player_id)
+
+    def _cancel_build_mode(self) -> None:
+        """Exit build mode without firing any action."""
+        self._build_card_id = None
+        self._build_positions = []
 
     def _handle_mercenary_card_click(self, card_id: str, obs: "object") -> None:
         """
@@ -1449,6 +1543,12 @@ class AppController:
         label = "ON" if self._show_black_hand else "OFF"
         self._show_toast(f"Black hand view: {label}")
 
+    def _toggle_territory(self) -> None:
+        """Stage 9: toggle the Territory board tint on/off."""
+        self._show_territory = not self._show_territory
+        label = "ON" if self._show_territory else "OFF"
+        self._show_toast(f"Territory overlay: {label}")
+
     # ── AI tick (called every frame) ──────────────────────────────────────
 
     def _tick_ai(self) -> None:
@@ -1728,6 +1828,9 @@ class AppController:
         board_summon_dests: list[Position] = []
         if self._summon_card_id is not None:
             board_summon_dests = self._summon_vessel_positions
+        elif self._build_card_id is not None:
+            # Stage 8: build mode reuses the same gold-ring highlight channel.
+            board_summon_dests = self._build_positions
         elif self._targeting_card_id is not None:
             # Stage 6: Trap-placement / Spell-area targeting — reuses the
             # same gold-ring highlight channel as summon mode.
@@ -1755,6 +1858,7 @@ class AppController:
             summon_vessel_dests=board_summon_dests,
             inspect_pos=self._inspect_unit_pos,
             aura_colors=self._compute_aura_colors(obs),
+            show_territory=self._show_territory,
         )
 
         # Stage 6: hover tooltip for Traps / active zone effects.
@@ -1798,6 +1902,18 @@ class AppController:
             # registry not loaded yet — show disabled rather than hidden
             show_mercenary = False
 
+        # Build button (Stage 8): same tri-state convention as Mercenary.
+        show_build: "bool | None" = None
+        if prep_available:
+            ps = self._game.state.get_player(active)
+            has_builder = any(
+                unit.piece.piece_type == PieceType.PAWN and unit.builder_available
+                and not is_committed_builder(self._game.state, unit.piece.id)
+                for _pos, unit in self._game.state.board.all_units_for(active)
+            )
+            has_pool = any(e.copies_available > 0 for e in ps.building_pool)
+            show_build = has_builder and has_pool
+
         # ── CardViewer (left sidebar) ───────────────────────────────────────
         # Stage 6 (corrected): right-click driven only — hand cards, board
         # units, and "Active in this zone" entries all set self._viewer_card_id
@@ -1833,6 +1949,8 @@ class AppController:
             show_black_hand=self._show_black_hand,
             show_recompose_btn=show_recompose,
             show_mercenary_btn=show_mercenary,
+            show_build_btn=show_build,
+            show_territory=self._show_territory,
             activatable_entries=activatable_entries or None,
         )
         self._card_viewer.draw(
@@ -1895,6 +2013,10 @@ class AppController:
         # Stage 7: Mercenary piece-type picker dialog
         if self._mercenary_picker is not None:
             self._mercenary_picker.draw()
+
+        # Stage 8: Building Pool picker dialog
+        if self._build_picker is not None:
+            self._build_picker.draw()
 
         # Game-over banner
         if self._game.is_over():
@@ -2090,6 +2212,131 @@ class _MercenaryPicker:
             y += self._ROW_H + 3
 
         # Cancel button
+        y += 6
+        cancel_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._CANCEL_H)
+        self._cancel_rect = cancel_rect
+        hover_c = cancel_rect.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, (50, 30, 30) if hover_c else (30, 20, 20),
+                         cancel_rect, border_radius=4)
+        pygame.draw.rect(self._surface, (160, 80, 80), cancel_rect, 1, border_radius=4)
+        cs = self._font.render("Cancel", True, (180, 100, 100))
+        self._surface.blit(cs, (
+            cancel_rect.x + (cancel_rect.width - cs.get_width()) // 2,
+            cancel_rect.y + (cancel_rect.height - cs.get_height()) // 2,
+        ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _BuildPicker — a small on-board dialog for selecting a Building Pool entry
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _BuildPicker:
+    """
+    Modal dialog drawn over the centre of the board (Stage 8).
+
+    Lists the player's public Building Pool entries (README §12) with
+    remaining copies and point cost; entries with 0 copies left are dimmed.
+
+    ``handle_click(mx, my)``
+        Returns the selected building_card_id, "cancel", or None (missed).
+    ``draw()``
+        Renders the dialog each frame.
+    """
+
+    _W = 280
+    _ROW_H = 34
+    _PADDING = 12
+    _CANCEL_H = 28
+
+    def __init__(
+        self,
+        surface: "pygame.Surface",
+        font: "Any",
+        registry: "Any",
+        pool: "list[Any]",   # list[BuildingPoolEntry]
+    ) -> None:
+        self._surface = surface
+        self._font = font
+        self._registry = registry
+        self._pool = pool
+        self._mouse_pos: tuple[int, int] = (0, 0)
+
+        h = (self._PADDING
+             + self._font.render("Ag", True, (0, 0, 0)).get_height() + 8   # title
+             + len(pool) * (self._ROW_H + 3)
+             + 6 + self._CANCEL_H
+             + self._PADDING)
+        sw = surface.get_width()
+        sh = surface.get_height()
+        self._rect = pygame.Rect(
+            (sw - self._W) // 2,
+            (sh - h) // 2,
+            self._W,
+            h,
+        )
+        self._row_rects: list[pygame.Rect] = []
+        self._cancel_rect: pygame.Rect | None = None
+
+    def handle_click(self, mx: int, my: int) -> "str | None":
+        for i, rect in enumerate(self._row_rects):
+            if rect.collidepoint(mx, my):
+                entry = self._pool[i]
+                if entry.copies_available > 0:
+                    return entry.building_card_id
+        if self._cancel_rect and self._cancel_rect.collidepoint(mx, my):
+            return "cancel"
+        if not self._rect.collidepoint(mx, my):
+            return "cancel"
+        return None
+
+    def _card_label(self, entry: "Any") -> tuple[str, int]:
+        """Return (display name, point cost) for a pool entry."""
+        name = entry.building_card_id
+        cost = 0
+        if self._registry is not None and entry.building_card_id in self._registry:
+            card = self._registry.get(entry.building_card_id)
+            name = getattr(card, "name", name)
+            cost = getattr(card, "cost", 0)
+        return name, cost
+
+    def draw(self) -> None:
+        overlay = pygame.Surface(
+            (self._surface.get_width(), self._surface.get_height()), pygame.SRCALPHA
+        )
+        overlay.fill((0, 0, 0, 140))
+        self._surface.blit(overlay, (0, 0))
+
+        pygame.draw.rect(self._surface, (16, 26, 20), self._rect, border_radius=6)
+        pygame.draw.rect(self._surface, (90, 160, 110), self._rect, 2, border_radius=6)
+
+        x = self._rect.x + self._PADDING
+        y = self._rect.y + self._PADDING
+
+        title = self._font.render("🏛  Building Pool", True, (140, 220, 160))
+        self._surface.blit(title, (x, y))
+        y += title.get_height() + 8
+
+        self._row_rects = []
+        for entry in self._pool:
+            row_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._ROW_H)
+            self._row_rects.append(row_rect)
+            available = entry.copies_available > 0
+
+            hover = available and row_rect.collidepoint(self._mouse_pos)
+            bg = (30, 50, 36) if hover else (20, 34, 25)
+            pygame.draw.rect(self._surface, bg, row_rect, border_radius=4)
+            border = (120, 200, 140) if available else (55, 70, 60)
+            pygame.draw.rect(self._surface, border, row_rect, 1, border_radius=4)
+
+            name, cost = self._card_label(entry)
+            label = f"{name}  —  {cost} pt(s)  ×{entry.copies_available} left"
+            color = (170, 230, 185) if available else (75, 90, 80)
+            lbl_surf = self._font.render(label, True, color)
+            ly = row_rect.y + (self._ROW_H - lbl_surf.get_height()) // 2
+            self._surface.blit(lbl_surf, (row_rect.x + 6, ly))
+
+            y += self._ROW_H + 3
+
         y += 6
         cancel_rect = pygame.Rect(x, y, self._W - self._PADDING * 2, self._CANCEL_H)
         self._cancel_rect = cancel_rect

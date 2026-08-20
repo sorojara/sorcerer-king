@@ -47,8 +47,16 @@ from game.ui.colors import (
     LEGAL_DOT,
     LIGHT_SQUARE,
     SELECTED_TINT,
+    BUILDING_LABEL_BG,
+    BUILDING_MARKER_ENEMY,
+    BUILDING_MARKER_OWN,
+    BUILDING_MARKER_UNDER_CONSTR,
     SUMMON_VESSEL_DOT,
     SUMMON_VESSEL_TINT,
+    TERRITORY_BORDER_ENEMY,
+    TERRITORY_BORDER_OWN,
+    TERRITORY_TINT_ENEMY,
+    TERRITORY_TINT_OWN,
     TRAP_LABEL_BG,
     TRAP_MARKER_ENEMY,
     TRAP_MARKER_ENEMY_ACTIVE,
@@ -165,6 +173,7 @@ class BoardView:
         summon_vessel_dests: list[Position] | None = None,
         inspect_pos: Position | None = None,
         aura_colors: "dict[Position, tuple[int, int, int]] | None" = None,
+        show_territory: bool = True,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -186,11 +195,15 @@ class BoardView:
                               the card registry lookup); this module only draws
                               whatever color it's handed. Positions with no
                               Monster, or missing from the map, get no aura.
+        show_territory      : Stage 9 — whether to draw the Territory base
+                              tint (AppController's toggle button flips this).
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
-                           checked_player, summon_vessel_dests or [], inspect_pos)
+                           checked_player, summon_vessel_dests or [], inspect_pos,
+                           show_territory)
         self._draw_coordinates()
         self._draw_traps(observation)
+        self._draw_buildings(observation)
         self._draw_pieces(observation, aura_colors or {})
 
     # ── Private draw helpers ──────────────────────────────────────────────
@@ -204,6 +217,7 @@ class BoardView:
         checked_player: str | None,
         summon_vessel_dests: list[Position] | None = None,
         inspect_pos: Position | None = None,
+        show_territory: bool = True,
     ) -> None:
         """Draw base square colors, then overlays for selection/legal/check/summon/inspect."""
         # Build a quick lookup: position → unit for check-king detection
@@ -247,6 +261,12 @@ class BoardView:
             is_own = eff.owner == obs.player_id
             (own_spell_squares if is_own else enemy_spell_squares).add(eff.position)
 
+        # Stage 9: Territory — the lowest-priority zone tint (README §8).
+        # Computed either way (cheap — just two tuples off the Observation)
+        # so the toggle button can flip visibility with no extra state here.
+        own_territory = set(getattr(obs, "own_territory", ())) if show_territory else set()
+        enemy_territory = set(getattr(obs, "opponent_territory", ())) if show_territory else set()
+
         for file in range(8):
             for rank in range(8):
                 pos = Position(file, rank)
@@ -255,6 +275,16 @@ class BoardView:
                 sx, sy = _sq_to_screen(pos, self._flip)
                 rect = pygame.Rect(sx, sy, SQUARE_SIZE, SQUARE_SIZE)
                 pygame.draw.rect(self._surface, color, rect)
+
+                # Stage 9: Territory tint — drawn first so every other zone
+                # tint below still stacks visibly on top of it. A contested
+                # square (both players' Territory) shows both tints blended.
+                if pos in own_territory:
+                    self._overlay.fill(TERRITORY_TINT_OWN)
+                    self._surface.blit(self._overlay, (sx, sy))
+                if pos in enemy_territory:
+                    self._overlay.fill(TERRITORY_TINT_ENEMY)
+                    self._surface.blit(self._overlay, (sx, sy))
 
                 # Stage 6: zone tints — drawn before selection/check so those
                 # highlights always read on top.  Priority: activated trap >
@@ -299,6 +329,15 @@ class BoardView:
                     self._overlay.fill(SUMMON_VESSEL_TINT)
                     self._surface.blit(self._overlay, (sx, sy))
 
+        # Stage 9: Territory borders — an opaque outline traced along the
+        # outer edge of each Territory's footprint, so its shape reads
+        # clearly at a glance even where fills overlap or sit under a
+        # denser Trap/Spell tint.
+        if own_territory:
+            self._draw_territory_border(own_territory, TERRITORY_BORDER_OWN)
+        if enemy_territory:
+            self._draw_territory_border(enemy_territory, TERRITORY_BORDER_ENEMY)
+
         # Legal-move dots (drawn after base squares so they appear on top)
         for dest in legal_dests:
             self._draw_legal_dot(dest, obs)
@@ -307,6 +346,39 @@ class BoardView:
         # Summon vessel dots (gold diamonds / rings drawn on top)
         for dest in (summon_vessel_dests or []):
             self._draw_summon_vessel_marker(dest)
+
+    def _draw_territory_border(self, squares: "set[Position]", color: tuple) -> None:
+        """
+        Stage 9 — trace an opaque outline along the outer edge of a
+        Territory footprint: for every square in ``squares``, draw a line
+        on whichever of its four sides borders a square NOT in ``squares``
+        (including the edge of the board itself).
+        """
+        LINE_W = 4
+        for pos in squares:
+            sx, sy = _sq_to_screen(pos, self._flip)
+            # (delta-file, delta-rank, edge-line-in-screen-space)
+            for df, dr in ((0, 1), (0, -1), (-1, 0), (1, 0)):
+                nf, nr = pos.file + df, pos.rank + dr
+                neighbor_in_zone = (
+                    0 <= nf <= 7 and 0 <= nr <= 7
+                    and Position(nf, nr) in squares
+                )
+                if neighbor_in_zone:
+                    continue
+                # dr=+1 (north, higher rank) is the TOP edge on screen
+                # unless flipped; dr=-1 is the bottom; df=-1 is left; df=+1
+                # is right — matches _sq_to_screen's own y-axis inversion.
+                if dr == 1:
+                    y_edge = sy if not self._flip else sy + SQUARE_SIZE
+                    pygame.draw.line(self._surface, color, (sx, y_edge), (sx + SQUARE_SIZE, y_edge), LINE_W)
+                elif dr == -1:
+                    y_edge = sy + SQUARE_SIZE if not self._flip else sy
+                    pygame.draw.line(self._surface, color, (sx, y_edge), (sx + SQUARE_SIZE, y_edge), LINE_W)
+                elif df == -1:
+                    pygame.draw.line(self._surface, color, (sx, sy), (sx, sy + SQUARE_SIZE), LINE_W)
+                elif df == 1:
+                    pygame.draw.line(self._surface, color, (sx + SQUARE_SIZE, sy), (sx + SQUARE_SIZE, sy + SQUARE_SIZE), LINE_W)
 
     def _draw_legal_dot(self, pos: Position, obs: "Observation") -> None:
         """Draw a dot (empty square) or ring (capture square) for a legal move."""
@@ -404,6 +476,49 @@ class BoardView:
             lbl_bg.fill(TRAP_LABEL_BG)
             lx = sx + (SQUARE_SIZE - lbl.get_width()) // 2
             ly = sy + 2
+            self._surface.blit(lbl_bg, (lx - 2, ly - 1))
+            self._surface.blit(lbl, (lx, ly))
+
+    def _draw_buildings(self, obs: "Observation") -> None:
+        """
+        Stage 8 — every Building (public — README §12) gets an inset frame
+        on its square, drawn under the chess piece that may occupy the same
+        square (the Builder Pawn, or later any piece — see chess/board.py's
+        ``building_id`` being independent of ``unit``).
+
+        Amber while UNDER_CONSTRUCTION (with a remaining-turns count);
+        green (own) / muted orange (enemy) once COMPLETE.  DESTROYED
+        Buildings are never in ``building_locations`` for long — the square
+        is cleared the same event that marks them destroyed — but the
+        guard below skips them defensively either way.
+        """
+        from game.core.phases import ConstructionStatus
+
+        for b in getattr(obs.board, "building_locations", ()):
+            if getattr(b, "status", None) == ConstructionStatus.DESTROYED:
+                continue
+            pos = b.position
+            sx, sy = _sq_to_screen(pos, self._flip)
+            under_construction = b.status == ConstructionStatus.UNDER_CONSTRUCTION
+            if under_construction:
+                color = BUILDING_MARKER_UNDER_CONSTR
+            else:
+                color = BUILDING_MARKER_OWN if b.owner == obs.player_id else BUILDING_MARKER_ENEMY
+
+            inset = 3
+            rect = pygame.Rect(sx + inset, sy + inset, SQUARE_SIZE - inset * 2, SQUARE_SIZE - inset * 2)
+            pygame.draw.rect(self._surface, color, rect, 3, border_radius=6)
+
+            short_name = b.building_card_id.replace("_", " ").title()
+            label = f"{short_name} ({b.remaining_turns})" if under_construction else short_name
+            lbl = self._font_small.render(label, True, color)
+            lbl_bg = pygame.Surface((lbl.get_width() + 4, lbl.get_height() + 2), pygame.SRCALPHA)
+            lbl_bg.fill(BUILDING_LABEL_BG)
+            # Bottom of the square — _draw_traps already owns the top-label
+            # slot, and this is where a Building marker most often needs to
+            # coexist with an ordinary (non-Monster) piece glyph above it.
+            lx = sx + (SQUARE_SIZE - lbl.get_width()) // 2
+            ly = sy + SQUARE_SIZE - lbl.get_height() - 3
             self._surface.blit(lbl_bg, (lx - 2, ly - 1))
             self._surface.blit(lbl, (lx, ly))
 

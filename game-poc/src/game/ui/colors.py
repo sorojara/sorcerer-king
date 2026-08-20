@@ -65,6 +65,26 @@ TOOLTIP_BORDER       = (120, 120, 150)
 TOOLTIP_TEXT         = (230, 230, 235)
 TOOLTIP_TITLE        = (255, 210,   0)      # gold — matches SUMMON_VESSEL_DOT family
 
+# ── Stage 9: Territory ─────────────────────────────────────────────────────
+# A bold base-layer tint (own/enemy) drawn under every other zone tint
+# (Trap/Spell/selection still stack visibly on top of it), but strong
+# enough on its own to read at a glance — this is a primary spatial
+# mechanic (README §8), not a faint hint.
+TERRITORY_TINT_OWN     = ( 40, 200, 100, 115)  # RGBA vivid green — your Territory
+TERRITORY_TINT_ENEMY   = (220,  50,  50, 115)  # RGBA vivid red   — enemy Territory
+# Border stroke drawn along the outer edge of each Territory's footprint
+# (opaque — always fully saturated, regardless of fill alpha) so the shape
+# reads clearly even where fills overlap or sit under other tints.
+TERRITORY_BORDER_OWN   = ( 40, 220, 110)
+TERRITORY_BORDER_ENEMY = (230,  60,  60)
+
+# ── Stage 8: Buildings ────────────────────────────────────────────────────
+# Own/enemy framing follows the same convention as the Trap markers above.
+BUILDING_MARKER_OWN            = (120, 200, 140)  # green — your own Building
+BUILDING_MARKER_ENEMY          = (200, 140, 120)  # muted orange — enemy Building
+BUILDING_MARKER_UNDER_CONSTR   = (200, 180,  60)  # amber ring while UNDER_CONSTRUCTION
+BUILDING_LABEL_BG              = ( 15,  25,  18, 170)  # RGBA backing for the name label
+
 # ── Check / danger ─────────────────────────────────────────────────────────
 CHECK_TINT     = (200,  20,  20, 110)  # red tint on checked king square
 

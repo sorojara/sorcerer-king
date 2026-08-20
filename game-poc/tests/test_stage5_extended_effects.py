@@ -159,10 +159,13 @@ class TestMovementRestriction:
     def test_enemy_movement_capped_near_binder(self, registry, rng):
         from game.chess.movement import get_pseudo_legal_moves
 
+        # Stage 9: the vessel must be summoned inside black's home Territory
+        # (ranks 6-8) — e7 instead of e5, shifting the rest of the layout
+        # accordingly while keeping the same radius-1 relationships.
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
-        _place(board, "black", PieceType.QUEEN, "e5", "bq")  # astral_binder vessel
+        _place(board, "black", PieceType.QUEEN, "e7", "bq")  # astral_binder vessel
         rook = _place(board, "white", PieceType.ROOK, "e1", "wr")
 
         white = _make_player("white")
@@ -171,21 +174,21 @@ class TestMovementRestriction:
         state.active_player = "black"
         engine = RulesEngine(registry=registry)
         engine.execute(state, SummonMonster(
-            player_id="black", card_id="astral_binder", vessel_position=Position.from_algebraic("e5"),
+            player_id="black", card_id="astral_binder", vessel_position=Position.from_algebraic("e7"),
         ), rng)
 
-        # Rook at e1 is on the same file as e5 (4 squares away) — outside
+        # Rook at e1 is on the same file as e7 (6 squares away) — outside
         # astral_binder's radius=1, so no restriction should apply here.
         moves_far = get_pseudo_legal_moves(board, Position.from_algebraic("e1"), rook, registry=registry)
         assert Position.from_algebraic("e4") in moves_far  # still full rook range
 
-        # Move the rook adjacent to the binder (e4, radius 1 from e5) and
+        # Move the rook adjacent to the binder (e6, radius 1 from e7) and
         # verify its OWN moves are now capped to max_distance=1.
         board2 = BoardState()
         _place(board2, "white", PieceType.KING, "a1", "wk2")
         _place(board2, "black", PieceType.KING, "h8", "bk2")
-        _place(board2, "black", PieceType.QUEEN, "e5", "bq2")
-        rook2 = _place(board2, "white", PieceType.ROOK, "e4", "wr2")
+        _place(board2, "black", PieceType.QUEEN, "e7", "bq2")
+        rook2 = _place(board2, "white", PieceType.ROOK, "e6", "wr2")
 
         white2 = _make_player("white")
         black2 = _make_player("black", hand=["astral_binder"])
@@ -193,12 +196,12 @@ class TestMovementRestriction:
         state2.active_player = "black"
         engine2 = RulesEngine(registry=registry)
         engine2.execute(state2, SummonMonster(
-            player_id="black", card_id="astral_binder", vessel_position=Position.from_algebraic("e5"),
+            player_id="black", card_id="astral_binder", vessel_position=Position.from_algebraic("e7"),
         ), rng)
 
-        moves_near = get_pseudo_legal_moves(board2, Position.from_algebraic("e4"), rook2, registry=registry)
-        # Rook would normally reach e1..e8 and a4..h4; capped to 1 square away.
-        assert Position.from_algebraic("e3") in moves_near
+        moves_near = get_pseudo_legal_moves(board2, Position.from_algebraic("e6"), rook2, registry=registry)
+        # Rook would normally reach e1..e8 and a6..h6; capped to 1 square away.
+        assert Position.from_algebraic("e5") in moves_near
         assert Position.from_algebraic("e1") not in moves_near
         assert Position.from_algebraic("a4") not in moves_near
 
@@ -209,11 +212,13 @@ class TestMovementRestriction:
 
 class TestRetaliate:
     def _setup(self, registry, rng, attacker_card="dark_magician"):
+        # Stage 9: black's vessel must be summoned inside black's home
+        # Territory (ranks 6-8) — d7 instead of d5.
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         _place(board, "white", PieceType.ROOK, "d1", "wr")
-        _place(board, "black", PieceType.PAWN, "d5", "bp")
+        _place(board, "black", PieceType.PAWN, "d7", "bp")
 
         white = _make_player("white", hand=[attacker_card] if attacker_card else [])
         black = _make_player("black", hand=["thorn_boar"])
@@ -221,7 +226,7 @@ class TestRetaliate:
         engine = RulesEngine(registry=registry)
         state.active_player = "black"
         engine.execute(state, SummonMonster(
-            player_id="black", card_id="thorn_boar", vessel_position=Position.from_algebraic("d5"),
+            player_id="black", card_id="thorn_boar", vessel_position=Position.from_algebraic("d7"),
         ), rng)
         return state, engine
 
@@ -232,19 +237,19 @@ class TestRetaliate:
         state.get_player("white").chess_move_used = False
 
         events = engine.execute(state, MovePiece(
-            player_id="white", source=Position.from_algebraic("d1"), target=Position.from_algebraic("d5"),
+            player_id="white", source=Position.from_algebraic("d1"), target=Position.from_algebraic("d7"),
         ), rng)
 
         assert any(isinstance(e, Retaliated) for e in events)
         # Both pieces gone from the board.
-        assert state.board.get_unit(Position.from_algebraic("d5")) is None
+        assert state.board.get_unit(Position.from_algebraic("d7")) is None
 
     def test_executioner_bypasses_retaliate(self, registry, rng):
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
         rook = _place(board, "white", PieceType.ROOK, "d1", "wr")
-        _place(board, "black", PieceType.PAWN, "d5", "bp")
+        _place(board, "black", PieceType.PAWN, "d7", "bp")
 
         white = _make_player("white", hand=["executioner"])
         black = _make_player("black", hand=["thorn_boar"])
@@ -253,7 +258,7 @@ class TestRetaliate:
 
         state.active_player = "black"
         engine.execute(state, SummonMonster(
-            player_id="black", card_id="thorn_boar", vessel_position=Position.from_algebraic("d5"),
+            player_id="black", card_id="thorn_boar", vessel_position=Position.from_algebraic("d7"),
         ), rng)
 
         state.active_player = "white"
@@ -265,12 +270,12 @@ class TestRetaliate:
         state.active_player = "white"
         state.get_player("white").chess_move_used = False
         events = engine.execute(state, MovePiece(
-            player_id="white", source=Position.from_algebraic("d1"), target=Position.from_algebraic("d5"),
+            player_id="white", source=Position.from_algebraic("d1"), target=Position.from_algebraic("d7"),
         ), rng)
 
         assert not any(isinstance(e, Retaliated) for e in events)
-        # Attacker (executioner rook) survives, occupying d5.
-        occ = state.board.get_unit(Position.from_algebraic("d5"))
+        # Attacker (executioner rook) survives, occupying d7.
+        occ = state.board.get_unit(Position.from_algebraic("d7"))
         assert occ is not None and occ.owner == "white"
 
 
@@ -370,10 +375,14 @@ class TestBurrow:
 
 class TestCaptureThenRetreat:
     def test_retreat_options_move_away_from_enemy_king(self, registry, rng):
+        # Stage 9: the vessel must be summoned inside white's home Territory
+        # (ranks 1-3) — summon on f2, then reposition to f6 directly (a
+        # plain board mutation, not a chess move; SummonMonster is the only
+        # thing Territory gates, so this doesn't affect what's being tested).
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
-        _place(board, "white", PieceType.KNIGHT, "f6", "wn")  # dusk_reaver vessel
+        _place(board, "white", PieceType.KNIGHT, "f2", "wn")  # dusk_reaver vessel
         _place(board, "black", PieceType.PAWN, "h7", "bp")    # adjacent to black king
 
         white = _make_player("white", hand=["dusk_reaver"])
@@ -381,8 +390,9 @@ class TestCaptureThenRetreat:
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
         engine.execute(state, SummonMonster(
-            player_id="white", card_id="dusk_reaver", vessel_position=Position.from_algebraic("f6"),
+            player_id="white", card_id="dusk_reaver", vessel_position=Position.from_algebraic("f2"),
         ), rng)
+        state.board.move_unit(Position.from_algebraic("f2"), Position.from_algebraic("f6"))
 
         state.phase = Phase.CHESS
         state.active_player = "white"
@@ -407,18 +417,21 @@ class TestCaptureThenRetreat:
 
 class TestVesselSupport:
     def test_pawn_becomes_valid_vessel_near_broodmother(self, registry, rng):
+        # Stage 9: both vessels must be summoned inside white's home
+        # Territory (ranks 1-3) — d2/d3 instead of d4/d5, keeping the same
+        # radius-1 adjacency the vessel_support aura relies on.
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
-        _place(board, "white", PieceType.QUEEN, "d4", "wq")  # broodmother vessel
-        _place(board, "white", PieceType.PAWN, "d5", "wp")   # adjacent pawn
+        _place(board, "white", PieceType.QUEEN, "d2", "wq")  # broodmother vessel
+        _place(board, "white", PieceType.PAWN, "d3", "wp")   # adjacent pawn
 
         white = _make_player("white", hand=["broodmother", "ember_drake"])
         black = _make_player("black")
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
         engine.execute(state, SummonMonster(
-            player_id="white", card_id="broodmother", vessel_position=Position.from_algebraic("d4"),
+            player_id="white", card_id="broodmother", vessel_position=Position.from_algebraic("d2"),
         ), rng)
 
         # ember_drake (dragon archetype) normally only supports pawn/knight —
@@ -426,7 +439,7 @@ class TestVesselSupport:
         # prove the extension: obsidian_dragon supports rook/queen only.
         white.hand.append("obsidian_dragon")
 
-        # d5 pawn should NOT normally host obsidian_dragon...
+        # d3 pawn should NOT normally host obsidian_dragon...
         card = registry.get("obsidian_dragon")
         assert not card.supports_vessel("pawn")
 
@@ -434,24 +447,24 @@ class TestVesselSupport:
         # should make it legal within radius 1.
         state.get_player("white").preparation_action_used = False
         events = engine.execute(state, SummonMonster(
-            player_id="white", card_id="obsidian_dragon", vessel_position=Position.from_algebraic("d5"),
+            player_id="white", card_id="obsidian_dragon", vessel_position=Position.from_algebraic("d3"),
         ), rng)
-        pawn_unit = state.board.get_unit(Position.from_algebraic("d5"))
+        pawn_unit = state.board.get_unit(Position.from_algebraic("d3"))
         assert pawn_unit.monster_id == "obsidian_dragon"
 
     def test_legal_actions_include_extended_vessel(self, registry, rng):
         board = BoardState()
         _place(board, "white", PieceType.KING, "a1", "wk")
         _place(board, "black", PieceType.KING, "h8", "bk")
-        _place(board, "white", PieceType.QUEEN, "d4", "wq")
-        _place(board, "white", PieceType.PAWN, "d5", "wp")
+        _place(board, "white", PieceType.QUEEN, "d2", "wq")
+        _place(board, "white", PieceType.PAWN, "d3", "wp")
 
         white = _make_player("white", hand=["broodmother"])
         black = _make_player("black")
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
         engine.execute(state, SummonMonster(
-            player_id="white", card_id="broodmother", vessel_position=Position.from_algebraic("d4"),
+            player_id="white", card_id="broodmother", vessel_position=Position.from_algebraic("d2"),
         ), rng)
         state.get_player("white").preparation_action_used = False
         white.hand.append("obsidian_dragon")
@@ -461,4 +474,4 @@ class TestVesselSupport:
             a.vessel_position for a in actions
             if isinstance(a, SummonMonster) and a.card_id == "obsidian_dragon"
         }
-        assert Position.from_algebraic("d5") in targets
+        assert Position.from_algebraic("d3") in targets

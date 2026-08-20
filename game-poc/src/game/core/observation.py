@@ -13,6 +13,8 @@ It contains exactly the information that a player is *legally allowed to know*:
     • Their own Ritual states (full)
     • Opponent Ritual public info (subject to revelation state)
     • All placed Buildings (public)
+    • Both players' Territory (public — README §13, derived entirely from
+      public board state: home ranks + Building radii)
     • All placed Traps (public — traps are never secret by design)
     • Current phase, turn number, check flags
 
@@ -164,6 +166,16 @@ class Observation:
     opponent_deck_count: int        # how many cards in opponent's deck
     opponent_graveyard: tuple[str, ...]  # opponent discard (public)
 
+    # ── Building pool information (Stage 8 — always fully public, README §12) ──
+    own_building_pool: tuple[Any, ...]       # tuple[BuildingPoolEntry, ...]
+    opponent_building_pool: tuple[Any, ...]  # tuple[BuildingPoolEntry, ...]
+
+    # ── Territory (Stage 9 — always fully public, derived from public board
+    # state: home ranks + Building radii — README §13). Every square in
+    # each tuple is inside that player's Territory; the two can overlap.
+    own_territory: tuple[Any, ...]           # tuple[Position, ...]
+    opponent_territory: tuple[Any, ...]      # tuple[Position, ...]
+
     # ── King pool information ──────────────────────────────────────────────
     own_king_pool: tuple[Any, ...]           # tuple[KingCardState, ...] — full info
     own_active_king: str | None             # active King card ID
@@ -214,6 +226,7 @@ def build_observation(
     from game.core.state import GameState, PendingDecision
     from game.core.phases import KingCardStatus, RevelationState
     from game.mechanics.effects import get_activatable_effects
+    from game.mechanics.territory import territory_squares as _territory_squares
 
     ps = state.get_player(player_id)
     opp_id = state.opponent_of(player_id)
@@ -322,6 +335,10 @@ def build_observation(
         opponent_hand_count=len(opp.hand),
         opponent_deck_count=len(opp.deck),
         opponent_graveyard=tuple(opp.graveyard),
+        own_building_pool=tuple(ps.building_pool),
+        opponent_building_pool=tuple(opp.building_pool),
+        own_territory=tuple(_territory_squares(state, player_id, registry)),
+        opponent_territory=tuple(_territory_squares(state, opp_id, registry)),
         own_king_pool=tuple(ps.king_pool),
         own_active_king=ps.active_king,
         own_retired_kings=tuple(ps.retired_kings),

@@ -98,6 +98,24 @@ class Game:
     # Deck size for games built from the registry
     _DECK_SIZE: int = 20
 
+    # Stage 8: default Building Pool (README §12.1's "Building Budget: 6"
+    # example) — Fortress (medium=2) + Shrine×2 (1 each) + Watchtower×2
+    # (1 each) = 6 points. Both players start with the same pool; the
+    # Pool is public information (README §12) so this symmetry is fine
+    # for the PoC — exact budgets remain configurable (README §57).
+    _DEFAULT_BUILDING_POOL: list[tuple[str, int]] = [
+        ("fortress", 1),
+        ("shrine", 2),
+        ("watchtower", 2),
+    ]
+
+    @classmethod
+    def _default_building_pool(cls) -> "list[BuildingPoolEntry]":
+        return [
+            BuildingPoolEntry(building_card_id=cid, copies_available=n)
+            for cid, n in cls._DEFAULT_BUILDING_POOL
+        ]
+
     @classmethod
     def _build_deck_from_registry(
         cls,
@@ -160,6 +178,8 @@ class Game:
         black_deck: list[str] | None = None,
         registry: "CardRegistry | None" = None,
         game_id: str | None = None,
+        white_building_pool: "list[BuildingPoolEntry] | None" = None,
+        black_building_pool: "list[BuildingPoolEntry] | None" = None,
     ) -> "Game":
         """
         Create a new game in the standard starting position.
@@ -169,6 +189,9 @@ class Game:
         ``black_deck`` — list of card IDs for black's deck.
         ``registry``   — card registry for legal-action validation (optional).
         ``game_id``    — unique ID for logging/replay; auto-generated if None.
+        ``white_building_pool`` / ``black_building_pool`` — Stage 8: each
+            player's public pre-match Building Pool (README §12). Defaults
+            to ``_default_building_pool()`` when omitted.
 
         Initial state:
             • Standard chess starting position.
@@ -212,6 +235,10 @@ class Game:
                 KingCardState(king_card_id="white-king-b"),
                 KingCardState(king_card_id="white-king-c"),
             ],
+            building_pool=(
+                white_building_pool if white_building_pool is not None
+                else cls._default_building_pool()
+            ),
             castling_rights=CastlingRights(),
         )
         black = PlayerState(
@@ -223,6 +250,10 @@ class Game:
                 KingCardState(king_card_id="black-king-b"),
                 KingCardState(king_card_id="black-king-c"),
             ],
+            building_pool=(
+                black_building_pool if black_building_pool is not None
+                else cls._default_building_pool()
+            ),
             castling_rights=CastlingRights(),
         )
 
@@ -359,6 +390,10 @@ class Game:
         events: list[Event] = [
             TurnStarted(player_id=player_id, turn_number=self._state.turn_number)
         ]
+        # Stage 8: refresh COMPLETE Buildings' start-of-turn auras
+        # (Fortress capture-protection, Shrine spell-radius) for this player.
+        from game.mechanics.buildings import apply_building_auras
+        apply_building_auras(self._state, player_id, self._registry)
         # START → DRAW
         self._state.phase = Phase.DRAW
         events.append(PhaseAdvanced(

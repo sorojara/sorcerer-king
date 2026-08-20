@@ -1,0 +1,240 @@
+# kings.yaml — PoC King Policy set (6 Kings)
+#
+# Each player selects a pool of 3 King Cards before the match.
+# All begin HIDDEN.
+#
+# The first Coronation is free.
+# Succession replaces the active King with another King from the pool
+# and should have an increasing cost.
+#
+# King Cards are strategic policies, not offensive units.
+# They support archetypes, infrastructure, rituals, vessels, economy,
+# information, and Final Duel preparation.
+#
+# status: hidden | active | retired
+# archetype_support: primary deck/archetype identity supported
+# effects: passive kingdom-wide effects while this King is ACTIVE
+# duel_ability: effect used only during the Final Duel
+#
+# A retired King cannot become active again.
+
+# ── SPELLCASTER / RITUAL POLICY ────────────────────────────────────────────
+
+- id: arcane_sovereign
+  name: Arcane Sovereign
+  title: Keeper of the Hidden Arts
+  archetype_support:
+    - spellcaster
+    - ritualist
+  effects:
+    - type: spell_radius_bonus
+      params:
+        bonus: 1
+        condition:
+          source_archetype: spellcaster
+
+    - type: ritual_information_discount
+      params:
+        first_reveal_each_match: true
+        reveal_to: foretold
+        bonus:
+          draw_cards: 1
+
+  duel_ability: arcane_council
+  duel_effect:
+    type: ritual_duel_support
+    params:
+      support_per_completed_ritual: 1
+      max_bonus: 2
+
+  description: >
+    The Arcane Sovereign encourages magical development and open study
+    of forbidden rituals. Spellcaster-generated influence extends farther,
+    and the kingdom gains additional value the first time it voluntarily
+    reveals one of its hidden Rituals. During the Final Duel, completed
+    Rituals strengthen the King's defenders.
+
+
+# ── DRAGON POLICY ──────────────────────────────────────────────────────────
+
+- id: dragon_high_king
+  name: Dragon High King
+  title: Lord of the Brood
+  archetype_support:
+    - dragon
+  effects:
+    - type: vessel_support
+      params:
+        archetype: dragon
+        allow_extra_vessel:
+          - pawn
+        limit_per_turn: 1
+
+    - type: territory_summon_bonus
+      params:
+        archetype: dragon
+        condition:
+          inside_friendly_territory: true
+        summon_range_bonus: 1
+
+  duel_ability: call_of_the_brood
+  duel_effect:
+    type: monster_duel_support
+    params:
+      archetype: dragon
+      nearby_only: true
+      bonus: 1
+      max_targets: 2
+
+  description: >
+    The Dragon High King transforms the kingdom into a breeding ground
+    for dragons. Once per turn, a Dragon may use a Pawn as an additional
+    Vessel class, and Dragons can be summoned farther forward while inside
+    friendly Territory. Nearby Dragons provide additional support during
+    the Final Duel.
+
+
+# ── WARRIOR / AGGRESSIVE POSITIONAL POLICY ─────────────────────────────────
+
+- id: marshal_king
+  name: Marshal King
+  title: First Among Soldiers
+  archetype_support:
+    - warrior
+  effects:
+    - type: formation_support
+      params:
+        archetype: warrior
+        adjacent_allies_required: 1
+        capture_protection_bonus: 1
+        limit_per_unit: 1
+
+    - type: king_support_bonus
+      params:
+        archetype: warrior
+        radius: 2
+        bonus: 1
+
+  duel_ability: disciplined_guard
+  duel_effect:
+    type: royal_support_conversion
+    params:
+      source_archetype: warrior
+      convert_each: 2
+      grant: guard
+      max_guards: 2
+
+  description: >
+    The Marshal King rewards disciplined formations rather than reckless
+    charges. Warriors fighting beside allies gain limited protection, and
+    Warriors near the King provide stronger Royal Support. During the Final
+    Duel, surviving Warriors can be converted into additional Guards.
+
+
+# ── KINGDOM / BUILDER POLICY ───────────────────────────────────────────────
+
+- id: architect_king
+  name: Architect King
+  title: Builder of the Realm
+  archetype_support:
+    - kingdom
+  effects:
+    - type: construction_speed_bonus
+      params:
+        turns_reduced: 1
+        condition:
+          builder_piece_type: pawn
+        minimum_turns: 1
+        limit_per_turn: 1
+
+    - type: building_territory_bonus
+      params:
+        radius_bonus: 1
+        first_building_only: false
+
+  duel_ability: fortified_throne
+  duel_effect:
+    type: building_duel_support
+    params:
+      qualifying_radius: 3
+      support_per_building: 1
+      max_bonus: 3
+
+  description: >
+    The Architect King makes infrastructure the foundation of the kingdom.
+    The first Pawn construction each turn progresses faster, and completed
+    Buildings project larger Territory. During the Final Duel, nearby
+    infrastructure directly strengthens the King's defense.
+
+
+# ── ASSASSIN / MOBILITY POLICY ─────────────────────────────────────────────
+
+- id: shadow_regent
+  name: Shadow Regent
+  title: Master of Silent Roads
+  archetype_support:
+    - assassin
+  effects:
+    - type: enemy_territory_mobility
+      params:
+        archetype: assassin
+        movement_bonus: 1
+        condition:
+          inside_enemy_territory: true
+
+    - type: royal_support_suppression
+      params:
+        source_archetype: assassin
+        radius: 1
+        amount: 1
+
+  duel_ability: isolated_throne
+  duel_effect:
+    type: defender_support_reduction
+    params:
+      condition:
+        attacker_has_nearby_assassin: true
+      amount: 1
+      minimum_support: 0
+
+  description: >
+    The Shadow Regent governs through infiltration and disruption.
+    Assassins become more mobile inside enemy Territory and weaken nearby
+    enemy Royal Support. If an Assassin reaches the enemy King's area,
+    the defender begins the Final Duel with reduced support.
+
+
+# ── NECROMANCER / ATTRITION POLICY ─────────────────────────────────────────
+
+- id: grave_crowned_king
+  name: Grave-Crowned King
+  title: Lord of the Fallen
+  archetype_support:
+    - necromancer
+  effects:
+    - type: graveyard_recycle
+      params:
+        trigger: first_allied_monster_destroyed_each_turn
+        destination: bottom_of_deck
+        count: 1
+
+    - type: graveyard_threshold_bonus
+      params:
+        threshold: 5
+        bonus:
+          capture_protection_uses: 1
+        target_archetype: necromancer
+
+  duel_ability: army_of_memory
+  duel_effect:
+    type: graveyard_duel_support
+    params:
+      cards_per_support: 3
+      max_bonus: 3
+
+  description: >
+    The Grave-Crowned King turns attrition into long-term strength.
+    The first allied Monster destroyed each turn may be recycled to the
+    bottom of the deck, and Necromancers gain protection once the Graveyard
+    grows large enough. During the Final Duel, accumulated losses become
+    additional Royal Support.

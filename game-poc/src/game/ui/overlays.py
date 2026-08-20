@@ -83,9 +83,12 @@ class SidebarOverlay:
         self._btn_white_mode: pygame.Rect | None = None
         self._btn_black_mode: pygame.Rect | None = None
         self._btn_black_hand: pygame.Rect | None = None
+        self._btn_territory: pygame.Rect | None = None
         self._btn_recompose: pygame.Rect | None = None
         self._btn_mercenary: pygame.Rect | None = None
         self._btn_mercenary_enabled: bool = False
+        self._btn_build: pygame.Rect | None = None
+        self._btn_build_enabled: bool = False
         self._mouse_pos: tuple[int, int] = (0, 0)
         # Stage 6: cached "Activatable" row rects: list of (token, Rect)
         self._activatable_btn_rects: list[tuple[str, pygame.Rect]] = []
@@ -101,8 +104,10 @@ class SidebarOverlay:
             'toggle_white'      — Toggle white player mode
             'toggle_black'      — Toggle black player mode
             'toggle_black_hand' — Toggle black-hand debug view
+            'toggle_territory'  — Stage 9: Toggle the Territory board tint
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
             'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
+            'build'             — Stage 8: Open the Building Pool picker (PREPARATION only)
             'trap:<id>'         — Stage 6: Activatable-section Trap button (id = trap_instance_id)
             'ability_at:<f>:<r>:<id>' — Stage 6: Activatable-section monster ability
                                  button, naming the piece's position since the
@@ -119,6 +124,8 @@ class SidebarOverlay:
             return "toggle_black"
         if self._btn_black_hand and self._btn_black_hand.collidepoint(mx, my):
             return "toggle_black_hand"
+        if self._btn_territory and self._btn_territory.collidepoint(mx, my):
+            return "toggle_territory"
         if self._btn_recompose and self._btn_recompose.collidepoint(mx, my):
             return "recompose"
         # Mercenary: only fire if enabled (the button rect exists but may be
@@ -127,6 +134,8 @@ class SidebarOverlay:
         # skip the click by checking against an "enabled" sentinel we store below).
         if self._btn_mercenary and getattr(self, "_btn_mercenary_enabled", False) and self._btn_mercenary.collidepoint(mx, my):
             return "mercenary"
+        if self._btn_build and getattr(self, "_btn_build_enabled", False) and self._btn_build.collidepoint(mx, my):
+            return "build"
         for token, rect in self._activatable_btn_rects:
             if rect.collidepoint(mx, my):
                 return token
@@ -139,6 +148,8 @@ class SidebarOverlay:
         show_black_hand: bool = False,
         show_recompose_btn: bool = False,
         show_mercenary_btn: "bool | None" = None,
+        show_build_btn: "bool | None" = None,
+        show_territory: bool = True,
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
         """
@@ -150,6 +161,13 @@ class SidebarOverlay:
         ``show_mercenary_btn``  — None = don't draw (non-PREPARATION phases).
                                   True = draw enabled (clickable, gold).
                                   False = draw disabled (greyed out, not clickable).
+        ``show_build_btn``      — Stage 8: same tri-state convention as
+                                  ``show_mercenary_btn`` for the Building
+                                  Pool picker button.
+        ``show_territory``      — Stage 9: current on/off state of the
+                                  Territory board tint, shown as the toggle
+                                  button's label (always drawn, unlike the
+                                  tri-state buttons above).
         ``activatable_entries`` — Stage 6: (label, token) pairs for every currently
                                  activatable Trap/Monster-ability "in the field".
                                  One clickable row per entry; ``handle_click``
@@ -232,12 +250,18 @@ class SidebarOverlay:
                                  self._btn_black_hand.y + (self.BTN_H - bhs.get_height()) // 2))
         y += self.BTN_H + 4
 
-        # Hint
-        hint_s = self._font_small.render("(click to toggle)", True, HUD_LABEL)
-        self._surface.blit(hint_s, (self._x + self.PADDING, y))
-        y += hint_s.get_height() + 8
-
-        y += 4
+        # Stage 9: Territory overlay toggle
+        terr_label = "🗺 Territory: ON" if show_territory else "🗺 Territory: OFF"
+        terr_color = HUD_ACCENT if show_territory else HUD_LABEL
+        self._btn_territory = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+        hover_terr = self._btn_territory.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, DIALOG_HOVER if hover_terr else DIALOG_BG,
+                         self._btn_territory, border_radius=4)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, self._btn_territory, 1, border_radius=4)
+        ts = self._font_small.render(terr_label, True, terr_color)
+        self._surface.blit(ts, (self._btn_territory.x + (btn_w - ts.get_width()) // 2,
+                                self._btn_territory.y + (self.BTN_H - ts.get_height()) // 2))
+        y += self.BTN_H + 8
 
         y = self._draw_divider(y)
         y += 12
@@ -364,6 +388,29 @@ class SidebarOverlay:
         else:
             self._btn_mercenary = None
 
+        # Build button — Stage 8: opens the Building Pool picker.
+        if show_build_btn is not None:
+            bd_enabled = bool(show_build_btn)
+            self._btn_build_enabled = bd_enabled
+            bd_label = "🏛  Build"
+            bd_color  = (120, 200, 140) if bd_enabled else (70, 90, 75)
+            bd_border = (90, 160, 110) if bd_enabled else (55, 70, 60)
+            y += self.BTN_H + 4
+            self._btn_build = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+            hover_bd = bd_enabled and self._btn_build.collidepoint(self._mouse_pos)
+            pygame.draw.rect(self._surface,
+                             DIALOG_HOVER if hover_bd else DIALOG_BG,
+                             self._btn_build, border_radius=4)
+            pygame.draw.rect(self._surface, bd_border,
+                             self._btn_build, 1, border_radius=4)
+            bds = self._font_small.render(bd_label, True, bd_color)
+            self._surface.blit(bds, (
+                self._btn_build.x + (btn_w - bds.get_width()) // 2,
+                self._btn_build.y + (self.BTN_H - bds.get_height()) // 2,
+            ))
+        else:
+            self._btn_build = None
+
         # Controls hint + Export/Import buttons at the fixed bottom position.
         # (Card detail now lives entirely in the left CardViewer.)
         self._draw_controls_hint()
@@ -409,32 +456,10 @@ class SidebarOverlay:
         )
         return y + 1
 
-    def _draw_controls_hint(self, draw_hints: bool = True) -> None:
-        """Draw keyboard hints and the Export/Import buttons at the bottom of the sidebar.
-
-        ``draw_hints`` — when False, only the Export/Import buttons are drawn
-        (used when the card info panel is visible so its background doesn't
-        cover the buttons).
-        """
+    def _draw_controls_hint(self) -> None:
+        """Draw the Export/Import buttons at the bottom of the sidebar."""
         h = self._surface.get_height()
         btn_block = self.BTN_H * 2 + self.PADDING * 3
-
-        if draw_hints:
-            hints = [
-                "Click piece to select",
-                "Click square to move",
-                "Hover card — see description",
-                "Prep: click MON → vessel",
-                "D    — dismiss monster",
-                "A    — activate ability (CHESS)",
-                "ESC  — cancel / deselect",
-                "Q    — quit",
-            ]
-            y = h - len(hints) * 18 - self.PADDING - btn_block
-            for hint in hints:
-                surf = self._font_small.render(hint, True, HUD_LABEL)
-                self._surface.blit(surf, (self._x + self.PADDING, y))
-                y += 18
 
         # ── Export / Import buttons (always drawn, always on top) ─────────
         btn_w = self.SIDEBAR_WIDTH - self.PADDING * 2

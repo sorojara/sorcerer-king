@@ -23,6 +23,25 @@ Invariants enforced (from phase0.md §18):
     BUILDER_ONCE         — Pawn that already built cannot build again.
     HIDDEN_INFO          — Observation must never expose opponent's private cards.
     FINAL_DUEL_CAPTURE   — King capture never directly sets winner.
+    SPELL_TARGET_REACH    — A "position"/"zone" Spell may target a square
+                            EITHER one of the caster's own non-Pawn pieces
+                            could move into right now, OR one covered by
+                            one of the caster's own Buildings (Spell zone —
+                            mechanics/territory.py; NOT plain Territory —
+                            the bare home ranks don't qualify on their
+                            own). Only one of the two needs to hold
+                            (Stage 9).
+    TRAP_MONSTER_ANCHOR   — A Trap may be set on a square EITHER hosting
+                            one of the caster's own summoned Monsters, OR
+                            covered by one of the caster's own Buildings
+                            (Trap zone — NOT plain Territory; the bare
+                            home ranks don't qualify on their own). Only
+                            one of the two needs to hold (Stage 9).
+    VESSEL_TERRITORY      — A Monster may only be summoned onto a vessel
+                            standing inside the caster's own Territory —
+                            a hard requirement, no alternative (Stage 9;
+                            user brief: "summoning monsters into vessels
+                            can only happen in your territory").
 
 Stage 0 chess rules (simple subset, full movement in Stage 1):
     • Pieces move according to standard chess movement.
@@ -55,6 +74,7 @@ from game.chess.movement import (
     can_castle_kingside,
     can_castle_queenside,
     get_legal_moves,
+    get_non_pawn_movement_squares,
     get_pseudo_legal_moves,
     has_any_legal_move,
     is_in_check,
@@ -389,6 +409,13 @@ class RulesEngine:
             actions.append(EndPreparation(player_id=player_id))
             if not ps.preparation_action_used:
                 from game.cards.card import MonsterCard
+                from game.mechanics.buildings import is_committed_builder
+                from game.mechanics.territory import territory_squares
+                # Stage 9: a vessel must stand in the caster's own Territory
+                # (user brief: "summoning monsters into vessels can only
+                # happen in your territory" — a hard requirement, unlike
+                # the OR-satisfiable Trap/Spell zones below).
+                own_territory = territory_squares(state, player_id, registry)
                 # Summon Monster: for each monster in hand × valid vessels
                 for card_id in ps.hand:
                     if registry and card_id in registry:
@@ -396,6 +423,13 @@ class RulesEngine:
                         if isinstance(card, MonsterCard):
                             for pos, unit in state.board.all_units_for(player_id):
                                 if unit.monster_id is not None or unit.piece.piece_type == PieceType.KING:
+                                    continue
+                                # Stage 8: a Pawn mid-construction is committed —
+                                # it cannot be transformed until it completes,
+                                # is disrupted, or the Building is destroyed.
+                                if is_committed_builder(state, unit.piece.id):
+                                    continue
+                                if pos not in own_territory:
                                     continue
                                 pt = unit.piece.piece_type.value
                                 # Stage 5: vessel_support (broodmother) can extend
@@ -450,6 +484,24 @@ class RulesEngine:
                                     player_id=player_id,
                                     piece_type=piece_type,
                                 ))
+                # Stage 8: Start Construction — one per (available builder
+                # Pawn) × (Building Pool entry with copies remaining). A
+                # Pawn already committed to another Building, or standing
+                # on a square that already has one, is not a candidate.
+                for pos, unit in state.board.all_units_for(player_id):
+                    if unit.piece.piece_type != PieceType.PAWN or not unit.builder_available:
+                        continue
+                    if is_committed_builder(state, unit.piece.id):
+                        continue
+                    if state.board.get_square(pos).building_id is not None:
+                        continue
+                    for entry in ps.building_pool:
+                        if entry.copies_available > 0:
+                            actions.append(StartConstruction(
+                                player_id=player_id,
+                                pawn_position=pos,
+                                building_card_id=entry.building_card_id,
+                            ))
                 # Coronate King (if no active king and not in check)
                 if ps.active_king is None and not ps.is_in_check():
                     for kcs in ps.king_pool:
@@ -460,26 +512,39 @@ class RulesEngine:
                                     king_card_id=kcs.king_card_id,
                                 )
                             )
-                # Stage 6: Place Trap — one per Trap card in hand × every
-                # empty square on the board.
+                # Stage 6/9: Place Trap — one per Trap card in hand × every
+                # square that qualifies EITHER way (TRAP_MONSTER_ANCHOR OR
+                # Trap-zone Building coverage — see the RulesEngine
+                # docstring; plain home-rank Territory does NOT qualify).
                 from game.cards.card import SpellCard, TrapCard
                 if registry is not None:
+                    from game.mechanics.territory import trap_zone_squares
+                    occupied_trap_squares = {t.position for t in state.traps}
+                    own_trap_zone = trap_zone_squares(state, player_id, registry)
+                    trap_candidates: set[Position] = set()
+                    # TRAP_MONSTER_ANCHOR: any square hosting the player's
+                    # own summoned Monster (occupied is required here).
+                    for pos, unit in state.board.all_units_for(player_id):
+                        if unit.monster_id is not None:
+                            trap_candidates.add(pos)
+                    # Building coverage: any EMPTY square inside the
+                    # player's Trap zone (the original Stage 6 "empty
+                    # square" rule, scoped to Building radius, NOT the
+                    # whole board and NOT bare home-rank Territory).
+                    for pos in own_trap_zone:
+                        if state.board.get_unit(pos) is None:
+                            trap_candidates.add(pos)
+                    trap_candidates -= occupied_trap_squares
+
                     for card_id in ps.hand:
                         if card_id not in registry:
                             continue
                         card = registry.get(card_id)
                         if isinstance(card, TrapCard):
-                            occupied_trap_squares = {t.position for t in state.traps}
-                            for f in range(8):
-                                for r in range(8):
-                                    pos = Position(f, r)
-                                    if (
-                                        state.board.get_unit(pos) is None
-                                        and pos not in occupied_trap_squares
-                                    ):
-                                        actions.append(PlaceTrap(
-                                            player_id=player_id, card_id=card_id, position=pos,
-                                        ))
+                            for pos in trap_candidates:
+                                actions.append(PlaceTrap(
+                                    player_id=player_id, card_id=card_id, position=pos,
+                                ))
                         elif isinstance(card, SpellCard):
                             actions.extend(
                                 self._legal_spell_targets(state, player_id, card_id, card, registry)
@@ -519,9 +584,15 @@ class RulesEngine:
                 return actions
 
             if not ps.chess_move_used:
+                from game.mechanics.buildings import is_committed_builder
                 ep = state.en_passant_target
                 cr = ps.castling_rights
                 for pos, unit in state.board.all_units_for(player_id):
+                    # Stage 8: a Pawn committed to an active Building
+                    # construction cannot move (README §12.2 — "the Pawn
+                    # is committed for a period of time").
+                    if is_committed_builder(state, unit.piece.id):
+                        continue
                     for target in get_legal_moves(
                         state.board, pos, unit,
                         en_passant_target=ep,
@@ -605,6 +676,16 @@ class RulesEngine:
                     ))
 
         elif card.target_type in ("position", "zone"):
+            # Stage 9: a Spell may be aimed at a square EITHER one of the
+            # caster's own non-Pawn pieces could move into right now, OR
+            # one covered by one of the caster's own Buildings (possibly
+            # extended further by a Shrine) — only one needs to hold; bare
+            # home-rank Territory does NOT qualify on its own. Either way
+            # only the anchor square is checked; the zone that expands
+            # from it (column/row/radius) is unrestricted.
+            from game.mechanics.territory import spell_zone_squares
+            reachable = get_non_pawn_movement_squares(state.board, player_id, registry)
+            reachable = reachable | spell_zone_squares(state, player_id, registry)
             if card.shape == "column":
                 squares = [(f, 0) for f in range(8)]
             elif card.shape == "row":
@@ -612,6 +693,8 @@ class RulesEngine:
             else:
                 squares = [(f, r) for f in range(8) for r in range(8)]
             for f, r in squares:
+                if Position(f, r) not in reachable:
+                    continue
                 actions.append(ActivateSpell(
                     player_id=player_id, card_id=card_id, target=(f, r),
                 ))
@@ -627,8 +710,13 @@ class RulesEngine:
                 return actions
             max_dist = reposition_effect.params.get("max_distance", 1)
             must_be_own = reposition_effect.params.get("must_be_own", True)
+            from game.mechanics.buildings import is_committed_builder
             for pos, unit in state.board.all_units_for(player_id):
                 if must_be_own and unit.piece.piece_type == PieceType.KING:
+                    continue
+                # Stage 8: a Pawn committed to construction cannot be
+                # relocated by any means, including this Spell.
+                if is_committed_builder(state, unit.piece.id):
                     continue
                 for df in range(-max_dist, max_dist + 1):
                     for dr in range(-max_dist, max_dist + 1):
@@ -780,6 +868,12 @@ class RulesEngine:
         if unit.owner != action.player_id:
             raise IllegalActionError("Cannot move an opponent's piece.")
 
+        from game.mechanics.buildings import is_committed_builder
+        if is_committed_builder(state, unit.piece.id):
+            raise IllegalActionError(
+                "This Pawn is committed to a Building under construction and cannot move."
+            )
+
         ep = state.en_passant_target
         cr = ps.castling_rights
         legal = get_legal_moves(
@@ -838,6 +932,12 @@ class RulesEngine:
             if ep_captured_unit is not None:
                 opp = state.get_player(state.opponent_of(action.player_id))
                 opp.captured_pieces.append(ep_captured_unit.piece.id)
+                # Stage 8: disruption — capturing a committed Builder Pawn
+                # (even via en passant) destroys its half-built Building.
+                from game.mechanics.buildings import find_committed_building, cancel_construction
+                disrupted = find_committed_building(state, ep_captured_unit.piece.id)
+                if disrupted is not None:
+                    cancel_construction(state, disrupted, events, destroyed_by=unit.piece.id)
                 events.append(EnPassantCapture(
                     player_id=action.player_id,
                     pawn_piece_id=unit.piece.id,
@@ -923,6 +1023,13 @@ class RulesEngine:
                 if captured is not None:
                     opp = state.get_player(state.opponent_of(action.player_id))
                     opp.captured_pieces.append(captured.piece.id)
+                    # ── Stage 8: disruption ───────────────────────────────
+                    # Capturing a committed Builder Pawn destroys its
+                    # half-built Building (README §12.2 step 4).
+                    from game.mechanics.buildings import find_committed_building, cancel_construction
+                    disrupted = find_committed_building(state, captured.piece.id)
+                    if disrupted is not None:
+                        cancel_construction(state, disrupted, events, destroyed_by=unit.piece.id)
                     # ── Stage 5: monster destruction event ──────────────
                     if captured.monster_id is not None:
                         events.append(MonsterDestroyed(
@@ -1270,6 +1377,17 @@ class RulesEngine:
         if unit.monster_id is not None:
             raise IllegalActionError("Piece is already hosting a Monster.")
 
+        from game.mechanics.buildings import is_committed_builder
+        if is_committed_builder(state, unit.piece.id):
+            raise IllegalActionError("This Pawn is committed to a Building under construction.")
+
+        # ── Stage 9: VESSEL_TERRITORY — summoning only in own Territory ──
+        from game.mechanics.territory import is_in_territory
+        if not is_in_territory(state, action.vessel_position, action.player_id, registry):
+            raise IllegalActionError(
+                f"Vessel at {action.vessel_position} is outside your Territory."
+            )  # VESSEL_TERRITORY
+
         # ── Stage 5: vessel compatibility check via registry ─────────────
         if registry is not None:
             try:
@@ -1539,6 +1657,17 @@ class RulesEngine:
                          on that line was picked
             "trap"      trap_instance_id (str)
             "none"      None — card has no board target (e.g. ritual_insight)
+
+        Stage 9 — SPELL_TARGET_REACH *or* Building coverage: for
+        "position"/"zone" Spells, the anchor square is legal if EITHER a
+        non-Pawn piece the caster currently controls could move into it
+        (pseudo-legal geometry; see chess.movement.
+        get_non_pawn_movement_squares), OR it is covered by one of the
+        caster's own Buildings (possibly extended further by a Shrine —
+        mechanics.territory.spell_zone_squares) — only one needs to hold.
+        Bare home-rank Territory does NOT qualify on its own. Only the
+        anchor is checked — the zone it expands into (column/row/radius)
+        is not.
         """
         from game.cards.card import SpellCard
         from game.core.events import SpellActivated
@@ -1558,6 +1687,23 @@ class RulesEngine:
                 raise IllegalActionError(f"Unknown card: {action.card_id!r}")
             if not isinstance(card, SpellCard):
                 raise IllegalActionError(f"Card {action.card_id!r} is not a Spell card.")
+
+            # Stage 9: a Spell may be aimed at a square EITHER one of the
+            # caster's own non-Pawn pieces could move into right now, OR
+            # one covered by one of the caster's own Buildings (the anchor
+            # square only — the zone it expands into is unrestricted; bare
+            # home-rank Territory does NOT qualify on its own).
+            if card.target_type in ("position", "zone"):
+                if not (isinstance(action.target, (tuple, list)) and len(action.target) == 2):
+                    raise IllegalActionError(f"{card.name!r} needs a (file, rank) target square.")
+                anchor = Position(*action.target)
+                from game.mechanics.territory import is_in_spell_zone
+                reachable = get_non_pawn_movement_squares(state.board, action.player_id, registry)
+                if anchor not in reachable and not is_in_spell_zone(state, anchor, action.player_id, registry):
+                    raise IllegalActionError(
+                        f"{card.name!r} can only target a square one of your "
+                        "non-Pawn pieces could move into, or one covered by one of your Buildings."
+                    )
 
         ps.hand.remove(action.card_id)
         ps.graveyard.append(action.card_id)
@@ -1713,9 +1859,18 @@ class RulesEngine:
         card definition (not hardcoded) so trigger detection
         (mechanics.monsters.check_enter_radius_traps /
         check_capture_traps) sees the Trap's real area of effect.
+
+        Stage 9 — TRAP_MONSTER_ANCHOR *or* Building coverage: the target
+        square is legal if EITHER it hosts one of the caster's own
+        summoned Monsters, OR it is an empty square covered by one of the
+        caster's own Buildings (possibly extended further by a Watchtower)
+        — only one needs to hold. Bare home-rank Territory does NOT
+        qualify on its own. It must not already have another Trap on it
+        either way.
         """
         from game.cards.card import TrapCard
         from game.core.events import TrapPlaced
+        from game.mechanics.territory import is_in_trap_zone
 
         self._require_phase(state, Phase.PREPARATION)
         self._require_no_prep_used(state, action.player_id)
@@ -1724,9 +1879,20 @@ class RulesEngine:
         if action.card_id not in ps.hand:
             raise IllegalActionError(f"Card {action.card_id!r} not in hand.")
 
-        if state.board.get_unit(action.position) is not None:
+        target_unit = state.board.get_unit(action.position)
+        anchored_to_own_monster = (
+            target_unit is not None
+            and target_unit.monster_id is not None
+            and target_unit.owner == action.player_id
+        )
+        in_own_trap_zone = target_unit is None and is_in_trap_zone(
+            state, action.position, action.player_id, registry
+        )
+        if not (anchored_to_own_monster or in_own_trap_zone):
             raise IllegalActionError(
-                f"Cannot place a Trap on an occupied square ({action.position})."
+                f"A Trap can only be placed on a square hosting one of your "
+                f"own summoned Monsters, or on an empty square covered by "
+                f"one of your Buildings ({action.position})."
             )
         if any(t.position == action.position for t in state.traps):
             raise IllegalActionError(
@@ -1840,6 +2006,7 @@ class RulesEngine:
         from game.core.events import ConstructionStarted
         from game.core.phases import ConstructionStatus
         from game.core.state import BuildingInstance
+        from game.mechanics.buildings import is_committed_builder
 
         self._require_phase(state, Phase.PREPARATION)
         self._require_no_prep_used(state, action.player_id)
@@ -1853,6 +2020,12 @@ class RulesEngine:
             raise IllegalActionError("Only Pawns can build.")              # BUILDER_IS_PAWN
         if not unit.builder_available:
             raise IllegalActionError("This Pawn has already completed a building.")  # BUILDER_ONCE
+        if is_committed_builder(state, unit.piece.id):
+            raise IllegalActionError("This Pawn is already committed to another Building.")
+
+        sq = state.board.get_square(action.pawn_position)
+        if sq.building_id is not None:
+            raise IllegalActionError("This square already has a Building on it.")
 
         ps = state.get_player(action.player_id)
         entry = next(
@@ -1865,6 +2038,19 @@ class RulesEngine:
             )
         entry.copies_available -= 1
 
+        # Stage 8: construction_turns comes from the Building's data
+        # definition when a registry is available; falls back to the
+        # original Stage 7 placeholder (2) for registry-less unit tests.
+        construction_turns = 2
+        if self._registry is not None:
+            from game.cards.card import BuildingCard
+            try:
+                card = self._registry.get(action.building_card_id)
+            except KeyError:
+                card = None
+            if isinstance(card, BuildingCard):
+                construction_turns = card.construction_turns
+
         building_id = f"bld-{action.player_id}-{len(state.buildings)+1:03d}"
         building = BuildingInstance(
             id=building_id,
@@ -1873,9 +2059,10 @@ class RulesEngine:
             position=action.pawn_position,
             status=ConstructionStatus.UNDER_CONSTRUCTION,
             builder_piece_id=unit.piece.id,
-            remaining_turns=2,  # default; overridden by building definition Stage 8
+            remaining_turns=construction_turns,
         )
         state.buildings.append(building)
+        sq.building_id = building_id  # visible on the board immediately (under construction)
 
         events: list[Event] = []
         self._mark_prep_used(state, action.player_id, "StartConstruction", events)
@@ -2378,6 +2565,13 @@ class RulesEngine:
         # charge to a single adjacent allied monster.
         if self._registry is not None:
             self._resolve_restore_effect_charge(state, ending_player, events, self._registry)
+
+        # ── Stage 8: Building construction ticks down on the owner's own
+        # end of turn (same "counts the owner's own turns" convention as
+        # burrow_cooldown/immobilized/exposed above) — completing when it
+        # reaches 0 (README §12.2).
+        from game.mechanics.buildings import tick_construction
+        tick_construction(state, ending_player, events)
 
         # Switch to other player
         opponent = state.opponent_of(action.player_id)
