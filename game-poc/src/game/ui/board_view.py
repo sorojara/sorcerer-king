@@ -322,14 +322,14 @@ class BoardView:
                            checked_player, summon_vessel_dests or [], inspect_pos,
                            show_territory)
         self._draw_coordinates()
-        self._draw_traps(observation) 
+        self._draw_traps(observation)
         # ── Stage 8+: building floor + back drawn BEFORE the chess piece ──────
         self._draw_building_floor_and_back(observation)
         # ── Pieces sandwiched between building back and front ─────────────────
-        self._draw_pieces(observation, aura_colors or {})
+        self._draw_pieces(observation, aura_colors or {}, crowned_kings or {})
         # ── Building front drawn AFTER the chess piece ────────────────────────
         self._draw_building_front_and_banner(observation)
-        self._draw_pieces(observation, aura_colors or {}, crowned_kings or {})
+
     # ── Private draw helpers ──────────────────────────────────────────────
 
     def _draw_squares(
