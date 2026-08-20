@@ -10,6 +10,26 @@ Draws:
   • Legal castling destinations (blue dot).
   • Check highlight (red tint on the King's square).
 
+Building rendering (Stage 8+):
+  Buildings are rendered in three layers that sandwich the chess piece:
+    FLOOR   — stone pavement / ritual circle / ground foundation (below piece)
+    BACK    — structural elements behind the unit (rear towers, altar arch)
+    FRONT   — foreground elements allowed to overlap piece bottom (~15–20 %)
+
+  The full per-square draw order is:
+    board tile → territory tint → zone tints → floor → back → piece → front
+    → status/range overlays → legal-move dots
+
+  Assets are sliced from a single sprite sheet:
+    data/images/buildings/basic_buildings.png  (1536 × 1024)
+  Grid layout: 4 columns (icon | floor | back | front) × 3 rows
+               (fortress | shrine | watchtower), 384 × 341 px per cell.
+
+  Ownership banners are thin colored bars at the bottom of the back layer —
+  green for own, muted orange for enemy, amber while under construction.
+  No building name is drawn inside the square; hover the mouse to see a
+  tooltip (wired in AppController._hover_tooltip_lines).
+
 Design rules:
   • This module is PURE RENDERING — it never mutates game state.
   • It receives a PublicBoardState (from an Observation) + auxiliary
@@ -25,6 +45,7 @@ Piece glyphs (Unicode chess symbols):
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pygame
@@ -47,7 +68,9 @@ from game.ui.colors import (
     LEGAL_DOT,
     LIGHT_SQUARE,
     SELECTED_TINT,
-    BUILDING_LABEL_BG,
+    BUILDING_BANNER_ENEMY,
+    BUILDING_BANNER_OWN,
+    BUILDING_BANNER_UNDER_CONSTR,
     BUILDING_MARKER_ENEMY,
     BUILDING_MARKER_OWN,
     BUILDING_MARKER_UNDER_CONSTR,
@@ -99,6 +122,86 @@ _GLYPHS: dict[str, tuple[str, str]] = {
     "pawn":   ("♙", "♟"),
 }
 
+# ── Building sprite sheet ───────────────────────────────────────────────────
+# Sprite-sheet layout: 3 columns × 3 rows.
+# Sheet size: 1536 × 1024 px.
+# Columns (512 px wide each): floor(0) | back(1) | front(2)
+# Rows:  fortress(0, y=0, h=341) | shrine(1, y=341, h=341) | watchtower(2, y=682, h=342)
+_SHEET_COL_W: int = 512
+
+# Row boundaries: height is 1024 px, not evenly divisible by 3 (1024 % 3 == 1),
+# so the last row is 342 px tall instead of 341.
+_SHEET_ROWS: tuple[tuple[int, int], ...] = (
+    (0,   341),   # fortress
+    (341, 341),   # shrine
+    (682, 342),   # watchtower  ← gets the extra pixel
+)
+
+_BUILDING_ROW: dict[str, int] = {
+    "fortress":   0,
+    "shrine":     1,
+    "watchtower": 2,
+}
+
+# Column indices within the sprite sheet
+_COL_FLOOR = 0
+_COL_BACK  = 1
+_COL_FRONT = 2
+
+
+def _building_type(card_id: str) -> str | None:
+    """Map a building_card_id to its sprite row key (fortress/shrine/watchtower)."""
+    cid = card_id.lower()
+    for key in _BUILDING_ROW:
+        if key in cid:
+            return key
+    return None
+
+
+class BuildingSpriteCache:
+    """
+    Loads ``basic_buildings.png`` once and serves pre-scaled floor/back/front
+    surfaces per building type, keyed by (building_type, layer).
+
+    layer is one of "floor", "back", "front".
+
+    All surfaces are SRCALPHA so transparent pixels are preserved.
+    """
+
+    _LAYER_COL = {"floor": _COL_FLOOR, "back": _COL_BACK, "front": _COL_FRONT}
+
+    def __init__(self, sheet_path: str | Path, target_size: int = SQUARE_SIZE) -> None:
+        self._cache: dict[tuple[str, str], pygame.Surface] = {}
+        self._target = target_size
+        try:
+            raw = pygame.image.load(str(sheet_path)).convert_alpha()
+            self._sheet: pygame.Surface | None = raw
+        except Exception:
+            self._sheet = None
+
+    def get(self, building_type: str, layer: str) -> pygame.Surface | None:
+        """Return a ``target_size × target_size`` surface for this building layer."""
+        if self._sheet is None:
+            return None
+        key = (building_type, layer)
+        if key in self._cache:
+            return self._cache[key]
+        row_idx = _BUILDING_ROW.get(building_type)
+        col = self._LAYER_COL.get(layer)
+        if row_idx is None or col is None:
+            return None
+        row_y, row_h = _SHEET_ROWS[row_idx]
+        src_rect = pygame.Rect(
+            col * _SHEET_COL_W,
+            row_y,
+            _SHEET_COL_W,
+            row_h,
+        )
+        cell = self._sheet.subsurface(src_rect).copy()
+        scaled = pygame.transform.smoothscale(cell, (self._target, self._target))
+        self._cache[key] = scaled
+        return scaled
+
 
 def _sq_to_screen(pos: Position, flip: bool = False) -> tuple[int, int]:
     """
@@ -140,7 +243,7 @@ class BoardView:
     Stateless board renderer.
 
     Usage:
-        view = BoardView(surface, font_large, font_small)
+        view = BoardView(surface, font_large, font_small, building_sprites=cache)
         view.draw(observation, selected_pos, legal_dests, in_check_player)
     """
 
@@ -150,11 +253,13 @@ class BoardView:
         font_large: Any,   # _ft.Font — pygame.font not used (Py 3.14 bug)
         font_small: Any,
         flip: bool = False,
+        building_sprites: "BuildingSpriteCache | None" = None,
     ) -> None:
         self._surface = surface
         self._font_large = font_large
         self._font_small = font_small
         self._flip = flip
+        self._building_sprites: BuildingSpriteCache | None = building_sprites
 
         # Pre-allocate overlay surface for alpha blending
         self._overlay = pygame.Surface(
@@ -203,8 +308,12 @@ class BoardView:
                            show_territory)
         self._draw_coordinates()
         self._draw_traps(observation)
-        self._draw_buildings(observation)
+        # ── Stage 8+: building floor + back drawn BEFORE the chess piece ──────
+        self._draw_building_floor_and_back(observation)
+        # ── Pieces sandwiched between building back and front ─────────────────
         self._draw_pieces(observation, aura_colors or {})
+        # ── Building front drawn AFTER the chess piece ────────────────────────
+        self._draw_building_front_and_banner(observation)
 
     # ── Private draw helpers ──────────────────────────────────────────────
 
@@ -479,18 +588,13 @@ class BoardView:
             self._surface.blit(lbl_bg, (lx - 2, ly - 1))
             self._surface.blit(lbl, (lx, ly))
 
-    def _draw_buildings(self, obs: "Observation") -> None:
+    def _draw_building_floor_and_back(self, obs: "Observation") -> None:
         """
-        Stage 8 — every Building (public — README §12) gets an inset frame
-        on its square, drawn under the chess piece that may occupy the same
-        square (the Builder Pawn, or later any piece — see chess/board.py's
-        ``building_id`` being independent of ``unit``).
+        Stage 8+ — first half of the 3-layer building render.
+        Draws FLOOR then BACK sprites for every non-destroyed Building,
+        before the chess piece is drawn.
 
-        Amber while UNDER_CONSTRUCTION (with a remaining-turns count);
-        green (own) / muted orange (enemy) once COMPLETE.  DESTROYED
-        Buildings are never in ``building_locations`` for long — the square
-        is cleared the same event that marks them destroyed — but the
-        guard below skips them defensively either way.
+        Falls back to the old inset-rect style if sprite assets are unavailable.
         """
         from game.core.phases import ConstructionStatus
 
@@ -499,28 +603,133 @@ class BoardView:
                 continue
             pos = b.position
             sx, sy = _sq_to_screen(pos, self._flip)
+            btype = _building_type(b.building_card_id)
             under_construction = b.status == ConstructionStatus.UNDER_CONSTRUCTION
-            if under_construction:
-                color = BUILDING_MARKER_UNDER_CONSTR
+
+            if self._building_sprites is not None and btype is not None:
+                # ── Sprite path ──────────────────────────────────────────
+                floor_surf = self._building_sprites.get(btype, "floor")
+                back_surf  = self._building_sprites.get(btype, "back")
+
+                if under_construction:
+                    # Under construction: draw floor only, tinted amber
+                    if floor_surf is not None:
+                        tinted = floor_surf.copy()
+                        tinted.fill((200, 170, 50, 120), special_flags=pygame.BLEND_RGBA_MULT)
+                        self._surface.blit(tinted, (sx, sy))
+                    # Construction progress bar
+                    self._draw_construction_bar(sx, sy, b)
+                else:
+                    # Complete: draw floor + back
+                    if floor_surf is not None:
+                        self._surface.blit(floor_surf, (sx, sy))
+                    if back_surf is not None:
+                        self._surface.blit(back_surf, (sx, sy))
             else:
-                color = BUILDING_MARKER_OWN if b.owner == obs.player_id else BUILDING_MARKER_ENEMY
+                # ── Fallback: inset rect only (no sprites loaded) ─────────
+                if under_construction:
+                    color = BUILDING_MARKER_UNDER_CONSTR
+                else:
+                    color = BUILDING_MARKER_OWN if b.owner == obs.player_id else BUILDING_MARKER_ENEMY
+                inset = 3
+                rect = pygame.Rect(sx + inset, sy + inset,
+                                   SQUARE_SIZE - inset * 2, SQUARE_SIZE - inset * 2)
+                pygame.draw.rect(self._surface, color, rect, 3, border_radius=6)
+                if under_construction:
+                    self._draw_construction_bar(sx, sy, b)
 
-            inset = 3
-            rect = pygame.Rect(sx + inset, sy + inset, SQUARE_SIZE - inset * 2, SQUARE_SIZE - inset * 2)
-            pygame.draw.rect(self._surface, color, rect, 3, border_radius=6)
+    def _draw_building_front_and_banner(self, obs: "Observation") -> None:
+        """
+        Stage 8+ — second half of the 3-layer building render.
+        Draws the FRONT sprite (foreground overlay) and a thin faction
+        ownership banner stripe, after the chess piece has been drawn.
 
-            short_name = b.building_card_id.replace("_", " ").title()
-            label = f"{short_name} ({b.remaining_turns})" if under_construction else short_name
-            lbl = self._font_small.render(label, True, color)
-            lbl_bg = pygame.Surface((lbl.get_width() + 4, lbl.get_height() + 2), pygame.SRCALPHA)
-            lbl_bg.fill(BUILDING_LABEL_BG)
-            # Bottom of the square — _draw_traps already owns the top-label
-            # slot, and this is where a Building marker most often needs to
-            # coexist with an ordinary (non-Monster) piece glyph above it.
-            lx = sx + (SQUARE_SIZE - lbl.get_width()) // 2
-            ly = sy + SQUARE_SIZE - lbl.get_height() - 3
-            self._surface.blit(lbl_bg, (lx - 2, ly - 1))
-            self._surface.blit(lbl, (lx, ly))
+        The banner communicates ownership without altering the neutral stone
+        artwork:  green = own, muted orange = enemy, amber = under construction.
+        """
+        from game.core.phases import ConstructionStatus
+
+        for b in getattr(obs.board, "building_locations", ()):
+            if getattr(b, "status", None) == ConstructionStatus.DESTROYED:
+                continue
+            pos = b.position
+            sx, sy = _sq_to_screen(pos, self._flip)
+            btype = _building_type(b.building_card_id)
+            under_construction = b.status == ConstructionStatus.UNDER_CONSTRUCTION
+
+            if under_construction:
+                banner_color = BUILDING_BANNER_UNDER_CONSTR
+            else:
+                banner_color = (
+                    BUILDING_BANNER_OWN
+                    if b.owner == obs.player_id
+                    else BUILDING_BANNER_ENEMY
+                )
+
+            if self._building_sprites is not None and btype is not None and not under_construction:
+                front_surf = self._building_sprites.get(btype, "front")
+                if front_surf is not None:
+                    self._surface.blit(front_surf, (sx, sy))
+
+            # Thin ownership banner — a 3-px stripe at the very bottom of the
+            # square, drawn on top of the front layer so it always reads clearly.
+            banner_h = 3
+            pygame.draw.rect(
+                self._surface,
+                banner_color,
+                pygame.Rect(sx + 2, sy + SQUARE_SIZE - banner_h - 1,
+                            SQUARE_SIZE - 4, banner_h),
+                border_radius=1,
+            )
+
+    def _draw_construction_bar(self, sx: int, sy: int, b: Any) -> None:
+        """
+        Draw an amber progress bar at the bottom of an under-construction
+        building square, showing elapsed / total turns.
+
+        ``b`` is a BuildingInstance (duck-typed: needs .remaining_turns and
+        optionally .total_turns — falls back to rendering a fraction label).
+        """
+        remaining = getattr(b, "remaining_turns", 0)
+        total = getattr(b, "total_turns", None)
+
+        bar_w = SQUARE_SIZE - 8
+        bar_h = 7
+        bar_x = sx + 4
+        bar_y = sy + SQUARE_SIZE - bar_h - 4
+
+        # Background
+        pygame.draw.rect(
+            self._surface,
+            (40, 30, 10),
+            pygame.Rect(bar_x, bar_y, bar_w, bar_h),
+            border_radius=2,
+        )
+
+        if total is not None and total > 0:
+            done = total - remaining
+            fill_w = max(2, int(bar_w * done / total))
+        else:
+            # No total_turns attribute: draw a minimal stub
+            fill_w = 4
+
+        pygame.draw.rect(
+            self._surface,
+            BUILDING_BANNER_UNDER_CONSTR,
+            pygame.Rect(bar_x, bar_y, fill_w, bar_h),
+            border_radius=2,
+        )
+
+        # Turn counter label: "⚒ 2/3" or "⚒ 2" if no total
+        if total is not None:
+            label_text = f"\u2692 {total - remaining}/{total}"
+        else:
+            label_text = f"\u2692 {remaining}t"
+
+        lbl = self._font_small.render(label_text, True, BUILDING_BANNER_UNDER_CONSTR)
+        lx = sx + (SQUARE_SIZE - lbl.get_width()) // 2
+        ly = bar_y - lbl.get_height() - 1
+        self._surface.blit(lbl, (lx, ly))
 
     def _draw_pieces(
         self,
