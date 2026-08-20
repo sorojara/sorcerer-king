@@ -355,6 +355,45 @@ A weighted 1–4 or 2–4 distribution may be preferable to uniform randomness.
 
 ---
 
+## 9.2 Mercenary
+
+Mercenary is a late-game emergency mechanic.
+
+Lore: the player spends resources — Monster cards — to hire mercenaries to
+fight for their kingdom.
+
+### Rule
+
+The player pays a cost in Monster cards from their hand.  Those cards are
+**removed from the game** (not sent to the graveyard; they are lost forever).
+
+In exchange the player may place a brand-new chess piece of the purchased
+type on any **empty square in their own first two ranks**.
+
+### Cost table
+
+| Monsters sacrificed | Piece gained |
+|---------------------|-------------|
+| 4                   | Pawn        |
+| 6                   | Knight or Bishop or Rook |
+| 8                   | Queen       |
+
+### Restrictions
+
+- Only Monster cards may be sacrificed (Spells and Traps do not count).
+- The player must have exactly the required number of Monster cards in hand.
+- The receiving square must be empty and within the player's own first two ranks (ranks 1–2 for white, ranks 7–8 for black).
+- Consumes the preparation action for the turn.
+- Cannot be used while the preparation action has already been used.
+
+### Design intent
+
+Mercenary is the "nuclear option" for piece recovery in the late game.
+Sacrificing 4–8 cards is a severe cost that only makes sense when the player's
+piece count has dropped so low that card tempo no longer matters.
+
+---
+
 # 10. Pawns
 
 Pawns are strategically unique.
@@ -1663,7 +1702,7 @@ Board-based card interaction.
 
 ---
 
-## Stage 7 — Recompose
+## Stage 7 — Recompose & Mercenary
 
 Implement:
 
@@ -1674,10 +1713,15 @@ Implement:
 - shuffle
 - replacement draw
 - deterministic RNG logging
+- Mercenary action
+- Monster card sacrifice (removed from game, not graveyard)
+- cost table: 4 → Pawn, 6 → Knight/Bishop/Rook, 8 → Queen
+- placement on own first two ranks
+- UI card-selection and square-placement flows
 
 Deliverable:
 
-Endgame hand recovery mechanic.
+Endgame hand recovery mechanic + late-game piece recovery via Mercenary.
 
 ---
 
