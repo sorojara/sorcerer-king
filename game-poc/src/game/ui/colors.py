@@ -80,10 +80,16 @@ TERRITORY_BORDER_ENEMY = (230,  60,  60)
 
 # ── Stage 8: Buildings ────────────────────────────────────────────────────
 # Own/enemy framing follows the same convention as the Trap markers above.
-BUILDING_MARKER_OWN            = (120, 200, 140)  # green — your own Building
-BUILDING_MARKER_ENEMY          = (200, 140, 120)  # muted orange — enemy Building
-BUILDING_MARKER_UNDER_CONSTR   = (200, 180,  60)  # amber ring while UNDER_CONSTRUCTION
-BUILDING_LABEL_BG              = ( 15,  25,  18, 170)  # RGBA backing for the name label
+BUILDING_MARKER_OWN            = (120, 200, 140)  # green — your own Building (fallback rect)
+BUILDING_MARKER_ENEMY          = (200, 140, 120)  # muted orange — enemy Building (fallback rect)
+BUILDING_MARKER_UNDER_CONSTR   = (200, 180,  60)  # amber ring while UNDER_CONSTRUCTION (fallback)
+
+# Stage 8+: ownership banners (thin stripe drawn over the building front sprite)
+# These are intentionally more saturated than the fallback rects so they read
+# clearly against the artwork without covering the structure itself.
+BUILDING_BANNER_OWN            = ( 80, 220, 110)  # vivid green — your own building
+BUILDING_BANNER_ENEMY          = (220, 110,  60)  # muted orange — enemy building
+BUILDING_BANNER_UNDER_CONSTR   = (220, 185,  40)  # amber — under construction progress
 
 # ── Check / danger ─────────────────────────────────────────────────────────
 CHECK_TINT     = (200,  20,  20, 110)  # red tint on checked king square

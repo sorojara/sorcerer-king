@@ -74,7 +74,7 @@ from game.core.game import Game
 from game.core.phases import KingCardStatus, Phase, PieceType
 from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
-from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView
+from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView, BuildingSpriteCache
 from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
 from game.ui.font import FTFont, load_font
 from game.ui.hand_view import HandView
@@ -156,10 +156,13 @@ class AppController:
         self._game = Game.new(seed=seed, registry=self._registry)
 
         # ── UI sub-views ─────────────────────────────────────────────────
+        _building_sheet = _data_dir / "images" / "buildings" / "basic_buildings.png"
+        _building_sprites = BuildingSpriteCache(_building_sheet)
         self._board_view = BoardView(
             surface=self._screen,
             font_large=self._font_large,
             font_small=self._font_small,
+            building_sprites=_building_sprites,
         )
         self._sidebar = SidebarOverlay(
             surface=self._screen,
@@ -956,6 +959,50 @@ class AppController:
                     lines.append((desc, TOOLTIP_TEXT))
                 lines.append((f"Set by you  ·  {eff.duration_turns} turn(s) left", TOOLTIP_TEXT))
                 return lines
+
+        # Stage 8+: building hover — show name + status + key effects.
+        # Buildings are always visible (public information), but effect details
+        # are only meaningful from the owning player's perspective.
+        for b in getattr(obs.board, "building_locations", ()):
+            if b.position != hover_pos:
+                continue
+            from game.core.phases import ConstructionStatus
+            if getattr(b, "status", None) == ConstructionStatus.DESTROYED:
+                continue
+            # Building name from registry if available
+            bname = b.building_card_id.replace("_", " ").title()
+            try:
+                bname = self._registry.get(b.building_card_id).name
+            except Exception:
+                pass
+            lines = [(bname, TOOLTIP_TITLE)]
+            if b.status == ConstructionStatus.UNDER_CONSTRUCTION:
+                remaining = getattr(b, "remaining_turns", "?")
+                total = None
+                try:
+                    bcard = self._registry.get(b.building_card_id)
+                    total = getattr(bcard, "construction_turns", None)
+                except Exception:
+                    pass
+                if total is not None and isinstance(remaining, int):
+                    done = total - remaining
+                    progress = f"{done}/{total} turns complete"
+                else:
+                    progress = f"{remaining} turn(s) remaining"
+                lines.append((f"Under Construction — {progress}", TOOLTIP_TEXT))
+            else:
+                owner_label = "Yours" if b.owner == obs.player_id else "Enemy"
+                lines.append((f"Status: Complete  ·  {owner_label}", TOOLTIP_TEXT))
+                # Show effect types from card if available
+                try:
+                    card = self._registry.get(b.building_card_id)
+                    for eff in getattr(card, "effects", ()):
+                        etype = getattr(eff, "type", "").replace("_", " ").title()
+                        if etype:
+                            lines.append((f"  {etype}", TOOLTIP_TEXT))
+                except Exception:
+                    pass
+            return lines
 
         return []
 
