@@ -192,8 +192,6 @@ class SidebarOverlay:
         pygame.draw.rect(self._surface, SIDEBAR_BG, rect)
 
         y = self.PADDING
-        y = self._draw_line("SORCERER KING", self._font, HUD_TEXT, y, center=True)
-        y += 8
         y = self._draw_divider(y)
         y += 8
 

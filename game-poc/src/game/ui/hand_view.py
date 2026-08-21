@@ -5,9 +5,9 @@ ui/hand_view.py — Card hand display (Stage 4 / Stage 5)
 Renders the hand strip below the board as individual card thumbnails.
 
 Each thumbnail shows:
-    • Card name (truncated if necessary)
-    • Colour-coded type badge: MONSTER / SPELL / TRAP
-    • Subtle background tint matching card type
+    • Card artwork (scaled to fill the tile), with card name in a bottom bar.
+    • Fallback to colour-coded type badge + name when artwork is missing.
+    • Colour-coded type badge: MONSTER / SPELL / TRAP.
 
 Stage 5 changes:
     • Narrower tiles (80 px) so up to 7–8 cards fit in one row.
@@ -15,6 +15,15 @@ Stage 5 changes:
       card tiles start from the left edge.
     • Selected card gets a bright yellow border highlight.
     • card_from_click() returns the card_id + its index for hit-testing.
+
+Scrollable hand (current):
+    • Larger tiles (110 × 90 px) — readable artwork.
+    • When more cards exist than fit in the strip, left/right chevron
+      arrows appear on the strip edges; scrolling is also triggered by the
+      mouse wheel when the cursor is over the hand area.
+    • HandView.scroll(delta) / reset_scroll() are called by AppController.
+    • The strip still clips cards correctly so nothing bleeds outside the
+      board width.
 
 When ``opponent_hand`` is provided (a list of card IDs obtained from the
 raw game state for the debug "show black hand" feature), a second row is
@@ -26,7 +35,9 @@ discard it.
 
 Layout for a single card tile:
     ┌───────────────┐
-    │ [TYPE] name…  │  HEIGHT = 72 px  CARD_W = 84 px
+    │ [artwork]     │  HEIGHT = 106 px  CARD_W = 110 px
+    │               │
+    │ name…         │
     └───────────────┘
 """
 
@@ -88,11 +99,14 @@ class HandView:
     above the main one with a debug label.
     """
 
-    HEIGHT: int = 72          # height of ONE hand row in pixels
+    HEIGHT: int = 106         # height of ONE hand row in pixels
     PADDING: int = 4
-    CARD_W: int = 84          # narrower tiles → more cards visible
-    CARD_H: int = 56          # height of each card tile
-    CARD_GAP: int = 3         # gap between cards
+    CARD_W: int = 110         # wider tiles — readable artwork
+    CARD_H: int = 88          # height of each card tile
+    CARD_GAP: int = 4         # gap between cards
+
+    # Scroll chevron
+    _CHEVRON_W: int = 18      # width of the left/right scroll arrow zones
 
     _SELECTED_BORDER = (255, 210, 0)   # gold highlight for selected card
 
@@ -117,6 +131,31 @@ class HandView:
         self._image_cache: "dict[str, Any]" = {}
         # Cached tile rects for the own-hand row; updated each draw() call.
         self._own_tile_rects: list[tuple[str, pygame.Rect]] = []
+        # How many card-widths the hand is scrolled to the right (0 = leftmost).
+        self._scroll_offset: int = 0
+
+    # ── Scroll API ─────────────────────────────────────────────────────────
+
+    def scroll(self, delta: int, total_cards: int) -> None:
+        """
+        Scroll the hand by ``delta`` cards (positive = right, negative = left).
+        Clamped so the last card is never scrolled out of view.
+        ``total_cards`` is the current hand size, used to compute the maximum offset.
+        """
+        visible = max(1, (self._width - self.PADDING * 2) // (self.CARD_W + self.CARD_GAP))
+        max_offset = max(0, total_cards - visible)
+        self._scroll_offset = max(0, min(max_offset, self._scroll_offset + delta))
+
+    def reset_scroll(self) -> None:
+        """Reset scroll position to the leftmost card."""
+        self._scroll_offset = 0
+
+    def is_over_hand(self, mx: int, my: int) -> bool:
+        """Return True if the pixel (mx, my) is within the own-hand strip."""
+        return (
+            self._x <= mx < self._x + self._width
+            and self._y <= my < self._y + self.HEIGHT
+        )
 
     # ── Public hit-testing API ─────────────────────────────────────────────
 
@@ -204,6 +243,7 @@ class HandView:
             mercenary_mode=mercenary_mode,
             mercenary_selected_ids=mercenary_selected_ids,
             mercenary_valid_ids=mercenary_valid_ids,
+            scroll_offset=self._scroll_offset,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────
@@ -222,13 +262,19 @@ class HandView:
         mercenary_mode: bool = False,
         mercenary_selected_ids: "set[str] | None" = None,
         mercenary_valid_ids: "set[str] | None" = None,
+        scroll_offset: int = 0,
     ) -> list[tuple[str, pygame.Rect]]:
         """
         Draw one hand row at vertical position ``y``.
-        Returns a list of (card_id, Rect) pairs for hit-testing.
+
+        ``scroll_offset`` — number of cards scrolled off the left edge.
+
+        Returns a list of (card_id, Rect) pairs for hit-testing of the
+        currently VISIBLE cards only.
         """
         tile_rects: list[tuple[str, pygame.Rect]] = []
         x0 = self._x   # left edge of the strip (Stage 6: board may be offset)
+        strip_w = self._width
 
         # Background strip
         if discard_mode:
@@ -239,7 +285,7 @@ class HandView:
             strip_bg = (40, 30, 10)
         else:
             strip_bg = SIDEBAR_BG
-        strip_rect = pygame.Rect(x0, y, self._width, self.HEIGHT)
+        strip_rect = pygame.Rect(x0, y, strip_w, self.HEIGHT)
         pygame.draw.rect(self._surface, strip_bg, strip_rect)
         if discard_mode:
             border_color = _DISCARD_BORDER
@@ -249,7 +295,7 @@ class HandView:
             border_color = _MERCENARY_CHOSEN_BORDER
         else:
             border_color = DIALOG_BORDER
-        pygame.draw.line(self._surface, border_color, (x0, y), (x0 + self._width, y),
+        pygame.draw.line(self._surface, border_color, (x0, y), (x0 + strip_w, y),
                          2 if (discard_mode or recompose_mode or mercenary_mode) else 1)
 
         # Small label in top-left corner of the strip (doesn't push cards right)
@@ -264,20 +310,44 @@ class HandView:
         if card_area_h > self.CARD_H:
             card_top += (card_area_h - self.CARD_H) // 2
 
-        x = x0 + self.PADDING
-
         if not card_ids:
             empty = self._font.render("(empty)", True, HUD_LABEL)
-            self._surface.blit(empty, (x, card_top))
+            self._surface.blit(empty, (x0 + self.PADDING, card_top))
             return tile_rects
 
-        for card_id in card_ids:
-            # If this card would overflow the strip, show a +N overflow badge
-            if x + self.CARD_W > x0 + self._width - self.PADDING:
-                remaining_count = len(card_ids) - card_ids.index(card_id)
-                more = self._font.render(f"+{remaining_count}", True, HUD_LABEL)
-                self._surface.blit(more, (x + 2, card_top + (self.CARD_H - more.get_height()) // 2))
-                break
+        # ── Scroll geometry ────────────────────────────────────────────────
+        # Left/right chevron zones are only reserved when there are cards
+        # that actually overflow in that direction.
+        can_scroll_left  = scroll_offset > 0
+        # Compute how many cards fit in the available width (after reserving
+        # chevron space on whichever sides are needed).
+        chevron_left_w  = self._CHEVRON_W if can_scroll_left else 0
+        # We don't know yet if we need a right chevron, so do a quick probe.
+        visible_area = strip_w - self.PADDING * 2 - chevron_left_w
+        cards_that_fit = max(1, visible_area // (self.CARD_W + self.CARD_GAP))
+        can_scroll_right = (scroll_offset + cards_that_fit) < len(card_ids)
+        chevron_right_w = self._CHEVRON_W if can_scroll_right else 0
+        # Recompute with both chevrons known.
+        visible_area = strip_w - self.PADDING * 2 - chevron_left_w - chevron_right_w
+        cards_that_fit = max(1, visible_area // (self.CARD_W + self.CARD_GAP))
+        can_scroll_right = (scroll_offset + cards_that_fit) < len(card_ids)
+
+        # Cards to render
+        visible_ids = card_ids[scroll_offset: scroll_offset + cards_that_fit]
+
+        # Clip rendering to the card area so nothing bleeds under chevrons.
+        cards_area_rect = pygame.Rect(
+            x0 + self.PADDING + chevron_left_w,
+            y,
+            strip_w - self.PADDING * 2 - chevron_left_w - chevron_right_w,
+            self.HEIGHT,
+        )
+        prev_clip = self._surface.get_clip()
+        self._surface.set_clip(cards_area_rect)
+
+        x = x0 + self.PADDING + chevron_left_w
+
+        for card_id in visible_ids:
             is_selected = (selected_card_id is not None and card_id == selected_card_id)
             is_playable = playable_card_ids is None or card_id in playable_card_ids
             is_recompose_chosen = recompose_mode and (
@@ -301,7 +371,27 @@ class HandView:
             tile_rects.append((card_id, pygame.Rect(x, card_top, self.CARD_W, self.CARD_H)))
             x += self.CARD_W + self.CARD_GAP
 
+        self._surface.set_clip(prev_clip)
+
+        # ── Scroll chevrons ────────────────────────────────────────────────
+        chevron_cy = y + self.HEIGHT // 2
+        if can_scroll_left:
+            self._draw_chevron(x0 + self.PADDING, chevron_cy, left=True)
+        if can_scroll_right:
+            self._draw_chevron(x0 + strip_w - self.PADDING - self._CHEVRON_W, chevron_cy, left=False)
+
         return tile_rects
+
+    def _draw_chevron(self, x: int, cy: int, left: bool) -> None:
+        """Draw a small ‹ or › arrow chevron for scroll indication."""
+        w = self._CHEVRON_W
+        h = 14
+        color = (180, 180, 200)
+        if left:
+            pts = [(x + w - 3, cy - h // 2), (x + 3, cy), (x + w - 3, cy + h // 2)]
+        else:
+            pts = [(x + 3, cy - h // 2), (x + w - 3, cy), (x + 3, cy + h // 2)]
+        pygame.draw.polygon(self._surface, color, pts)
 
     def _get_card_image(self, card: "AnyCard") -> "pygame.Surface | None":
         """Load and cache a card's artwork, or return None if unavailable."""

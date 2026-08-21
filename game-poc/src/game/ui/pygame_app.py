@@ -89,7 +89,7 @@ _AI_THINK_FRAMES: int = 30  # 0.5 s at 60 fps
 # ── Window geometry constants ──────────────────────────────────────────────
 _BOARD_W: int = BOARD_PIXEL_SIZE          # 640
 _BOARD_H: int = BOARD_PIXEL_SIZE          # 640
-_HAND_H: int = HandView.HEIGHT            # 72  height of one hand row
+_HAND_H: int = HandView.HEIGHT            # 106  height of one hand row
 _SIDEBAR_W: int = SidebarOverlay.SIDEBAR_WIDTH  # 200
 
 # Stage 6: left sidebar — a dedicated, always-on hand-card reference panel
@@ -99,8 +99,8 @@ _SIDEBAR_W: int = SidebarOverlay.SIDEBAR_WIDTH  # 200
 _LEFT_SIDEBAR_W: int = BOARD_OFFSET_X     # 220
 
 WIN_W: int = _LEFT_SIDEBAR_W + _BOARD_W + _SIDEBAR_W   # 1060
-WIN_H: int = _BOARD_H + _HAND_H          # 712  (base — no debug row)
-_WIN_H_DEBUG: int = _BOARD_H + _HAND_H * 2  # 784  (with black-hand debug row)
+WIN_H: int = _BOARD_H + _HAND_H          # 746  (base — no debug row)
+_WIN_H_DEBUG: int = _BOARD_H + _HAND_H * 2  # 852  (with black-hand debug row)
 
 _SIDEBAR_X: int = _LEFT_SIDEBAR_W + _BOARD_W   # 860 — right sidebar's left edge
 _HAND_Y: int = _BOARD_H                  # 640  (base hand-strip top)
@@ -387,6 +387,14 @@ class AppController:
                 self._handle_promotion_click(mx, my)
             else:
                 self._handle_click(mx, my)
+
+        elif event.type == pygame.MOUSEWHEEL:
+            # Scroll the hand strip when the mouse is over it.
+            if self._hand_view.is_over_hand(*self._mouse_pos):
+                obs = self._current_obs()
+                # wheel y: positive = scroll up (towards user) → move right in hand,
+                # negative = scroll down → move left. One wheel tick = one card.
+                self._hand_view.scroll(-event.y, len(list(obs.own_hand)))
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Stage 6 (corrected): right-click sets the CardViewer's active
@@ -2104,6 +2112,7 @@ class AppController:
                 # player's preparation action.  We must NOT call
                 # execute(EndPreparation) here — that would skip PREPARATION
                 # entirely (auto-start fires first, then EndPreparation runs).
+                self._hand_view.reset_scroll()   # new hand on new turn → scroll to card 0
                 self._game.advance_to_preparation()
                 # After advance the phase is PREPARATION — loop will stop next iter.
 
