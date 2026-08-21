@@ -74,7 +74,14 @@ from game.core.game import Game
 from game.core.phases import KingCardStatus, Phase, PieceType
 from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
-from game.ui.board_view import BOARD_OFFSET_X, BOARD_PIXEL_SIZE, BoardView, BuildingSpriteCache
+from game.ui.board_view import (
+    BOARD_OFFSET_X,
+    BOARD_PIXEL_SIZE,
+    BoardView,
+    BuildingSpriteCache,
+    PieceSpriteCache,
+    TileSpriteCache,
+)
 from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
 from game.ui.font import FTFont, load_font
 from game.ui.hand_view import HandView
@@ -156,13 +163,18 @@ class AppController:
         self._game = Game.new(seed=seed, registry=self._registry)
 
         # ── UI sub-views ─────────────────────────────────────────────────
+        _assets_sheet = _data_dir / "images" / "spritesheet" / "assets-3.png"
         _building_sheet = _data_dir / "images" / "buildings" / "basic_buildings.png"
         _building_sprites = BuildingSpriteCache(_building_sheet)
+        _tile_sprites = TileSpriteCache(_assets_sheet)
+        _piece_sprites = PieceSpriteCache(_assets_sheet)
         self._board_view = BoardView(
             surface=self._screen,
             font_large=self._font_large,
             font_small=self._font_small,
             building_sprites=_building_sprites,
+            tile_sprites=_tile_sprites,
+            piece_sprites=_piece_sprites,
         )
         self._sidebar = SidebarOverlay(
             surface=self._screen,
@@ -824,6 +836,42 @@ class AppController:
                     archetype = None
             colors[unit_info.position] = aura_color_for(archetype)
         return colors
+
+    def _compute_archetype_map(self, obs) -> "dict[Position, str]":
+        """
+        Position → archetype string for every summoned piece on the board,
+        plus every Crowned King piece (uses archetype_support[0] from the
+        active KingCard so the faction king sprite is rendered).
+        Used by BoardView to choose the faction sprite instead of the neutral
+        chess piece.
+        """
+        result: dict[Position, str] = {}
+        for unit_info in obs.board.units:
+            # Summoned monsters
+            if unit_info.monster_id is not None:
+                archetype = None
+                if self._registry is not None and unit_info.monster_id in self._registry:
+                    try:
+                        card = self._registry.get(unit_info.monster_id)
+                        archetype = getattr(card, "archetype", None)
+                    except Exception:
+                        archetype = None
+                if archetype:
+                    result[unit_info.position] = archetype
+
+            # Crowned Kings — use the primary archetype_support of the active KingCard
+            elif unit_info.piece_type == "king":
+                try:
+                    active_king_id = self._game.state.get_player(unit_info.owner).active_king
+                    if active_king_id and self._registry is not None and active_king_id in self._registry:
+                        king_card = self._registry.get(active_king_id)
+                        support = getattr(king_card, "archetype_support", ())
+                        if support:
+                            result[unit_info.position] = support[0]
+                except Exception:
+                    pass
+
+        return result
 
     def _compute_crowned_kings(self, obs) -> "dict[Position, str]":
         """
@@ -2232,6 +2280,7 @@ class AppController:
             aura_colors=self._compute_aura_colors(obs),
             show_territory=self._show_territory,
             crowned_kings=self._compute_crowned_kings(obs),
+            archetype_map=self._compute_archetype_map(obs),
         )
 
         # Stage 6: hover tooltip for Traps / active zone effects.

@@ -127,6 +127,84 @@ _GLYPHS: dict[str, tuple[str, str]] = {
     "pawn":   ("♙", "♟"),
 }
 
+# ── Main assets sprite sheet (pieces + tiles) ───────────────────────────────
+# Sheet: assets-3.png  1024 × 633 px  (magenta background ≈ (253,35,140))
+#
+# Background removal: pixels where R-G > 80 are magenta and become transparent.
+# This threshold is applied at raw resolution before scaling so anti-aliased
+# edges get natural fade; a second pass after scaling kills any remaining fringe.
+#
+# TILES — row y=25..89, each 73 px wide:
+#   Stone Plains  x=81   ← LIGHT square tile
+#   Cracked Earth x=155  ← DARK square tile
+#
+# BASIC (NEUTRAL) PIECES — body y=498..577 (header "Basic (Neutral) Pieces"
+# above at y≈455..472; labels "King/Queen/..." below at y≈578+):
+#   index 0  x=17   King    w=58
+#   index 1  x=77   Queen   w=65
+#   index 2  x=144  Rook    w=57
+#   index 3  x=205  Bishop  w=59
+#   index 4  x=266  Knight  w=65
+#   index 5  x=333  Pawn    w=40
+#
+_ASSETS_TILE_Y: int = 25
+_ASSETS_TILE_H: int = 65
+_ASSETS_STONE_PLAINS_X: int  = 81   # light square
+_ASSETS_STONE_PLAINS_W: int  = 73
+_ASSETS_CRACKED_EARTH_X: int = 155  # dark square
+_ASSETS_CRACKED_EARTH_W: int = 73
+
+# Basic (Neutral) piece crops — tight content bboxes measured from the sheet.
+# y=490, h=95 covers the maximum artwork height across all six pieces.
+# x/w values come from pixel-scanning the content bounding box of each piece.
+_ASSETS_PIECE_Y: int = 490
+_ASSETS_PIECE_H: int = 95
+_ASSETS_PIECE_ORDER: tuple[str, ...] = (
+    "king", "queen", "rook", "bishop", "knight", "pawn"
+)
+# (x, width) tight content bboxes — artwork starts flush at these sheet coords
+_ASSETS_PIECE_XW: tuple[tuple[int, int], ...] = (
+    (16,  39),   # king
+    (76,  66),   # queen
+    (138, 65),   # rook
+    (195, 69),   # bishop
+    (258, 73),   # knight
+    (330, 32),   # pawn
+)
+
+# Archetype piece crops — (x, y, w, h) per archetype per piece-type.
+# Row order matches _ASSETS_PIECE_ORDER (king,queen,rook,bishop,knight,pawn).
+# Measured from the "Chess Pieces by Archetype (Faction)" grid in assets-3.png.
+# The archetype label icon (shield, axe, skull, etc.) sits at x≈380..455 and is
+# excluded by scanning only x≥455.  All six blobs in the 455..920 range are the
+# actual chess pieces: King, Queen, Rook, Bishop, Knight, Pawn.
+_ARCHETYPE_PIECE_BBOXES: dict[str, tuple[tuple[int, int, int, int], ...]] = {
+    "kingdom":     ((468,27,60,53),(555,27,43,53),(629,27,45,53),(702,27,41,53),(772,27,43,53),(843,27,34,53)),
+    "warrior":     ((471,102,54,50),(549,102,48,50),(623,102,50,50),(698,102,42,50),(767,102,60,50),(841,102,36,50)),
+    "dragon":      ((464,171,64,52),(547,171,61,52),(624,171,51,52),(694,171,55,52),(766,171,57,52),(841,171,41,52)),
+    "spellcaster": ((464,243,59,53),(543,243,56,53),(624,243,51,53),(697,243,48,53),(768,243,51,53),(840,243,38,53)),
+    "assassin":    ((464,315,59,50),(547,315,53,50),(624,315,51,50),(696,315,50,50),(762,315,67,50),(840,315,35,50)),
+    "necromancer": ((467,384,55,50),(540,384,61,50),(624,384,51,50),(697,384,47,50),(764,384,64,50),(841,384,40,50)),
+    "ritualist":   ((464,454,62,52),(545,454,52,52),(615,454,65,52),(697,454,53,52),(768,454,52,52),(840,454,43,52)),
+    "beast":       ((462,527,63,55),(544,527,56,55),(622,527,55,55),(696,527,52,55),(766,527,64,55),(842,527,47,55)),
+}
+
+# Brightness multiplier applied to black piece RGB pixels (0.0 = fully black,
+# 1.0 = no change).  0.15 keeps a faint hint of the original artwork while
+# making the piece read as clearly "black" on both tile colours.
+_BLACK_PIECE_BRIGHTNESS: float = 0.15
+
+# Assassin pieces for the black player are inverted (whitened) instead of
+# darkened, so the light-coloured assassin reads distinctly on dark squares.
+# Value: each channel = 255 - original (PIL ImageOps.invert on RGB channels).
+_ASSASSIN_INVERT_FOR_BLACK: bool = True
+
+# R-G threshold for detecting the magenta background.
+# Pure bg has R-G ≈ 218; piece artwork has R-G ≤ 101.
+# 80 catches fringe/anti-aliased edge pixels without touching artwork.
+_ASSETS_BG_RG_THRESHOLD: int = 80
+
+
 # ── Building sprite sheet ───────────────────────────────────────────────────
 # Sprite-sheet layout: 3 columns × 3 rows.
 # Sheet size: 1536 × 1024 px.
@@ -208,6 +286,188 @@ class BuildingSpriteCache:
         return scaled
 
 
+def _pil_kill_pink(a: "np.ndarray") -> None:
+    """Zero alpha on pixels that are still magenta-ish after scaling (R-G > 60)."""
+    import numpy as np
+    pink = (a[:, :, 0].astype(int) - a[:, :, 1].astype(int)) > 60
+    a[pink, 3] = 0
+
+
+class TileSpriteCache:
+    """
+    Loads ``assets-3.png`` once via PIL and serves pre-scaled Stone Plains
+    (light) and Cracked Earth (dark) tile surfaces, ready to blit at
+    SQUARE_SIZE.
+
+    PIL is used so that the magenta background fringe introduced by LANCZOS
+    scaling can be detected and zeroed via R-G channel difference before the
+    surface is handed to pygame.
+    """
+
+    def __init__(self, sheet_path: str | Path, target_size: int = SQUARE_SIZE) -> None:
+        self._light: pygame.Surface | None = None
+        self._dark: pygame.Surface | None = None
+        try:
+            from PIL import Image
+            import numpy as np
+            img = Image.open(str(sheet_path)).convert("RGBA")
+
+            def _crop_scale(x: int, w: int) -> pygame.Surface:
+                region = img.crop((x, _ASSETS_TILE_Y, x + w, _ASSETS_TILE_Y + _ASSETS_TILE_H))
+                a = np.array(region.convert("RGBA"), dtype=np.uint8)
+                _pil_kill_pink(a)
+                scaled = Image.fromarray(a, "RGBA").resize(
+                    (target_size, target_size), Image.LANCZOS
+                )
+                sa = np.array(scaled, dtype=np.uint8)
+                _pil_kill_pink(sa)
+                # Composite onto an opaque dark background so transparent edge
+                # pixels show the fallback colour rather than magenta.
+                bg = Image.new("RGBA", (target_size, target_size), (60, 50, 40, 255))
+                bg.paste(Image.fromarray(sa, "RGBA"), (0, 0),
+                         Image.fromarray(sa, "RGBA"))
+                mode = bg.mode
+                raw = bg.tobytes()
+                return pygame.image.fromstring(raw, (target_size, target_size), mode)
+
+            self._light = _crop_scale(_ASSETS_STONE_PLAINS_X, _ASSETS_STONE_PLAINS_W)
+            self._dark  = _crop_scale(_ASSETS_CRACKED_EARTH_X, _ASSETS_CRACKED_EARTH_W)
+        except Exception:
+            pass  # graceful fallback: caller checks for None
+
+    def get(self, is_light: bool) -> pygame.Surface | None:
+        return self._light if is_light else self._dark
+
+
+class PieceSpriteCache:
+    """
+    Loads ``assets-3.png`` once via PIL and serves pre-scaled piece surfaces
+    for both the Basic (Neutral) chess set and the per-archetype faction sets.
+
+    Background removal uses an R-G channel difference mask (threshold 80)
+    applied at raw resolution before scaling; a second pass after scaling
+    kills any remaining pink fringe.  Returned surfaces are SRCALPHA with a
+    transparent background — blit directly over the tile sprite.
+
+    Owner colouring rules:
+      • white  → artwork as-is
+      • black, non-assassin → RGB × _BLACK_PIECE_BRIGHTNESS (≈15 %)
+      • black, assassin archetype → RGB inverted (255 − channel) so the
+        light-tone assassin silhouette reads clearly on dark tiles
+    """
+
+    def __init__(self, sheet_path: str | Path, target_size: int = SQUARE_SIZE) -> None:
+        self._cache: dict[tuple[str, str, str], pygame.Surface] = {}
+        self._target = target_size
+        self._img: "Any" = None   # PIL RGBA Image
+        try:
+            from PIL import Image
+            self._img = Image.open(str(sheet_path)).convert("RGBA")
+        except Exception:
+            pass
+
+    # ── internal ──────────────────────────────────────────────────────────
+
+    def _build(self, crop_x: int, crop_y: int, crop_w: int, crop_h: int,
+               owner: str, archetype: str) -> "pygame.Surface":
+        """
+        Crop, clean, colour and scale one piece cell; return an SRCALPHA
+        pygame surface of size (target, target).
+        """
+        import numpy as np
+        from PIL import Image as _PILImage
+
+        t = self._target
+        region = self._img.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+        a = np.array(region.convert("RGBA"), dtype=np.uint8)  # (H, W, 4)
+
+        # Mask magenta bg at raw resolution
+        bg_mask = (
+            a[:, :, 0].astype(int) - a[:, :, 1].astype(int)
+        ) > _ASSETS_BG_RG_THRESHOLD
+        a[:, :, 3] = np.where(bg_mask, 0, 255).astype(np.uint8)
+
+        if owner == "black":
+            art = ~bg_mask
+            if archetype == "assassin" and _ASSASSIN_INVERT_FOR_BLACK:
+                # Invert (whiten) the assassin for the black player
+                a[art, :3] = (255 - a[art, :3].astype(int)).clip(0, 255).astype(np.uint8)
+            else:
+                a[art, :3] = (
+                    a[art, :3].astype(float) * _BLACK_PIECE_BRIGHTNESS
+                ).clip(0, 255).astype(np.uint8)
+
+        # Scale preserving aspect ratio
+        piece_pil = _PILImage.fromarray(a, "RGBA")
+        cw, ch = piece_pil.size
+        new_w = max(1, int(cw * t / ch))
+        scaled = piece_pil.resize((new_w, t), _PILImage.LANCZOS)
+
+        # Kill any remaining pink fringe after scaling
+        sa = np.array(scaled, dtype=np.uint8)
+        _pil_kill_pink(sa)
+
+        # Centre on a square SRCALPHA canvas
+        out_pil = _PILImage.new("RGBA", (t, t), (0, 0, 0, 0))
+        ox = (t - new_w) // 2
+        out_pil.paste(_PILImage.fromarray(sa, "RGBA"), (ox, 0),
+                      _PILImage.fromarray(sa, "RGBA"))
+        raw = out_pil.tobytes()
+        return pygame.image.fromstring(raw, (t, t), "RGBA").convert_alpha()
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def get(
+        self,
+        piece_type: str,
+        owner: str,
+        bg_color: tuple[int, int, int] = (0, 0, 0),  # unused, kept for compat
+    ) -> pygame.Surface | None:
+        """Basic (Neutral) piece sprite — used for plain (unsummoned) pieces."""
+        return self._get_with_archetype(piece_type, owner, "neutral")
+
+    def get_archetype(
+        self,
+        piece_type: str,
+        owner: str,
+        archetype: str,
+    ) -> pygame.Surface | None:
+        """
+        Archetype (faction) piece sprite for a summoned monster.
+        Falls back to the neutral piece if the archetype is unknown.
+        """
+        if archetype not in _ARCHETYPE_PIECE_BBOXES:
+            return self._get_with_archetype(piece_type, owner, "neutral")
+        return self._get_with_archetype(piece_type, owner, archetype)
+
+    def _get_with_archetype(
+        self, piece_type: str, owner: str, archetype: str
+    ) -> pygame.Surface | None:
+        if self._img is None:
+            return None
+        key = (piece_type, owner, archetype)
+        if key in self._cache:
+            return self._cache[key]
+
+        idx = (list(_ASSETS_PIECE_ORDER).index(piece_type)
+               if piece_type in _ASSETS_PIECE_ORDER else -1)
+        if idx < 0:
+            return None
+
+        if archetype == "neutral":
+            px, pw = _ASSETS_PIECE_XW[idx]
+            surf = self._build(px, _ASSETS_PIECE_Y, pw, _ASSETS_PIECE_H, owner, archetype)
+        else:
+            bboxes = _ARCHETYPE_PIECE_BBOXES.get(archetype)
+            if bboxes is None or idx >= len(bboxes):
+                return self._get_with_archetype(piece_type, owner, "neutral")
+            bx, by, bw, bh = bboxes[idx]
+            surf = self._build(bx, by, bw, bh, owner, archetype)
+
+        self._cache[key] = surf
+        return surf
+
+
 def _sq_to_screen(pos: Position, flip: bool = False) -> tuple[int, int]:
     """
     Convert a board Position to the top-left pixel of its square.
@@ -259,12 +519,16 @@ class BoardView:
         font_small: Any,
         flip: bool = False,
         building_sprites: "BuildingSpriteCache | None" = None,
+        tile_sprites: "TileSpriteCache | None" = None,
+        piece_sprites: "PieceSpriteCache | None" = None,
     ) -> None:
         self._surface = surface
         self._font_large = font_large
         self._font_small = font_small
         self._flip = flip
         self._building_sprites: BuildingSpriteCache | None = building_sprites
+        self._tile_sprites: TileSpriteCache | None = tile_sprites
+        self._piece_sprites: PieceSpriteCache | None = piece_sprites
 
         # Pre-allocate overlay surface for alpha blending
         self._overlay = pygame.Surface(
@@ -285,6 +549,7 @@ class BoardView:
         aura_colors: "dict[Position, tuple[int, int, int]] | None" = None,
         show_territory: bool = True,
         crowned_kings: "dict[Position, str] | None" = None,
+        archetype_map: "dict[Position, str] | None" = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -317,6 +582,9 @@ class BoardView:
                               since there's only ever one Crowned King per
                               side. Mirrors aura_colors: this module never
                               looks the card up itself.
+        archetype_map       : Position → archetype string for every summoned
+                              piece. Used to choose the faction sprite instead
+                              of the neutral chess piece.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos,
@@ -326,7 +594,8 @@ class BoardView:
         # ── Stage 8+: building floor + back drawn BEFORE the chess piece ──────
         self._draw_building_floor_and_back(observation)
         # ── Pieces sandwiched between building back and front ─────────────────
-        self._draw_pieces(observation, aura_colors or {}, crowned_kings or {})
+        self._draw_pieces(observation, aura_colors or {}, crowned_kings or {},
+                          archetype_map or {})
         # ── Building front drawn AFTER the chess piece ────────────────────────
         self._draw_building_front_and_banner(observation)
 
@@ -398,7 +667,17 @@ class BoardView:
                 color = LIGHT_SQUARE if is_light else DARK_SQUARE
                 sx, sy = _sq_to_screen(pos, self._flip)
                 rect = pygame.Rect(sx, sy, SQUARE_SIZE, SQUARE_SIZE)
-                pygame.draw.rect(self._surface, color, rect)
+                # Use stone-plains / cracked-earth tile sprites when available,
+                # falling back to flat colors if the cache is absent.
+                tile_surf = (
+                    self._tile_sprites.get(is_light)
+                    if self._tile_sprites is not None
+                    else None
+                )
+                if tile_surf is not None:
+                    self._surface.blit(tile_surf, (sx, sy))
+                else:
+                    pygame.draw.rect(self._surface, color, rect)
 
                 # Stage 9: Territory tint — drawn first so every other zone
                 # tint below still stacks visibly on top of it. A contested
@@ -751,12 +1030,19 @@ class BoardView:
         obs: "Observation",
         aura_colors: "dict[Position, tuple[int, int, int]]",
         crowned_kings: "dict[Position, str]",
+        archetype_map: "dict[Position, str]",
     ) -> None:
-        """Render all pieces as Unicode glyphs centered on their squares.
+        """Render all pieces centered on their squares.
+
+        When a PieceSpriteCache is available:
+          • Unsummoned pieces use the Basic (Neutral) sprite.
+          • Summoned (monster) pieces use the faction sprite for their archetype.
+          • Black pieces are darkened (15 % brightness), except Assassin which
+            is inverted (whitened) so it reads clearly on both tile colours.
+        Falls back to Unicode glyphs when the cache is absent.
 
         Stage 5: monster units get a gold underline bar and a tiny name label.
-        Stage 6: monster units also get a colored aura keyed by archetype
-        (see ui/archetype_colors.py) — drawn first so the glyph sits on top.
+        Stage 6: monster units also get a colored aura keyed by archetype.
         Stage 10: a Crowned King gets its own richer, animated aura, bar,
         name label, and crown badge — see _draw_royal_aura below.
         """
@@ -767,12 +1053,13 @@ class BoardView:
             glyph = glyph_pair[0] if unit_info.owner == "white" else glyph_pair[1]
 
             has_monster = bool(getattr(unit_info, "monster_id", None))
+            archetype = archetype_map.get(pos) if has_monster else None
             king_card_id = crowned_kings.get(pos) if unit_info.piece_type == "king" else None
             is_crowned_king = king_card_id is not None
             text_color = WHITE_PIECE if unit_info.owner == "white" else BLACK_PIECE
             shadow_color = WHITE_PIECE_SHADOW if unit_info.owner == "white" else BLACK_PIECE_SHADOW
 
-            # Stage 6: archetype aura — soft glow + ring, behind the glyph.
+            # Stage 6: archetype aura — soft glow + ring, behind the piece.
             if has_monster and pos in aura_colors:
                 color = aura_colors[pos]
                 aura = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
@@ -783,27 +1070,46 @@ class BoardView:
                 self._surface.blit(aura, (sx, sy))
 
             # Stage 10: Crowned King — richer, animated "royal" aura,
-            # behind the glyph (same channel as the Monster aura above,
-            # but a King is never also a Monster so the two never overlap).
+            # behind the piece (same channel as Monster aura; they never overlap).
             if is_crowned_king:
                 self._draw_royal_aura(sx, sy)
 
-            # Shadow (offset by 1 pixel)
-            shadow = self._font_large.render(glyph, True, shadow_color)
-            sw = shadow.get_width()
-            sh = shadow.get_height()
-            bx = sx + (SQUARE_SIZE - sw) // 2 + 1
-            by = sy + (SQUARE_SIZE - sh) // 2 + 1
-            self._surface.blit(shadow, (bx, by))
+            # ── Piece rendering: sprite or glyph fallback ─────────────────
+            if self._piece_sprites is not None:
+                king_archetype = archetype_map.get(pos) if is_crowned_king else None
+                if has_monster and archetype:
+                    piece_surf = self._piece_sprites.get_archetype(
+                        unit_info.piece_type, unit_info.owner, archetype
+                    )
+                elif is_crowned_king and king_archetype:
+                    piece_surf = self._piece_sprites.get_archetype(
+                        unit_info.piece_type, unit_info.owner, king_archetype
+                    )
+                else:
+                    piece_surf = self._piece_sprites.get(
+                        unit_info.piece_type, unit_info.owner
+                    )
+            else:
+                piece_surf = None
+            if piece_surf is not None:
+                # Sprite path — blit the pre-rendered square-sized surface
+                self._surface.blit(piece_surf, (sx, sy))
+            else:
+                # Glyph fallback (no cache or unknown piece type)
+                shadow = self._font_large.render(glyph, True, shadow_color)
+                sw = shadow.get_width()
+                sh = shadow.get_height()
+                bx = sx + (SQUARE_SIZE - sw) // 2 + 1
+                by = sy + (SQUARE_SIZE - sh) // 2 + 1
+                self._surface.blit(shadow, (bx, by))
 
-            # Glyph (shifted slightly upward when monster label is shown)
-            text = self._font_large.render(glyph, True, text_color)
-            tw = text.get_width()
-            th = text.get_height()
-            glyph_offset_y = -6 if has_monster else 0
-            bx = sx + (SQUARE_SIZE - tw) // 2
-            by = sy + (SQUARE_SIZE - th) // 2 + glyph_offset_y
-            self._surface.blit(text, (bx, by))
+                glyph_offset_y = -6 if has_monster else 0
+                text = self._font_large.render(glyph, True, text_color)
+                tw = text.get_width()
+                th = text.get_height()
+                bx = sx + (SQUARE_SIZE - tw) // 2
+                by = sy + (SQUARE_SIZE - th) // 2 + glyph_offset_y
+                self._surface.blit(text, (bx, by))
 
             # Stage 5: gold underline bar + monster name for transformed pieces
             if has_monster:
