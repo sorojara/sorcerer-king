@@ -7,8 +7,8 @@ Effect types in this category
 freeze_square          IMPLEMENTED  — lock landing square after capture
 scorch_square          IMPLEMENTED  — destroy units entering square (ember_drake)
 movement_restriction   IMPLEMENTED  — limit enemy movement range (astral_binder)
-suppress_spell_zone    STUB         — disable spell effects in radius (Stage 6+,
-                                       needs the Spell/Trap zone system)
+suppress_spell_zone    IMPLEMENTED  — neutralise continuous Spell zone effects
+                                       (blocked:/cursed:) within radius (spellbreaker)
 damage_aura            IMPLEMENTED  — destroy pieces entering radius (dragon_herald)
 immobilize_zone        IMPLEMENTED  — Stage 6: ANY piece that ends its move
                                        here gets immobilized, unlike
@@ -148,20 +148,21 @@ def _movement_restriction(ctx: "EffectContext") -> None:
 
 def _suppress_spell_zone(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 6+
+    IMPLEMENTED — spellbreaker passive aura (real logic lives elsewhere).
 
-    Continuous Spell effects whose affected squares overlap this monster's
-    ``radius`` are suppressed while the monster is alive.
-
-    When implemented this will:
-      1. During spell-resolution (Stage 6): check all active spell zones for
-         overlap with this monster's suppress radius.
-      2. Overlapping spell effects are skipped for the duration.
+    Continuous Spell zone effects (``blocked:`` — veil_of_stillness,
+    ``cursed:`` — cursed_ground) whose square lies within ``radius`` of a
+    spellbreaker are neutralised for BOTH sides, regardless of who cast
+    them — spellbreaker "denies" that ground rather than merely defending
+    it. Queried live via ``mechanics.monsters.is_spell_zone_suppressed()``
+    from chess.movement's blocked-square filter and from
+    ``check_immobilize_zone()`` (cursed_ground's read side), matching how
+    damage_aura is scanned live rather than armed as a status. This entry
+    exists in the registry so the type is recognised and doesn't log to
+    UNRESOLVED_EFFECTS.
     """
-    raise NotImplementedError(
-        "suppress_spell_zone is not yet implemented (Stage 6+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    # Actual implementation lives in mechanics.monsters.is_spell_zone_suppressed().
+    pass
 
 
 # ---------------------------------------------------------------------------

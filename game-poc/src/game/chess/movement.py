@@ -103,6 +103,7 @@ def get_pseudo_legal_moves(
     unit: UnitInstance,
     en_passant_target: Position | None = None,
     registry: "object | None" = None,
+    state: "object | None" = None,
 ) -> list[Position]:
     """
     Return all candidate destination squares for ``unit`` at ``pos``.
@@ -116,6 +117,17 @@ def get_pseudo_legal_moves(
 
     Stage 6: an "immobilized:N" unit (pit_trap, ward_of_binding) has zero
     legal moves until the status expires — it may still be captured.
+
+    ``state`` (the full GameState, optional — most callers only need
+    ``board``) additionally enables two GameState-aware monster bonuses:
+    moon_stalker's territory_bonus and crypt_walker's
+    graveyard_scaling_movement (see mechanics.monsters.
+    get_movement_additions), and lets spellbreaker's suppress_spell_zone
+    neutralise a ``blocked:`` zone (veil_of_stillness) within its radius.
+    Callers that omit it (check detection, castling safety) simply don't
+    get those two bonuses/exemptions factored in — a pre-existing
+    simplification also true of the movement_restriction cap below, which
+    already only reads from ``board``/``registry``.
     """
     from game.cards.card import MonsterCard
 
@@ -125,6 +137,23 @@ def get_pseudo_legal_moves(
     owner = unit.owner
     pt = unit.piece.piece_type
     moves: list[Position] = []
+
+    # Look up the monster card once (used by the Pawn pass_through_units
+    # check below AND the movement-additions block further down).
+    card: "MonsterCard | None" = None
+    if unit.monster_id is not None and registry is not None:
+        try:
+            _c = registry.get(unit.monster_id)
+        except KeyError:
+            _c = None
+        if _c is not None and isinstance(_c, MonsterCard):
+            card = _c
+
+    pass_through = 0
+    if card is not None:
+        for effect in card.effects:
+            if effect.type == "pass_through_units":
+                pass_through = max(pass_through, effect.params.get("max_units", 1))
 
     # ── Sliding / step pieces ─────────────────────────────────────────────
 
@@ -165,17 +194,24 @@ def get_pseudo_legal_moves(
 
         # Single forward push — guard bounds before constructing Position
         fwd_rank = pos.rank + direction
+        fwd_empty = False
         if 0 <= fwd_rank <= 7:
             fwd = Position(pos.file, fwd_rank)
-            if board.get_unit(fwd) is None:
+            fwd_empty = board.get_unit(fwd) is None
+            if fwd_empty:
                 moves.append(fwd)
-                # Double push only from starting rank and only if single-push clear
-                if pos.rank == start_rank:
-                    fwd2_rank = pos.rank + 2 * direction
-                    if 0 <= fwd2_rank <= 7:
-                        fwd2 = Position(pos.file, fwd2_rank)
-                        if board.get_unit(fwd2) is None:
-                            moves.append(fwd2)
+            # Double push only from starting rank. Normally also requires
+            # the intermediate square to be empty — phantom_lancer's
+            # pass_through_units lets it phase through ONE occupied
+            # square there instead (the final destination must still be
+            # empty either way; "cannot end movement on an occupied
+            # square").
+            if pos.rank == start_rank and (fwd_empty or pass_through >= 1):
+                fwd2_rank = pos.rank + 2 * direction
+                if 0 <= fwd2_rank <= 7:
+                    fwd2 = Position(pos.file, fwd2_rank)
+                    if board.get_unit(fwd2) is None:
+                        moves.append(fwd2)
 
         # Diagonal captures (normal + en passant)
         for df in (-1, 1):
@@ -199,34 +235,36 @@ def get_pseudo_legal_moves(
                 moves.append(cap_sq)
 
     # ── Stage 5: Monster movement additions ──────────────────────────────
-    if unit.monster_id is not None and registry is not None:
-        try:
-            card = registry.get(unit.monster_id)
-        except KeyError:
-            card = None
-        if card is not None and isinstance(card, MonsterCard):
-            from game.mechanics.monsters import get_movement_additions
-            for df, dr in get_movement_additions(unit, card):
-                f, r = pos.file + df, pos.rank + dr
-                if 0 <= f <= 7 and 0 <= r <= 7:
-                    candidate = Position(f, r)
-                    occupant = board.get_unit(candidate)
-                    # Can land on empty square or capture enemy
-                    if occupant is None or occupant.owner != owner:
-                        if candidate not in moves:
-                            moves.append(candidate)
+    if card is not None:
+        from game.mechanics.monsters import get_movement_additions
+        for df, dr in get_movement_additions(unit, card, state=state, position=pos, registry=registry):
+            f, r = pos.file + df, pos.rank + dr
+            if 0 <= f <= 7 and 0 <= r <= 7:
+                candidate = Position(f, r)
+                occupant = board.get_unit(candidate)
+                # Can land on empty square or capture enemy
+                if occupant is None or occupant.owner != owner:
+                    if candidate not in moves:
+                        moves.append(candidate)
 
-    # ── Stage 5/6: frozen / blocked squares cannot be entered ────────────
-    # "blocked" is veil_of_stillness's zone (Stage 6) — same square-effect
-    # mechanism as "frozen", just a different spatial extent (a whole file
-    # via shape: column rather than one landing square).
+    # ── Stage 5/6: frozen squares cannot be entered ───────────────────────
     moves = [
         m for m in moves
-        if not any(
-            eff.startswith("frozen:") or eff.startswith("blocked:")
-            for eff in board.get_square(m).temporary_effects
-        )
+        if not any(eff.startswith("frozen:") for eff in board.get_square(m).temporary_effects)
     ]
+
+    # ── Stage 6: blocked squares (veil_of_stillness) cannot be entered,
+    # UNLESS a spellbreaker's suppress_spell_zone neutralises this square.
+    def _blocked(m: Position) -> bool:
+        if not any(eff.startswith("blocked:") for eff in board.get_square(m).temporary_effects):
+            return False
+        if state is not None:
+            from game.mechanics.monsters import is_spell_zone_suppressed
+            if is_spell_zone_suppressed(state, m, registry):
+                return False
+        return True
+
+    moves = [m for m in moves if not _blocked(m)]
 
     # ── Stage 5: enemy movement_restriction aura (astral_binder) ─────────
     # Enemy monsters may cap how far this unit can move per action.
@@ -238,6 +276,36 @@ def get_pseudo_legal_moves(
                 m for m in moves
                 if abs(m.file - pos.file) <= cap and abs(m.rank - pos.rank) <= cap
             ]
+
+    # ── duelist's challenge_unit ───────────────────────────────────────────
+    # This unit under challenge: captures are restricted to the challenger.
+    challenger_id = None
+    for status in unit.statuses:
+        if status.startswith("challenged_by:"):
+            challenger_id = status.split(":")[1]
+            break
+    if challenger_id is not None:
+        moves = [
+            m for m in moves
+            if board.get_unit(m) is None or board.get_unit(m).piece.id == challenger_id
+        ]
+
+    # Any OTHER unit trying to capture a challenged enemy: only the
+    # challenger may do so.
+    filtered: list[Position] = []
+    for m in moves:
+        occ = board.get_unit(m)
+        if occ is not None:
+            blocked_by_challenge = False
+            for status in occ.statuses:
+                if status.startswith("challenged_by:"):
+                    if status.split(":")[1] != unit.piece.id:
+                        blocked_by_challenge = True
+                    break
+            if blocked_by_challenge:
+                continue
+        filtered.append(m)
+    moves = filtered
 
     return moves
 
@@ -416,6 +484,7 @@ def get_legal_moves(
     castling_rights: "CastlingRights | None" = None,
     player_id: str = "",
     registry: "object | None" = None,
+    state: "object | None" = None,
 ) -> list[Position]:
     """
     Return all fully-legal destination squares for ``unit`` at ``pos``.
@@ -424,10 +493,12 @@ def get_legal_moves(
     Does NOT include the castling destinations (castle is a separate action).
 
     Stage 5: ``registry`` is forwarded to get_pseudo_legal_moves so monster
-    movement additions participate in check filtering correctly.
+    movement additions participate in check filtering correctly. ``state``
+    (optional) additionally enables the GameState-aware bonuses documented
+    on get_pseudo_legal_moves.
     """
     legal: list[Position] = []
-    for target in get_pseudo_legal_moves(board, pos, unit, en_passant_target, registry=registry):
+    for target in get_pseudo_legal_moves(board, pos, unit, en_passant_target, registry=registry, state=state):
         sim = deepcopy(board)
 
         # En passant: also remove the captured pawn from its real square

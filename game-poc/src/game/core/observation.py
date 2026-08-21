@@ -207,6 +207,35 @@ class Observation:
 # Observation builder
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _obscured_by_veil_conjurer(state: "GameState", pos: "Position", registry: "object | None") -> bool:
+    """True if ``pos`` lies within radius of ANY monster (either side)
+    carrying ``obscure_influence`` (veil_conjurer)."""
+    if registry is None:
+        return False
+    from game.cards.card import MonsterCard
+
+    for owner in ("white", "black"):
+        for spos, unit in state.board.all_units_for(owner):
+            if unit.monster_id is None:
+                continue
+            try:
+                card = registry.get(unit.monster_id)
+            except KeyError:
+                continue
+            if not isinstance(card, MonsterCard):
+                continue
+            for effect in card.effects:
+                if effect.type != "obscure_influence":
+                    continue
+                radius = effect.params.get("radius", 1)
+                if (
+                    abs(pos.file - spos.file) <= radius
+                    and abs(pos.rank - spos.rank) <= radius
+                ):
+                    return True
+    return False
+
+
 def build_observation(
     state: "GameState",
     player_id: str,
@@ -262,6 +291,19 @@ def build_observation(
             duration = int(parts[1]) if len(parts) > 1 else 0
             owner = parts[2] if len(parts) > 2 else None
             card_id = parts[3] if len(parts) > 3 and parts[3] != "-" else None
+            # veil_conjurer's obscure_influence: within radius of a
+            # veil_conjurer, this square's EXACT modifier (which card
+            # caused it) is hidden from anyone who isn't the effect's own
+            # owner and doesn't currently have a unit standing on the
+            # square ("opponents cannot inspect the exact secondary
+            # modifiers... until they enter the area" — the effect_type/
+            # duration themselves stay visible, only card_id is hidden).
+            observer_occupies = (
+                (occ := state.board.get_unit(pos)) is not None and occ.owner == player_id
+            )
+            if card_id is not None and owner != player_id and not observer_occupies:
+                if _obscured_by_veil_conjurer(state, pos, _registry):
+                    card_id = None
             square_effects.append(PublicSquareEffect(
                 position=pos, effect_type=effect_type,
                 duration_turns=duration, owner=owner, card_id=card_id,
@@ -294,12 +336,19 @@ def build_observation(
         if rs.revelation == RevelationState.SEALED:
             opp_ritual_info.append(PublicRitualInfo(revelation=RevelationState.SEALED))
         elif rs.revelation == RevelationState.FORETOLD:
-            # Would include archetype/vessel from card registry — placeholder
+            # Stage 11: partial reveal (README §15 example) — archetype +
+            # required Vessel only, never the exact pattern/summon.
+            archetype = None
+            required_vessel = None
+            if registry is not None and rs.ritual_id in registry:
+                ritual_card = registry.get(rs.ritual_id)
+                archetype = getattr(ritual_card, "archetype", None)
+                required_vessel = getattr(ritual_card, "required_vessel", None)
             opp_ritual_info.append(
                 PublicRitualInfo(
                     revelation=RevelationState.FORETOLD,
-                    archetype=None,     # populated from card registry in Stage 11
-                    required_vessel=None,
+                    archetype=archetype,
+                    required_vessel=required_vessel,
                 )
             )
         else:  # REVEALED

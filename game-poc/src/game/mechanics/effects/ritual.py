@@ -4,10 +4,28 @@ mechanics/effects/ritual.py — RITUAL category
 
 Effect types in this category
 ------------------------------
-ritual_progress_boost           IMPLEMENTED  — advance ritual counter (passive flag)
-ritual_pattern_substitute       STUB         — count as generic ritual component (Stage 11+)
-ritual_requirement_reduction    STUB         — reduce ritual req by 1 (Stage 11+)
-ritual_reveal_tradeoff          STUB         — reveal own ritual to draw (Stage 11+)
+ritual_progress_boost           IMPLEMENTED (unit-level flag; Stage 11's
+                                 actual progress accounting is a direct
+                                 board scan — see below)
+ritual_pattern_substitute       IMPLEMENTED — Stage 11 — generic ritual
+                                 component (mechanics/rituals.py's pattern
+                                 matcher reads the status this arms)
+ritual_requirement_reduction    IMPLEMENTED — Stage 11 — reduce a chosen
+                                 Ritual's requirement by 1, once
+ritual_reveal_tradeoff          IMPLEMENTED — Stage 11 — reveal own ritual
+                                 to draw
+
+Stage 11 wiring note: ``ritual_progress_boost`` (ritual_acolyte)'s actual
+effect — advancing a Ritual's revelation progress — is NOT applied via this
+handler. Its trigger is "end_of_turn", which apply_on_summon_effects
+deliberately never fires (that pipeline only fires on_summon-compatible
+triggers). Instead core/rules.py._execute_end_turn calls
+mechanics.rituals.advance_ritual_progress(), which scans the ending
+player's board directly for this effect type each turn (mirroring how
+_resolve_restore_effect_charge handles battlefield_medic). The handler
+below still arms a cosmetic ``ritual_boost:N`` status on summon for
+anything that might want to display it; it plays no role in the actual
+progress accounting.
 """
 
 from __future__ import annotations
@@ -24,10 +42,9 @@ if TYPE_CHECKING:
 
 def _ritual_progress_boost(ctx: "EffectContext") -> None:
     """
-    IMPLEMENTED — flag applied at summon time.
-
-    Adds a ``ritual_boost:N`` status to the unit.  End-of-turn ritual
-    processing (Stage 11) reads this flag and advances the ritual counter.
+    Cosmetic on-summon flag only — see module docstring for where the real
+    progress accounting happens (mechanics.rituals.advance_ritual_progress,
+    called every end-of-turn, not through this handler).
     """
     if ctx.unit is None:
         return
@@ -46,18 +63,21 @@ def _ritual_progress_boost(ctx: "EffectContext") -> None:
 
 def _ritual_pattern_substitute(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 11+
+    IMPLEMENTED — Stage 11 (circle_keeper).
 
-    This monster counts as one compatible generic ritual component for a
-    ritual pattern formed within ``condition.within_radius`` squares.
-
-    When implemented this will participate in the ritual-pattern matching
-    algorithm in the RulesEngine's ritual resolution pass.
+    On-summon: arms a ``ritual_substitute`` status on this unit. When
+    validating or enumerating a Formation Ritual (mechanics/rituals.py
+    _node_matches), a unit carrying this status satisfies ANY pattern
+    node's piece_type requirement, as long as it still occupies the exact
+    board offset that node demands — "counts as one compatible generic
+    ritual component". The card's own ``condition.within_radius`` isn't
+    separately modeled: the PoC keeps the substitution scoped to "this
+    unit, wherever it stands", rather than adding a second radius-search
+    pass to the pattern matcher for a one-card feature.
     """
-    raise NotImplementedError(
-        "ritual_pattern_substitute is not yet implemented (Stage 11+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    if ctx.unit is None:
+        return
+    ctx.unit.add_status("ritual_substitute")
 
 
 # ---------------------------------------------------------------------------
@@ -66,21 +86,53 @@ def _ritual_pattern_substitute(ctx: "EffectContext") -> None:
 
 def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 11+
+    IMPLEMENTED — Stage 11 (forbidden_priest).
 
-    Once per summon, reduce one ritual requirement by ``amount``.
-    The ritual must become fully REVEALED (``cost.reveal_ritual: true``)
-    and this effect is consumed (``cost.retire_after_use: true``).
+    Two-phase, matching the card text ("Once per summon, reduce one Ritual
+    requirement by 1... Forbidden Priest loses this effect afterward"):
 
-    When implemented this will:
-      1. Mark the unit with a "req_reduction:available" status.
-      2. Provide a REDUCE_RITUAL_REQ action type during PREPARATION.
-      3. Consume the status and reveal the ritual on use.
+      on_summon  — arms a "req_reduction:available" status (unconsumed).
+      activated  — (ACTIVATED_EFFECT_TYPES; fired via ActivateMonsterAbility
+                   during CHESS) consumes that status and applies
+                   ``amount`` to ``ctx.extra["target"]`` (a ritual_id in the
+                   owner's own pool that isn't REVEALED yet), forcing that
+                   Ritual to REVEALED and bumping its RitualState.
+                   requirement_reduction — see mechanics/rituals.py
+                   _effective_min_material / _effective_min_sacrifices /
+                   _effective_pattern_nodes for how each condition type
+                   spends it.
     """
     if ctx.unit is None:
         return
-    ctx.unit.add_status("req_reduction:available")
-    # NOTE: active resolution deferred to Stage 11+.
+
+    if ctx.trigger != "activated":
+        ctx.unit.add_status("req_reduction:available")
+        return
+
+    if "req_reduction:available" not in ctx.unit.statuses:
+        return
+    ritual_id = (ctx.extra or {}).get("target")
+    if not ritual_id or ctx.state is None:
+        return
+
+    from game.core.phases import RevelationState
+    from game.core.events import RitualRevelationChanged
+    from game.mechanics.rituals import get_ritual_state
+
+    rstate = get_ritual_state(ctx.state, ctx.unit.owner, ritual_id)
+    if rstate is None or rstate.activated or rstate.revelation == RevelationState.REVEALED:
+        return
+
+    ctx.unit.remove_status("req_reduction:available")
+    amount = ctx.effect.params.get("amount", 1)
+    rstate.requirement_reduction += amount
+
+    old = rstate.revelation
+    rstate.revelation = RevelationState.REVEALED
+    ctx.events.append(RitualRevelationChanged(
+        player_id=ctx.unit.owner, ritual_id=ritual_id,
+        old_state=old, new_state=RevelationState.REVEALED,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -89,20 +141,52 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
 
 def _ritual_reveal_tradeoff(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 11+
+    IMPLEMENTED — Stage 11 (omen_reader), README §15.2 "Information as a
+    Resource".
 
-    On summon: the player may choose to reveal one SEALED ritual to draw
-    ``draw_cards`` cards in return (``reveal_own: 1``).
-
-    When implemented this will:
-      1. At on_summon: raise a CHOOSE_REVEAL_TRADEOFF PendingDecision.
-      2. If the player accepts: advance the ritual's revelation state and
-         trigger a draw_card effect.
+    On summon: if the owner has any Ritual that isn't yet REVEALED, reveal
+    it one step (SEALED→FORETOLD or FORETOLD→REVEALED — see
+    mechanics.rituals.promote_one_step; matches every OTHER revelation
+    trigger's "never skip a step" rule) and draw ``draw_cards`` cards.
+    Unconditional/automatic rather than an explicit player choice — no
+    PendingDecision is raised — matching how apprentice_mage's unconditional
+    draw_card already works; there is exactly one SEALED-or-FORETOLD Ritual
+    worth targeting most of the time (data/rituals.yaml ships 3), so the
+    "which one" choice rarely matters and always targets the pool's first
+    not-yet-REVEALED entry (pool order).
     """
-    raise NotImplementedError(
-        "ritual_reveal_tradeoff is not yet implemented (Stage 11+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    if ctx.unit is None or ctx.state is None:
+        return
+    params = ctx.effect.params
+    trigger = params.get("trigger", "on_summon")
+    if trigger not in ("on_summon", "passive", ""):
+        return
+
+    from game.core.phases import RevelationState
+    from game.mechanics.rituals import promote_one_step
+
+    owner = ctx.unit.owner
+    ps = ctx.state.get_player(owner)
+    target = next((rs for rs in ps.ritual_pool if rs.revelation != RevelationState.REVEALED), None)
+    if target is None:
+        return
+    if not promote_one_step(ctx.state, owner, target.ritual_id, ctx.events):
+        return
+
+    from game.core.events import CardDrawn, DeckRecycled
+
+    count = params.get("draw_cards", 1)
+    for _ in range(count):
+        if not ps.deck and ps.graveyard:
+            ps.deck = list(ps.graveyard)
+            ps.graveyard.clear()
+            if ctx.rng is not None:
+                ctx.rng.shuffle(ps.deck)
+            ctx.events.append(DeckRecycled(player_id=owner, card_count=len(ps.deck)))
+        if ps.deck:
+            card_id = ps.deck.pop(0)
+            ps.hand.append(card_id)
+            ctx.events.append(CardDrawn(player_id=owner, card_id=card_id))
 
 
 # ---------------------------------------------------------------------------

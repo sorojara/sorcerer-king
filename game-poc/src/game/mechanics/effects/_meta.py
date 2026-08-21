@@ -13,49 +13,53 @@ vessel_support               IMPLEMENTED — allow extra vessel types in radius
                                   mechanics.monsters.get_extra_vessel_types(),
                                   wired into SummonMonster legal-action
                                   generation + validation)
-ignore_terrain               STUB  — skip building/territory movement costs
-                                  (needs the Building/Territory systems)
-building_damage_bonus       STUB  — destroy buildings on capture (needs the
-                                  Building system)
-building_capture_protection STUB  — absorb building-destroy attempts (needs
-                                  the Building system)
-weakened_target_bonus       IMPLEMENTED (flag only) — bypasses an adjacent
-                                  retaliate effect; see
+ignore_terrain               ARMED, DORMANT — no Building/Territory movement
+                                  restriction exists anywhere in this engine
+                                  to ignore; flag is armed for a future one
+building_damage_bonus       ARMED, DORMANT — no action lets a piece attack a
+                                  COMPLETE Building (README §11: "do not
+                                  normally capture"); flag armed for later
+building_capture_protection ARMED, DORMANT — same blocker as building_damage_bonus
+weakened_target_bonus       IMPLEMENTED — bypasses an adjacent retaliate
+                                  effect ONLY when the retaliating unit's own
+                                  capture_protection was already spent; see
                                   mechanics.monsters.apply_retaliate()
 restore_effect_charge       IMPLEMENTED — restore a spent effect charge to an
                                   adjacent ally at end of the owner's own turn
                                   (battlefield_medic; resolved in
                                   _execute_end_turn)
-challenge_unit               STUB (flag only) — restrict an adjacent unit to
-                                  fight only this one; the flag is armed but
-                                  capture-legality enforcement is deferred
-                                  (needs two-sided move-generation changes)
-territory_bonus              STUB  — extra mobility in enemy territory (needs
-                                  the Territory system)
-graveyard_inspect            STUB  — view own graveyard (needs private/public
-                                  Observation plumbing for deck contents)
-graveyard_counter            STUB (flag only) — passive counter from
-                                  destroyed allies (needs a generic
-                                  event-triggered passive-effect scanner)
-capture_protection_from_counter STUB  — shield charges from counter (depends
-                                  on graveyard_counter above)
-dismiss_monster              STUB  — activated dismiss of an ADJACENT ally
-                                  (distinct from the player's own
-                                  DismissMonster action, which already
-                                  works); needs a target-selection
-                                  PendingDecision flow not yet built
-graveyard_scaling_movement  STUB (flag only) — leap bonus at graveyard
-                                  threshold (get_movement_additions() has no
-                                  GameState/graveyard access at its call site)
-death_trigger_draw          STUB (flag only) — draw on ally death (needs the
-                                  same event-triggered scanner as
-                                  graveyard_counter)
-sacrifice_bonus              STUB (flag only) — extra ritual progress when
-                                  sacrificed (needs the Ritual system)
-ritual_activation_range     STUB (flag only) — extend ritual pattern range
-                                  (needs the Ritual system)
-restore_builder              STUB  — restore builder token to pawn (needs the
-                                  Building system)
+challenge_unit               IMPLEMENTED — restrict an adjacent enemy to
+                                  fight only the duelist for duration_turns;
+                                  enforced in chess.movement.get_pseudo_legal_moves
+territory_bonus              IMPLEMENTED — extra leap mobility while standing
+                                  in enemy Territory (moon_stalker); read by
+                                  mechanics.monsters.get_movement_additions()
+graveyard_inspect            IMPLEMENTED — private GraveyardInspected event
+                                  revealing the owner's own Graveyard (grave_scholar)
+graveyard_counter            IMPLEMENTED — passive counter from destroyed
+                                  allies; incremented centrally in
+                                  RulesEngine._apply_death_triggered_effects
+capture_protection_from_counter IMPLEMENTED — shield charges from the
+                                  graveyard_counter threshold (same central hook)
+dismiss_monster              IMPLEMENTED — activated dismiss of an ADJACENT
+                                  ally to the Graveyard (vessel_reclaimer;
+                                  distinct from the player's own DismissMonster
+                                  action, which targets self and returns to hand)
+graveyard_scaling_movement  IMPLEMENTED — leap bonus once the owner's
+                                  Graveyard reaches a threshold (crypt_walker);
+                                  read by get_movement_additions()
+death_trigger_draw          IMPLEMENTED — draw once per turn on an allied
+                                  Monster's death; same central hook as
+                                  graveyard_counter
+sacrifice_bonus              IMPLEMENTED — extra Ritual progress when this
+                                  unit is a pure Ritual sacrifice (blood_seer);
+                                  consumed in mechanics.rituals.execute_ritual()
+ritual_activation_range     IMPLEMENTED — extends Formation Ritual node
+                                  matching by radius_bonus (herald_of_the_gate);
+                                  consumed in mechanics.rituals pattern matcher
+restore_builder              IMPLEMENTED — on summon, restore the Builder
+                                  token to one adjacent Pawn that already
+                                  spent it (guild_foreman)
 capture_then_retreat        IMPLEMENTED — post-capture retreat away from the
                                   enemy King (dusk_reaver; reuses the
                                   REPOSITION PendingDecision machinery)
@@ -65,6 +69,10 @@ spell_radius_bonus          IMPLEMENTED (flag only)
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from game.logger import get_logger
+
+_log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from game.mechanics.effects.registry import EffectContext
@@ -208,37 +216,72 @@ def _vessel_support(ctx: "EffectContext") -> None:
 
 
 def _ignore_terrain(ctx: "EffectContext") -> None:
-    """STUB — Stage 8+. Ignore building/territory movement restrictions."""
+    """
+    ARMED, DORMANT — sky_serpent. Nothing in this engine currently makes
+    Buildings or Territory restrict movement (no such restriction exists
+    to ignore — grep confirms chess.movement never reads ``building_id``
+    and Territory only ever gates SummonMonster/Trap/Spell placement, not
+    movement). The status is armed so a future movement restriction can
+    consult it, but today it has no observable effect. Flagged to the
+    user rather than inventing a new movement-restriction mechanic
+    unprompted.
+    """
     if ctx.unit is None:
         return
     params = ctx.effect.params
     if params.get("buildings"):
         ctx.unit.add_status("ignore_building_terrain")
-    # NOTE: movement generation must check this status (Stage 8+).
 
 
 def _building_damage_bonus(ctx: "EffectContext") -> None:
-    """STUB — Stage 8+. Buildings captured by this monster are destroyed immediately."""
+    """
+    ARMED, DORMANT — obsidian_dragon. README §11 says Buildings "do not
+    normally capture", and indeed no action in this engine lets a piece
+    attack/capture a COMPLETE Building (the only destruction paths are
+    construction-disruption — capturing the committed Builder Pawn — and
+    the King Succession sacrifice, neither of which is "this monster
+    capturing a Building"). The status is armed so a future
+    attack-a-building action can consult it, but today it has no
+    observable effect.
+    """
     if ctx.unit is None:
         return
     ctx.unit.add_status("building_destroyer")
-    # NOTE: building capture must check this status (Stage 8+).
 
 
 def _building_capture_protection(ctx: "EffectContext") -> None:
-    """STUB — Stage 8+. First destroy-attempt on nearby allied building fails."""
-    raise NotImplementedError(
-        "building_capture_protection is not yet implemented (Stage 8+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    ARMED, DORMANT — castle_keeper. Same blocker as building_damage_bonus:
+    there is no "attempt to destroy a Building" action to protect against
+    today. Arms a status (rather than raising) so summoning castle_keeper
+    no longer crashes; still a no-op until a building-attack mechanic
+    exists.
+    """
+    if ctx.unit is None:
+        return
+    radius = ctx.effect.params.get("radius", 1)
+    uses = ctx.effect.params.get("uses", 1)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("building_capture_protection:")
+    ]
+    ctx.unit.add_status(f"building_capture_protection:{radius}:{uses}")
 
 
 def _weakened_target_bonus(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Guaranteed capture of shield-depleted units."""
+    """
+    IMPLEMENTED — executioner.
+
+    Arms ``guaranteed_capture_vs_no_shield`` on summon. Consumed in
+    ``mechanics.monsters.apply_retaliate()``, which now also checks the
+    card's own condition ("capture_protection_remaining: 0") — the
+    bypass only fires when the retaliating unit had no capture_protection
+    shield left at the moment it was captured, matching "Excels against
+    units whose defensive effects have already been spent" instead of
+    unconditionally voiding every retaliate.
+    """
     if ctx.unit is None:
         return
     ctx.unit.add_status("guaranteed_capture_vs_no_shield")
-    # NOTE: capture validation must check this status (Stage 7+).
 
 
 def _restore_effect_charge(ctx: "EffectContext") -> None:
@@ -257,100 +300,269 @@ def _restore_effect_charge(ctx: "EffectContext") -> None:
 
 
 def _challenge_unit(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Restrict adjacent enemy to fight only this unit for 1 turn.
-
-    Records a status to mark that a challenge was issued.  The movement-
-    restriction logic that enforces the challenge will be wired up in Stage 7.
     """
-    if ctx.unit is None:
+    IMPLEMENTED — duelist activated ability.
+
+    ``ctx.extra["target"]`` is an (file, rank) tuple naming an adjacent
+    enemy unit (enumerated by RulesEngine.get_legal_actions — one
+    ActivateMonsterAbility per adjacent enemy). Tags the TARGET (not the
+    duelist) with ``challenged_by:<duelist_piece_id>:<duration_turns>``.
+
+    Enforcement lives in chess.movement.get_pseudo_legal_moves():
+      • the challenged unit's own captures are restricted to the duelist,
+      • every OTHER unit's captures against the challenged unit are
+        illegal — only the duelist may capture it.
+    Decays on the challenged unit OWNER's own EndTurn (mirrors
+    immobilized/exposed — "until the next turn").
+    """
+    from game.chess.pieces import Position
+    from game.core.rules import IllegalActionError
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
         return
+    target = (ctx.extra or {}).get("target")
+    if target is None:
+        raise IllegalActionError("challenge_unit requires an adjacent enemy target.")
+    tf, tr = target
+    if max(abs(tf - ctx.position.file), abs(tr - ctx.position.rank)) != 1:
+        raise IllegalActionError("challenge_unit target must be adjacent.")
+    target_pos = Position(tf, tr)
+    target_unit = ctx.state.board.get_unit(target_pos)
+    if target_unit is None or target_unit.owner == ctx.unit.owner:
+        raise IllegalActionError("challenge_unit target must be an adjacent enemy unit.")
+
     duration = ctx.effect.params.get("duration_turns", 1)
-    ctx.unit.add_status(f"challenge_issued:{duration}")
+    target_unit.statuses = [
+        s for s in target_unit.statuses if not s.startswith("challenged_by:")
+    ]
+    target_unit.add_status(f"challenged_by:{ctx.unit.piece.id}:{duration}")
 
 
 def _territory_bonus(ctx: "EffectContext") -> None:
-    """STUB — Stage 8+. Extra movement in enemy territory."""
+    """
+    IMPLEMENTED — moon_stalker. Arms ``territory_movement_bonus:N``, read
+    by ``mechanics.monsters.get_movement_additions()`` (called from
+    chess.movement.get_pseudo_legal_moves with the GameState/registry it
+    needs to test ``territory.is_in_territory`` against the OPPONENT's
+    Territory) — adds N cardinal-direction leap squares, same shape as
+    alter_movement's add_leap, while the unit currently stands inside
+    enemy-controlled Territory.
+    """
     if ctx.unit is None:
         return
     bonus = ctx.effect.params.get("movement_bonus", 1)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("territory_movement_bonus:")
+    ]
     ctx.unit.add_status(f"territory_movement_bonus:{bonus}")
-    # NOTE: movement generation must check this status (Stage 8+).
 
 
 def _graveyard_inspect(ctx: "EffectContext") -> None:
-    """STUB — Stage 6+. View own graveyard contents on summon."""
-    raise NotImplementedError(
-        "graveyard_inspect is not yet implemented (Stage 6+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — grave_scholar on_summon. Reveals the owner's own
+    Graveyard contents via a private GraveyardInspected event (same
+    non-persistent-reveal convention as EnemyCardRevealed/DeckInspected —
+    Observation's hidden-info filtering is untouched; a human player
+    learns it by reading the event / a UI toast).
+    """
+    from game.core.events import GraveyardInspected
+
+    if ctx.unit is None or ctx.state is None:
+        return
+    owner = ctx.unit.owner
+    ps = ctx.state.get_player(owner)
+    ctx.events.append(GraveyardInspected(player_id=owner, card_ids=tuple(ps.graveyard)))
 
 
 def _graveyard_counter(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Passive counter that increments when allied units die."""
+    """
+    IMPLEMENTED — bone_collector passive. Arms ``graveyard_counter:0``;
+    incremented centrally in RulesEngine.execute() every time one of the
+    owner's OTHER allied Monsters is destroyed (see
+    ``RulesEngine._apply_death_triggered_effects`` — the same central
+    MonsterDestroyed hook that feeds capture_protection_from_counter and
+    death_trigger_draw), mirroring how PlayerState.monsters_lost_count is
+    centrally maintained rather than patched into every destruction path.
+    """
     if ctx.unit is None:
         return
-    ctx.unit.add_status("graveyard_counter:0")
-    # NOTE: the counter is incremented by MonsterDestroyed/PieceCaptured hook (Stage 7+).
+    if not any(s.startswith("graveyard_counter:") for s in ctx.unit.statuses):
+        ctx.unit.add_status("graveyard_counter:0")
 
 
 def _capture_protection_from_counter(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Grant shield charges based on graveyard counter."""
-    raise NotImplementedError(
-        "capture_protection_from_counter is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — bone_collector passive companion to graveyard_counter.
+    Arms ``capture_protection_from_counter:<required_counters>:<uses_per_counter>``,
+    read by the same central hook that increments graveyard_counter: every
+    time the counter reaches a new multiple of ``required_counters``, the
+    unit gains ``uses_per_counter`` more capture_protection shield charges.
+    """
+    if ctx.unit is None:
+        return
+    required = ctx.effect.params.get("required_counters", 2)
+    uses = ctx.effect.params.get("uses_per_counter", 1)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses
+        if not s.startswith("capture_protection_from_counter:")
+    ]
+    ctx.unit.add_status(f"capture_protection_from_counter:{required}:{uses}")
 
 
 def _dismiss_monster(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Activated ability to dismiss an adjacent allied monster."""
-    raise NotImplementedError(
-        "dismiss_monster (as an activated effect) is not yet implemented (Stage 7+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — vessel_reclaimer activated ability.
+
+    Distinct from the player's own DismissMonster action (which targets
+    the player's OWN unit and returns the card to hand): this targets an
+    ADJACENT allied Monster (``ctx.extra["target"]``, an (file, rank)
+    tuple enumerated by RulesEngine.get_legal_actions) and sends the card
+    to the Graveyard instead (card text: "sending the Monster card to the
+    Graveyard").
+    """
+    from game.chess.pieces import Position
+    from game.core.events import MonsterDismissed
+    from game.core.rules import IllegalActionError
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
+        return
+    target = (ctx.extra or {}).get("target")
+    if target is None:
+        raise IllegalActionError("dismiss_monster requires an adjacent allied Monster target.")
+    tf, tr = target
+    if max(abs(tf - ctx.position.file), abs(tr - ctx.position.rank)) != 1:
+        raise IllegalActionError("dismiss_monster target must be adjacent.")
+    target_pos = Position(tf, tr)
+    target_unit = ctx.state.board.get_unit(target_pos)
+    if (
+        target_unit is None
+        or target_unit.owner != ctx.unit.owner
+        or target_unit.monster_id is None
+    ):
+        raise IllegalActionError("dismiss_monster target must be an adjacent allied Monster.")
+
+    card_id = target_unit.monster_id
+    target_unit.monster_id = None
+    target_unit.statuses = [
+        s for s in target_unit.statuses
+        if not any(
+            s.startswith(prefix) for prefix in (
+                "shield:", "spell_radius_bonus:", "stealth",
+                "ritual_boost:", "frozen:",
+            )
+        )
+    ]
+    ctx.state.get_player(target_unit.owner).graveyard.append(card_id)
+    ctx.events.append(MonsterDismissed(
+        player_id=target_unit.owner,
+        card_id=card_id,
+        vessel_piece_id=target_unit.piece.id,
+        position=target_pos,
+    ))
 
 
 def _graveyard_scaling_movement(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Bonus leap when graveyard reaches threshold."""
+    """
+    IMPLEMENTED — crypt_walker. Arms ``graveyard_leap:<threshold>:<bonus_leap>``,
+    read by ``mechanics.monsters.get_movement_additions()`` (GameState-aware
+    call site — see territory_bonus above) — adds ``bonus_leap`` cardinal
+    leap squares once ``len(owner.graveyard) >= threshold``.
+    """
     if ctx.unit is None:
         return
     threshold = ctx.effect.params.get("threshold", 5)
     bonus_leap = ctx.effect.params.get("bonus_leap", 1)
+    ctx.unit.statuses = [s for s in ctx.unit.statuses if not s.startswith("graveyard_leap:")]
     ctx.unit.add_status(f"graveyard_leap:{threshold}:{bonus_leap}")
-    # NOTE: movement generation checks this status against graveyard size (Stage 7+).
 
 
 def _death_trigger_draw(ctx: "EffectContext") -> None:
-    """STUB — Stage 7+. Draw a card once per turn when an allied monster dies."""
+    """
+    IMPLEMENTED — mourning_queen passive. Arms ``death_trigger_draw:1``;
+    consumed by the same central MonsterDestroyed hook as graveyard_counter
+    (RulesEngine._apply_death_triggered_effects), which draws the owner one
+    card the first time (per their own turn — PlayerState.
+    death_trigger_draw_used_this_turn) another allied Monster is destroyed.
+    """
     if ctx.unit is None:
         return
-    ctx.unit.add_status("death_trigger_draw:1")
-    # NOTE: draw hook on MonsterDestroyed event (Stage 7+).
+    if not any(s.startswith("death_trigger_draw:") for s in ctx.unit.statuses):
+        ctx.unit.add_status("death_trigger_draw:1")
 
 
 def _sacrifice_bonus(ctx: "EffectContext") -> None:
-    """STUB — Stage 11+. Extra ritual progress when this unit is sacrificed."""
+    """
+    IMPLEMENTED — blood_seer. Arms ``sacrifice_ritual_bonus:N`` on summon;
+    consumed in ``mechanics.rituals.execute_ritual()`` — when this unit is
+    among the PURE sacrifices (not the Vessel) paid for a Ritual, the
+    owner's first not-yet-REVEALED OTHER Ritual gains N progress (reusing
+    the same "first not-yet-REVEALED, pool order, threshold-promotes"
+    accounting as ritual_acolyte's end-of-turn ritual_progress_boost).
+    """
     if ctx.unit is None:
         return
     progress = ctx.effect.params.get("ritual_progress", 2)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("sacrifice_ritual_bonus:")
+    ]
     ctx.unit.add_status(f"sacrifice_ritual_bonus:{progress}")
-    # NOTE: ritual sacrifice logic reads this status (Stage 11+).
 
 
 def _ritual_activation_range(ctx: "EffectContext") -> None:
-    """STUB — Stage 11+. Extend ritual pattern matching range."""
+    """
+    IMPLEMENTED — herald_of_the_gate. Arms ``ritual_range_bonus:N`` on
+    summon; consumed by ``mechanics.rituals``' formation pattern matcher
+    (_find_formation_candidates / _formation_candidate_ok via
+    _ritual_range_bonus()) — a Formation Ritual's non-anchor nodes accept
+    any of the owner's own units within Chebyshev N of the node's exact
+    offset, not only the exact square, while any of the owner's summoned
+    Monsters carries this status ("eligible components within 1 extra
+    square as connected").
+    """
     if ctx.unit is None:
         return
     bonus = ctx.effect.params.get("radius_bonus", 1)
+    ctx.unit.statuses = [s for s in ctx.unit.statuses if not s.startswith("ritual_range_bonus:")]
     ctx.unit.add_status(f"ritual_range_bonus:{bonus}")
-    # NOTE: ritual pattern matching reads this status (Stage 11+).
 
 
 def _restore_builder(ctx: "EffectContext") -> None:
-    """STUB — Stage 8+. On summon, restore builder token to adjacent pawn."""
-    raise NotImplementedError(
-        "restore_builder is not yet implemented (Stage 8+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    """
+    IMPLEMENTED — guild_foreman on_summon. One adjacent allied Pawn that
+    has already spent its once-per-match Builder token
+    (``builder_available == False``) regains it. Picks the first such
+    Pawn found among the 8 neighbouring squares (``max_targets: 1``).
+    """
+    from game.core.events import BuilderRestored
+    from game.core.phases import PieceType
+
+    if ctx.unit is None or ctx.position is None or ctx.state is None:
+        return
+    pos = ctx.position
+    owner = ctx.unit.owner
+    for df in (-1, 0, 1):
+        for dr in (-1, 0, 1):
+            if df == 0 and dr == 0:
+                continue
+            nf, nr = pos.file + df, pos.rank + dr
+            if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                continue
+            from game.chess.pieces import Position as _Pos
+            neighbour = ctx.state.board.get_unit(_Pos(nf, nr))
+            if (
+                neighbour is None
+                or neighbour.owner != owner
+                or neighbour.piece.piece_type != PieceType.PAWN
+                or neighbour.builder_available
+            ):
+                continue
+            neighbour.builder_available = True
+            ctx.events.append(BuilderRestored(
+                player_id=owner,
+                piece_id=neighbour.piece.id,
+                restored_by_piece_id=ctx.unit.piece.id,
+            ))
+            return
 
 
 def _capture_then_retreat(ctx: "EffectContext") -> None:

@@ -338,6 +338,40 @@ class CardsReturnedToDeck(Event):
     card_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class DeckInspected(Event):
+    """
+    arcane_archivist's ``inspect_top_deck`` — the owner peeked at the top
+    ``card_ids`` of their own deck (in current top-to-bottom order). Private
+    to ``player_id``, same non-persistent-reveal convention as
+    EnemyCardRevealed — Observation's hidden-info filtering is unaffected;
+    a human player learns it only by reading this event (a UI toast).
+    Immediately followed by a REORDER_DECK PendingDecision letting the
+    owner choose the new order for these same cards.
+    """
+    player_id: str
+    card_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DeckReordered(Event):
+    """arcane_archivist's ``reorder_top_deck`` resolution — the top of the
+    owner's deck now reads ``card_ids`` (top-to-bottom)."""
+    player_id: str
+    card_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GraveyardInspected(Event):
+    """
+    grave_scholar's ``graveyard_inspect`` — the owner reviewed the full
+    contents of their own Graveyard on summon (private; same
+    non-persistent-reveal convention as EnemyCardRevealed / DeckInspected).
+    """
+    player_id: str
+    card_ids: tuple[str, ...]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Recompose Events
 # ─────────────────────────────────────────────────────────────────────────────
@@ -422,6 +456,24 @@ class BuildingDestroyed(Event):
     building_instance_id: str
     position: Position
     destroyed_by: str | None = None  # piece_id or None
+
+
+@dataclass(frozen=True)
+class BuildingDisabled(Event):
+    """saboteur's ``disable_building`` — an enemy Building's aura/support
+    effects are suspended until the start of its owner's next turn."""
+    building_instance_id: str
+    position: Position
+    disabled_by_piece_id: str
+
+
+@dataclass(frozen=True)
+class BuilderRestored(Event):
+    """guild_foreman's ``restore_builder`` — an adjacent Pawn that already
+    spent its once-per-match Builder token regains it."""
+    player_id: str
+    piece_id: str
+    restored_by_piece_id: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────

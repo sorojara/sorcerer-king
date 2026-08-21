@@ -4,13 +4,16 @@ mechanics/effects/information.py — INFORMATION category
 
 Effect types in this category
 ------------------------------
-reveal_hidden_info  STUB  — expose opponent's hidden state (needs the
-                             Ritual system's SEALED/FORETOLD/REVEALED
-                             states — target: "ritual" is the only
-                             consumer today)
-obscure_influence   STUB  — hide exact secondary modifiers (needs the
-                             Spell/Trap zone system's secondary-modifier
-                             concept, which doesn't exist yet)
+reveal_hidden_info  IMPLEMENTED — Stage 11 — one random SEALED enemy
+                             Ritual advances to FORETOLD (target: "ritual"
+                             is the only consumer today)
+obscure_influence   IMPLEMENTED — hides a square effect's exact card_id
+                             (which Spell/Trap caused it) from anyone but
+                             its owner within radius of a veil_conjurer,
+                             unless the observer occupies that square;
+                             real logic lives in core.observation via
+                             build_observation()'s PublicSquareEffect
+                             filtering (queried live, like damage_aura)
 reveal_enemy_hand_card IMPLEMENTED — Stage 6: one-time peek at N random
                              opponent hand cards (alarm_beacon)
 """
@@ -29,26 +32,30 @@ if TYPE_CHECKING:
 
 def _reveal_hidden_info(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 6+
+    IMPLEMENTED — Stage 11 (raven_scout).
 
-    Reveals hidden information to the owner.  The ``target`` and
-    ``reveal_level`` params control what is revealed:
-
-        target: "ritual"      → reveal an enemy Ritual
-        reveal_level: "foretold" → advance from SEALED to FORETOLD
-
-    Example: raven_scout on_summon → one random SEALED enemy Ritual becomes
-    FORETOLD.
-
-    When implemented this will:
-      1. Select the target based on params (random / closest / etc.).
-      2. Advance the target's revelation state in GameState.
-      3. Emit a RitualRevelationChanged event.
+    ``target: "ritual"`` is the only consumer today: one random SEALED
+    enemy Ritual advances to FORETOLD (README §15.1's "opponent
+    disruption" trigger — mechanics.rituals.promote_one_step, which never
+    skips a step, so ``reveal_level`` isn't separately honoured beyond
+    "one step" — every card using this effect today only ever wants
+    SEALED→FORETOLD anyway). ``selection: random`` is the only supported
+    selection strategy; anything else is a no-op rather than a crash, so a
+    future card data-entry typo doesn't take the engine down.
     """
-    raise NotImplementedError(
-        "reveal_hidden_info is not yet implemented (Stage 6+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    if ctx.unit is None or ctx.state is None:
+        return
+    params = ctx.effect.params
+    if params.get("target") != "ritual":
+        return
+    if params.get("selection", "random") != "random":
+        return
+
+    from game.mechanics.rituals import reveal_random_sealed
+
+    owner = ctx.unit.owner
+    opponent = ctx.state.opponent_of(owner)
+    reveal_random_sealed(ctx.state, opponent, ctx.events, rng=ctx.rng)
 
 
 # ---------------------------------------------------------------------------
@@ -57,21 +64,20 @@ def _reveal_hidden_info(ctx: "EffectContext") -> None:
 
 def _obscure_influence(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 6+
+    IMPLEMENTED — veil_conjurer passive aura (real logic lives elsewhere).
 
-    Within ``radius`` squares of this monster, nearby Spell and Trap
-    influence remains visible but opponents cannot inspect the exact
-    secondary modifiers (``hide_exact_effect: true``).
-
-    When implemented this will:
-      1. Tag the affected zone in the board's temporary_effects.
-      2. During Observation construction: filter out secondary modifier
-         details for squares inside the zone when building the opponent's view.
+    Within ``radius`` squares of this monster, nearby Spell/Trap square
+    effects (frozen/scorched/blocked/cursed) remain visible — effect_type,
+    duration, owner — but the exact ``card_id`` that caused them is hidden
+    from anyone but the effect's own owner, unless the observer currently
+    occupies that square. Queried live from
+    core.observation.build_observation() (via _obscured_by_veil_conjurer),
+    the same "scan the board, don't arm a status" pattern as damage_aura.
+    This entry is a no-op placeholder so the type is recognised by the
+    registry and never logged as unresolved.
     """
-    raise NotImplementedError(
-        "obscure_influence is not yet implemented (Stage 6+). "
-        "Effect params: " + repr(ctx.effect.params)
-    )
+    # Actual implementation lives in core.observation._obscured_by_veil_conjurer().
+    pass
 
 
 # ---------------------------------------------------------------------------

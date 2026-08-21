@@ -91,6 +91,8 @@ class SidebarOverlay:
         self._btn_build_enabled: bool = False
         self._btn_king: pygame.Rect | None = None
         self._btn_king_enabled: bool = False
+        self._btn_ritual: pygame.Rect | None = None
+        self._btn_ritual_enabled: bool = False
         self._mouse_pos: tuple[int, int] = (0, 0)
         # Stage 6: cached "Activatable" row rects: list of (token, Rect)
         self._activatable_btn_rects: list[tuple[str, pygame.Rect]] = []
@@ -111,6 +113,7 @@ class SidebarOverlay:
             'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
             'build'             — Stage 8: Open the Building Pool picker (PREPARATION only)
             'king'              — Stage 10: Open the King picker (Coronation/Succession, PREPARATION only)
+            'ritual'            — Stage 11: Open the Ritual picker (PREPARATION only)
             'trap:<id>'         — Stage 6: Activatable-section Trap button (id = trap_instance_id)
             'ability_at:<f>:<r>:<id>' — Stage 6: Activatable-section monster ability
                                  button, naming the piece's position since the
@@ -141,6 +144,8 @@ class SidebarOverlay:
             return "build"
         if self._btn_king and getattr(self, "_btn_king_enabled", False) and self._btn_king.collidepoint(mx, my):
             return "king"
+        if self._btn_ritual and getattr(self, "_btn_ritual_enabled", False) and self._btn_ritual.collidepoint(mx, my):
+            return "ritual"
         for token, rect in self._activatable_btn_rects:
             if rect.collidepoint(mx, my):
                 return token
@@ -155,6 +160,7 @@ class SidebarOverlay:
         show_mercenary_btn: "bool | None" = None,
         show_build_btn: "bool | None" = None,
         show_king_btn: "bool | None" = None,
+        show_ritual_btn: "bool | None" = None,
         show_territory: bool = True,
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
@@ -175,6 +181,11 @@ class SidebarOverlay:
                                   Succession picker button. None hides the
                                   button entirely once the King Pool is
                                   fully spent (no HIDDEN King left).
+        ``show_ritual_btn``     — Stage 11: same tri-state convention as
+                                  ``show_mercenary_btn`` for the Ritual
+                                  picker button. None hides the button
+                                  entirely once every Ritual has been
+                                  activated.
         ``show_territory``      — Stage 9: current on/off state of the
                                   Territory board tint, shown as the toggle
                                   button's label (always drawn, unlike the
@@ -443,6 +454,29 @@ class SidebarOverlay:
         else:
             self._btn_king = None
 
+        # Ritual button — Stage 11: opens the Ritual picker.
+        if show_ritual_btn is not None:
+            rt_enabled = bool(show_ritual_btn)
+            self._btn_ritual_enabled = rt_enabled
+            rt_label = "🔮  Ritual"
+            rt_color  = (200, 130, 230) if rt_enabled else (80, 65, 90)
+            rt_border = (160, 90, 210) if rt_enabled else (60, 50, 65)
+            y += self.BTN_H + 4
+            self._btn_ritual = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+            hover_rt = rt_enabled and self._btn_ritual.collidepoint(self._mouse_pos)
+            pygame.draw.rect(self._surface,
+                             DIALOG_HOVER if hover_rt else DIALOG_BG,
+                             self._btn_ritual, border_radius=4)
+            pygame.draw.rect(self._surface, rt_border,
+                             self._btn_ritual, 1, border_radius=4)
+            rts = self._font_small.render(rt_label, True, rt_color)
+            self._surface.blit(rts, (
+                self._btn_ritual.x + (btn_w - rts.get_width()) // 2,
+                self._btn_ritual.y + (self.BTN_H - rts.get_height()) // 2,
+            ))
+        else:
+            self._btn_ritual = None
+
         # Controls hint + Export/Import buttons at the fixed bottom position.
         # (Card detail now lives entirely in the left CardViewer.)
         self._draw_controls_hint()
@@ -568,9 +602,35 @@ class CardViewer:
         # Cached rects — populated each draw() call.
         self._ability_btn_rects: list[tuple[str, pygame.Rect]] = []
         self._zone_entry_rects: list[tuple[str, pygame.Rect]] = []
+        # Stage 11: scroll state. The content below the fixed "Card Viewer"
+        # header can run taller than the panel (e.g. a Ritual stacked with
+        # its summoned Monster's full block) — _scroll_y is a pixel offset
+        # applied to everything from the header divider down, clamped to
+        # [0, _max_scroll] (recomputed every draw() call from the actual
+        # content height). Resets to 0 whenever the viewed card changes so
+        # a freshly-opened card always starts at the top.
+        self._scroll_y: int = 0
+        self._max_scroll: int = 0
+        self._content_top: int = 0   # y where scrollable content begins (below the fixed header)
+        self._last_card_id: "str | None" = None
 
     def update_mouse(self, pos: tuple[int, int]) -> None:
         self._mouse_pos = pos
+
+    def is_over(self, mx: int, my: int) -> bool:
+        """True if (mx, my) is inside this panel — for routing MOUSEWHEEL."""
+        return 0 <= mx <= self._width
+
+    def scroll(self, wheel_ticks: int) -> None:
+        """
+        Scroll the content by ``wheel_ticks`` (positive = wheel up = scroll
+        toward the top, matching pygame's MOUSEWHEEL.y sign — negate it at
+        the call site the same way ui/hand_view.py's scroll() expects, if
+        "down" should move content up). Clamped to [0, _max_scroll].
+        """
+        if self._max_scroll <= 0:
+            return
+        self._scroll_y = max(0, min(self._scroll_y + wheel_ticks * 24, self._max_scroll))
 
     def handle_ability_click(self, mx: int, my: int) -> str | None:
         """LEFT-click hit-test for the ability buttons. Returns the ability_id."""
@@ -616,6 +676,10 @@ class CardViewer:
                             past it is clipped rather than drawn over the
                             log.
         """
+        if card_id != self._last_card_id:
+            self._scroll_y = 0
+            self._last_card_id = card_id
+
         full_h = self._surface.get_height()
         h = content_height if content_height is not None else full_h
         rect = pygame.Rect(0, 0, self._width, h)
@@ -632,6 +696,13 @@ class CardViewer:
             y += header.get_height() + 6
             y = self._draw_divider(y)
             y += 8
+
+            # Everything below this point scrolls — the header above stays
+            # fixed. content_top is where the (unscrolled) content begins;
+            # _max_scroll is recomputed below from the actual content height.
+            content_top = y
+            self._content_top = content_top
+            y -= self._scroll_y
 
             self._ability_btn_rects = []
 
@@ -650,6 +721,27 @@ class CardViewer:
                 y += 6
             else:
                 y = self._draw_card_block(x, y, card, ability_ids or [], unit_statuses)
+
+                # Stage 11: a Ritual's own block is followed immediately by
+                # a second, stacked block for the Monster it summons — the
+                # whole reason to inspect a Ritual is usually "what do I
+                # get", so show it without a second right-click.
+                from game.cards.card import CardType as _CT
+                if card.card_type == _CT.RITUAL and self._registry is not None:
+                    summon_id = getattr(card, "summon_monster_id", "")
+                    if summon_id and summon_id in self._registry:
+                        try:
+                            summon_card = self._registry.get(summon_id)
+                        except Exception:
+                            summon_card = None
+                        if summon_card is not None:
+                            y += 4
+                            y = self._draw_divider(y)
+                            y += 6
+                            summon_header = self._font_small.render("Summons:", True, HUD_LABEL)
+                            self._surface.blit(summon_header, (x, y))
+                            y += summon_header.get_height() + 4
+                            y = self._draw_card_block(x, y, summon_card, [], ())
 
             self._zone_entry_rects = []
             if zone_entries:
@@ -680,15 +772,39 @@ class CardViewer:
                 self._surface.blit(hint, (x, y))
                 y += hint.get_height() + 4
 
-            # Content that got clipped out visually must not stay clickable.
+            # Recompute the scroll range from the actual content height just
+            # drawn (undo the -_scroll_y offset to get the natural height),
+            # and re-clamp in case content shrank since the last scroll
+            # (e.g. switching from a Ritual+Monster combo to a plain card).
+            natural_bottom = y + self._scroll_y
+            visible_window = h - content_top
+            self._max_scroll = max(0, (natural_bottom - content_top) - visible_window)
+            self._scroll_y = min(self._scroll_y, self._max_scroll)
+
+            # Content that got clipped out visually — above the fixed
+            # header OR below the panel's bottom edge — must not stay
+            # clickable.
             self._ability_btn_rects = [
-                (aid, r) for aid, r in self._ability_btn_rects if r.bottom <= h
+                (aid, r) for aid, r in self._ability_btn_rects
+                if content_top <= r.top and r.bottom <= h
             ]
             self._zone_entry_rects = [
-                (cid, r) for cid, r in self._zone_entry_rects if r.bottom <= h
+                (cid, r) for cid, r in self._zone_entry_rects
+                if content_top <= r.top and r.bottom <= h
             ]
         finally:
             self._surface.set_clip(prev_clip)
+
+        # Scrollbar thumb — chrome, drawn unclipped/unscrolled on top.
+        if self._max_scroll > 0:
+            track_x = self._width - 5
+            track_h = h - content_top
+            thumb_h = max(20, int(track_h * visible_window / max(1, natural_bottom - content_top)))
+            thumb_y = content_top + int((track_h - thumb_h) * (self._scroll_y / self._max_scroll))
+            pygame.draw.rect(
+                self._surface, DIALOG_BORDER,
+                pygame.Rect(track_x, thumb_y, 3, thumb_h), border_radius=2,
+            )
 
     def _draw_divider(self, y: int) -> int:
         pygame.draw.line(
@@ -781,6 +897,10 @@ class CardViewer:
             badge_color = (210, 180, 110)
             title = getattr(card, "title", "")
             arch_line = f"KNG  {title}" if title else "KNG"
+        elif card.card_type == CardType.RITUAL:
+            badge_color = (180, 90, 210)
+            condition_type = getattr(card, "condition_type", "")
+            arch_line = f"RIT  {condition_type}" if condition_type else "RIT"
         else:
             badge_color = (160, 100, 220)
             trigger = getattr(card, "trigger", None)
@@ -828,8 +948,8 @@ class CardViewer:
                 if status.startswith("copied_effect:"):
                     label = "⟳ " + status[len("copied_effect:"):].replace("_", " ")
                     color = (120, 220, 255)
-                elif status.startswith("challenge_issued:"):
-                    label = "⚔ challenge issued"
+                elif status.startswith("challenged_by:"):
+                    label = "⚔ challenged"
                     color = (255, 160, 60)
                 elif ":" in status:
                     key, _, val = status.partition(":")

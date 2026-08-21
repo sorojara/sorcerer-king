@@ -48,6 +48,7 @@ from game.cards.card import CardRegistry, load_registry_from_yaml
 from game.chess.pieces import Position
 from game.core.actions import (
     ActivateMonsterAbility,
+    ActivateRitual,
     ActivateSpell,
     ActivateTrap,
     Castle,
@@ -291,6 +292,18 @@ class AppController:
         self._king_sacrifice_positions: list[Position] = []
         self._king_sacrifice_building_id: str | None = None
 
+        # Stage 11: Ritual picker/dialog. Two steps, reusing _KingDialog
+        # (same generic list-picker): first pick WHICH Ritual to attempt
+        # (one row per not-yet-activated Ritual with at least one legal
+        # sacrifice combo), then — only if that Ritual has more than one
+        # candidate combo — pick WHICH combo. Unlike King Succession, no
+        # board-click step is needed: the engine already enumerated each
+        # candidate's full sacrifice_positions in get_legal_actions.
+        self._ritual_picker: "_KingDialog | None" = None
+        self._ritual_picker_mode: str | None = None   # "choose_ritual" | "choose_combo"
+        self._ritual_picker_actions: list = []          # legal ActivateRitual actions, filtered as the flow narrows
+        self._ritual_picker_row_ids: list[str] = []     # row index → ritual_id, including disabled rows (see _do_ritual)
+
         # Auto-advance past phases that need no user input
         self._auto_advance()
 
@@ -328,6 +341,9 @@ class AppController:
                 if self._king_picker is not None or self._king_sacrifice_positions:
                     self._cancel_king_mode()
                     return
+                if self._ritual_picker is not None:
+                    self._cancel_ritual_mode()
+                    return
                 self._cancel_summon()
                 self._cancel_targeting_mode()
                 self._cancel_spell_piece_mode()
@@ -357,6 +373,8 @@ class AppController:
                 self._build_picker._mouse_pos = event.pos
             if self._king_picker is not None:
                 self._king_picker._mouse_pos = event.pos
+            if self._ritual_picker is not None:
+                self._ritual_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
@@ -383,6 +401,13 @@ class AppController:
                 elif result is not None:
                     self._on_king_picker_choice(result)
                 return
+            if self._ritual_picker is not None:
+                result = self._ritual_picker.handle_click(mx, my)
+                if result == "cancel":
+                    self._cancel_ritual_mode()
+                elif result is not None:
+                    self._on_ritual_picker_choice(result)
+                return
             if self._promotion_dialog is not None:
                 self._handle_promotion_click(mx, my)
             else:
@@ -395,6 +420,16 @@ class AppController:
                 # wheel y: positive = scroll up (towards user) → move right in hand,
                 # negative = scroll down → move left. One wheel tick = one card.
                 self._hand_view.scroll(-event.y, len(list(obs.own_hand)))
+            # Stage 11: scroll the Card Viewer (left sidebar) when the
+            # inspected card's content — e.g. a Ritual stacked with its
+            # summoned Monster — runs taller than the panel.
+            elif (
+                self._card_viewer.is_over(*self._mouse_pos)
+                and self._mouse_pos[1] < self._screen.get_height() - LOG_HEIGHT
+            ):
+                # wheel y: positive = scroll up → move content down (toward
+                # the top), matching the sign _hand_view.scroll() expects.
+                self._card_viewer.scroll(-event.y)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Stage 6 (corrected): right-click sets the CardViewer's active
@@ -423,6 +458,23 @@ class AppController:
                             self._viewer_card_id = bld.building_card_id
                             self._inspect_unit_pos = None
                             self._zone_active_entries = None
+                        return
+
+            # Stage 11: right-click a row on the Ritual picker's first step
+            # (choosing WHICH Ritual) to inspect it — including DISABLED
+            # rows ("not ready" / "completed"): own_rituals is full
+            # information to its owner regardless of readiness, so nothing
+            # should be hidden from inspection. Reads the index-matched
+            # _ritual_picker_row_ids rather than _KingDialog.key_at(), which
+            # returns None for a disabled row's key (by design — see
+            # _do_ritual). The second step's rows are sacrifice combos, not
+            # cards, so nothing to inspect there.
+            if self._ritual_picker is not None and self._ritual_picker_mode == "choose_ritual":
+                for i, row_rect in enumerate(self._ritual_picker._row_rects):
+                    if row_rect.collidepoint(mx, my) and i < len(self._ritual_picker_row_ids):
+                        self._viewer_card_id = self._ritual_picker_row_ids[i]
+                        self._inspect_unit_pos = None
+                        self._zone_active_entries = None
                         return
 
             zone_card_id = self._card_viewer.zone_entry_from_click(mx, my)
@@ -486,6 +538,9 @@ class AppController:
         if btn == "king":
             self._do_king()
             return
+        if btn == "ritual":
+            self._do_ritual()
+            return
         if btn is not None and btn.startswith("trap:"):
             # Stage 6: "⚡ Activatable" section — fire a manual Trap directly.
             trap_instance_id = btn[len("trap:"):]
@@ -493,9 +548,19 @@ class AppController:
             return
         if btn is not None and btn.startswith("ability_at:"):
             # Stage 6: "⚡ Activatable" section — fire a monster ability on
-            # ANY unit, not just the currently-inspected one.
-            _, f, r, ability_id = btn.split(":", 3)
-            self._do_activate_ability(ability_id, Position(int(f), int(r)))
+            # ANY unit, not just the currently-inspected one. Trailing
+            # segment (possibly empty) round-trips the target for
+            # abilities that need one — see _compute_activatable_entries.
+            _, f, r, ability_id, *target_parts = btn.split(":")
+            target = None
+            if target_parts:
+                target_str = ":".join(target_parts)
+                if target_str.startswith("pos:"):
+                    _, tf, tr = target_str.split(":")
+                    target = (int(tf), int(tr))
+                elif target_str.startswith("id:"):
+                    target = target_str[len("id:"):]
+            self._do_activate_ability(ability_id, Position(int(f), int(r)), target=target)
             return
 
         obs = self._current_obs()
@@ -739,6 +804,8 @@ class AppController:
         self._cancel_build_mode()
         # Stage 10: likewise for any in-progress King Succession flow.
         self._cancel_king_mode()
+        # Stage 11: and any in-progress Ritual picker.
+        self._cancel_ritual_mode()
 
         # Look up the card in the registry
         if card_id not in self._registry:
@@ -883,7 +950,22 @@ class AppController:
                 entries.append((f"⚡ {name} (Trap)", token))
 
             elif isinstance(a, ActivateMonsterAbility):
-                token = f"ability_at:{a.unit_position.file}:{a.unit_position.rank}:{a.ability_id}"
+                # Abilities that need a specific target (challenge_unit,
+                # dismiss_monster, disable_building,
+                # ritual_requirement_reduction) get one entry PER target
+                # rather than collapsing to a single dead one — the target
+                # is round-tripped through the token so _handle_click can
+                # reconstruct the exact action.
+                if isinstance(a.target, tuple) and len(a.target) == 2:
+                    target_part = f"pos:{a.target[0]}:{a.target[1]}"
+                    target_label = str(Position(a.target[0], a.target[1]))
+                elif isinstance(a.target, str):
+                    target_part = f"id:{a.target}"
+                    target_label = a.target
+                else:
+                    target_part = ""
+                    target_label = ""
+                token = f"ability_at:{a.unit_position.file}:{a.unit_position.rank}:{a.ability_id}:{target_part}"
                 if token in seen:
                     continue
                 seen.add(token)
@@ -891,9 +973,10 @@ class AppController:
                     (u for u in obs.board.units if u.position == a.unit_position), None
                 )
                 piece_label = unit_info.piece_id if unit_info else str(a.unit_position)
-                entries.append((
-                    f"⚡ {piece_label} — {a.ability_id.replace('_', ' ')}", token,
-                ))
+                label = f"⚡ {piece_label} — {a.ability_id.replace('_', ' ')}"
+                if target_label:
+                    label += f" → {target_label}"
+                entries.append((label, token))
 
         return entries
 
@@ -1127,6 +1210,7 @@ class AppController:
         if self._player_modes.get(active) == "ai":
             return
         self._cancel_king_mode()
+        self._cancel_ritual_mode()
         # Show the mercenary picker dialog — it will call _commit_mercenary() on selection.
         self._mercenary_selected = []
         self._mercenary_picker = _MercenaryPicker(
@@ -1165,6 +1249,7 @@ class AppController:
         active = obs.active_player
         if self._player_modes.get(active) == "human":
             self._cancel_king_mode()
+            self._cancel_ritual_mode()
             self._build_picker = _BuildPicker(
                 surface=self._screen,
                 font=self._font_small,
@@ -1227,6 +1312,7 @@ class AppController:
         if self._player_modes.get(active) == "ai":
             return
         self._cancel_king_mode()
+        self._cancel_ritual_mode()
         self._cancel_build_mode()
         self._cancel_summon()
         self._cancel_targeting_mode()
@@ -1414,6 +1500,117 @@ class AppController:
         self._king_and_mode = False
         self._king_sacrifice_positions = []
         self._king_sacrifice_building_id = None
+
+    # ── Stage 11: Ritual ────────────────────────────────────────────────
+
+    def _ritual_name(self, ritual_id: str) -> str:
+        if self._registry is not None and ritual_id in self._registry:
+            return self._registry.get(ritual_id).name
+        return ritual_id
+
+    def _ritual_combo_label(self, action: "ActivateRitual") -> str:
+        """'via Bishop@c1, Pawn@b1' — the Vessel (last position) first."""
+        positions = list(action.sacrifice_positions)
+        if not positions:
+            return "via (no sacrifice)"
+        vessel = positions[-1]
+        others = positions[:-1]
+        parts = [f"Vessel@{vessel.to_algebraic()}"]
+        parts += [p.to_algebraic() for p in others]
+        return "via " + ", ".join(parts)
+
+    def _do_ritual(self) -> None:
+        """
+        Sidebar button: open the Ritual picker.
+
+        Always lists EVERY Ritual in the player's own pool (own_rituals is
+        full information to its owner regardless of revelation state — see
+        core/observation.py) — not just the ones ready to fire. A Ritual
+        with no legal sacrifice combo right now, or already ``activated``,
+        renders as a disabled row (``_KingDialog`` already supports
+        key=None for this). Choosing a ready Ritual with exactly one
+        candidate combo commits immediately; more than one opens a second
+        picker to choose which combo (mirrors the King picker's multi-step
+        flow, but needs no board-click step — every candidate's
+        sacrifice_positions is already fully determined by the engine).
+        """
+        obs = self._current_obs()
+        if obs.phase != Phase.PREPARATION:
+            return
+        active = obs.active_player
+        if self._player_modes.get(active) == "ai":
+            return
+        self._cancel_ritual_mode()
+        self._cancel_king_mode()
+        self._cancel_build_mode()
+        self._cancel_summon()
+        self._cancel_targeting_mode()
+        self._cancel_spell_piece_mode()
+
+        ps = self._game.state.get_player(active)
+        if not ps.ritual_pool:
+            self._show_toast("No Rituals assigned.")
+            return
+
+        legal = self._game.get_legal_actions(active)
+        ritual_actions = [a for a in legal if isinstance(a, ActivateRitual)]
+        ready_ids = {a.ritual_id for a in ritual_actions}
+
+        rows: list[tuple[str, "Any"]] = []
+        row_ritual_ids: list[str] = []
+        for rstate in ps.ritual_pool:
+            name = self._ritual_name(rstate.ritual_id)
+            row_ritual_ids.append(rstate.ritual_id)
+            if rstate.activated:
+                rows.append((f"✓  {name}  (completed)", None))
+            elif rstate.ritual_id in ready_ids:
+                rows.append((f"🔮  {name}", rstate.ritual_id))
+            else:
+                rows.append((f"🔮  {name}  (not ready)", None))
+
+        self._ritual_picker = _KingDialog(
+            self._screen, self._font_small, "🔮  Ritual", rows,
+            accent=(200, 130, 230), border=(160, 90, 210),
+        )
+        self._ritual_picker_mode = "choose_ritual"
+        self._ritual_picker_actions = ritual_actions
+        # Disabled rows carry key=None (unclickable, by _KingDialog design)
+        # so key_at() can't recover their ritual_id for right-click inspect
+        # — this parallel, always-populated list (row index → ritual_id)
+        # is what the right-click handler below reads instead.
+        self._ritual_picker_row_ids = row_ritual_ids
+
+    def _on_ritual_picker_choice(self, key: str) -> None:
+        """Route a completed _ritual_picker click by the flow's current step."""
+        if self._ritual_picker_mode == "choose_ritual":
+            actions = [a for a in self._ritual_picker_actions if a.ritual_id == key]
+            if len(actions) == 1:
+                self._ritual_picker = None
+                self._commit_ritual(actions[0])
+                return
+            rows = [(self._ritual_combo_label(a), i) for i, a in enumerate(actions)]
+            self._ritual_picker_actions = actions
+            self._ritual_picker = _KingDialog(
+                self._screen, self._font_small, f"🔮  {self._ritual_name(key)}", rows,
+                accent=(200, 130, 230), border=(160, 90, 210),
+            )
+            self._ritual_picker_mode = "choose_combo"
+            return
+
+        if self._ritual_picker_mode == "choose_combo":
+            self._ritual_picker = None
+            self._commit_ritual(self._ritual_picker_actions[key])
+
+    def _commit_ritual(self, action: "ActivateRitual") -> None:
+        self._cancel_ritual_mode()
+        self._execute_and_advance(action, action.player_id)
+
+    def _cancel_ritual_mode(self) -> None:
+        """Exit every step of the Ritual flow without firing any action."""
+        self._ritual_picker = None
+        self._ritual_picker_mode = None
+        self._ritual_picker_actions = []
+        self._ritual_picker_row_ids = []
 
     def _handle_mercenary_card_click(self, card_id: str, obs: "object") -> None:
         """
@@ -1679,11 +1876,16 @@ class AppController:
         self,
         ability_id: str,
         pos: Position | None = None,
+        target: "object | None" = None,
     ) -> None:
         """
         Execute ActivateMonsterAbility for ``ability_id`` on ``pos``.
 
         ``pos`` defaults to ``_inspect_unit_pos`` then ``_selected_pos``.
+        ``target`` is forwarded as-is — required by challenge_unit /
+        dismiss_monster / disable_building / ritual_requirement_reduction
+        (see _compute_activatable_entries, which is the only caller that
+        supplies one today).
         Shows a toast with the result or the error message.
 
         Calls game.execute() directly (not _execute_and_advance) so that
@@ -1706,6 +1908,7 @@ class AppController:
             player_id=active,
             unit_position=target_pos,
             ability_id=ability_id,
+            target=target,
         )
         _log.debug("ABILITY  %s  ability=%r  pos=%s", active, ability_id, target_pos)
         try:
@@ -2303,6 +2506,20 @@ class AppController:
                 legal = self._game.get_legal_actions(active)
                 show_king = any(isinstance(a, (CoronateKing, ChangeKing)) for a in legal)
 
+        # Ritual button (Stage 11): unlike Build/Mercenary/King, the button
+        # itself stays enabled the whole time the player HAS a Ritual pool
+        # — it opens a picker that always lists every owned Ritual, with
+        # unready/completed ones rendered as disabled rows (see _do_ritual)
+        # rather than hiding the button until something is actionable.
+        #   None = not in PREPARATION, or the player has no Ritual pool
+        #          at all (e.g. no registry) → don't draw at all.
+        #   True = the player owns at least one Ritual — always clickable.
+        show_ritual: "bool | None" = None
+        if prep_available:
+            ps = self._game.state.get_player(active)
+            if ps.ritual_pool:
+                show_ritual = True
+
         # ── CardViewer (left sidebar) ───────────────────────────────────────
         # Stage 6 (corrected): right-click driven only — hand cards, board
         # units, and "Active in this zone" entries all set self._viewer_card_id
@@ -2348,6 +2565,7 @@ class AppController:
             show_mercenary_btn=show_mercenary,
             show_build_btn=show_build,
             show_king_btn=show_king,
+            show_ritual_btn=show_ritual,
             show_territory=self._show_territory,
             activatable_entries=activatable_entries or None,
         )
@@ -2419,6 +2637,10 @@ class AppController:
         # Stage 10: King (Coronation / Succession) picker dialog
         if self._king_picker is not None:
             self._king_picker.draw()
+
+        # Stage 11: Ritual picker dialog
+        if self._ritual_picker is not None:
+            self._ritual_picker.draw()
 
         # Game-over banner
         if self._game.is_over():

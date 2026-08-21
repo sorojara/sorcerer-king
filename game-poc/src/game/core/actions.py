@@ -334,6 +334,18 @@ class RepositionUnit(Action):
 
 
 @dataclass
+class ReorderTopDeck(Action):
+    """
+    Follow-up to arcane_archivist's ``inspect_top_deck`` effect.
+    Resolves the REORDER_DECK PendingDecision: ``card_ids`` must be a
+    permutation of ``PendingDecision.options`` — the new top-to-bottom
+    order for those cards.
+    """
+
+    card_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class DismissMonster(Action):
     """
     Return a Monster card to hand/deck and restore its Vessel piece.

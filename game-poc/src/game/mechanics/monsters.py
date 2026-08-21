@@ -113,6 +113,8 @@ def apply_on_summon_effects(
     card: "MonsterCard",
     events: "list[Event]",
     rng: "DeterministicRNG | None" = None,
+    position: "Position | None" = None,
+    registry: "object | None" = None,
 ) -> None:
     """
     Apply all effects from ``card`` that trigger on_summon.
@@ -120,6 +122,13 @@ def apply_on_summon_effects(
     Delegates each effect to the appropriate handler in the effects registry.
     Stub effects (not yet implemented) are silently skipped unless the effect
     explicitly raises (which only happens in future stages).
+
+    ``position`` (optional — the vessel's board square) is forwarded to each
+    EffectContext so position-dependent on_summon handlers (e.g.
+    guild_foreman's restore_builder, which scans adjacent squares) can
+    work; callers that omit it just get those specific effects skipped
+    (silently, same as an unregistered/stub type — most on_summon effects
+    don't need a position at all).
     """
     _log.debug("SUMMON   %s  unit=%s  effects=%s",
                card.id, unit.piece.id,
@@ -135,8 +144,8 @@ def apply_on_summon_effects(
             _log.debug("SUMMON   skip effect %r (trigger=%r)", effect.type, trigger)
             continue
 
-        ctx = _make_ctx(state, unit, None, card, effect, events, rng,
-                        trigger=trigger)
+        ctx = _make_ctx(state, unit, position, card, effect, events, rng,
+                        registry=registry, trigger=trigger)
         try:
             resolve_effect(ctx)
         except NotImplementedError:
@@ -151,6 +160,9 @@ def apply_on_summon_effects(
 def get_movement_additions(
     unit: UnitInstance,
     card: "MonsterCard",
+    state: "GameState | None" = None,
+    position: "Position | None" = None,
+    registry: "object | None" = None,
 ) -> list[tuple[int, int]]:
     """
     Return extra movement direction vectors added to the vessel's base moves
@@ -158,6 +170,17 @@ def get_movement_additions(
 
     Currently supported:
         add_leap: true  — adds 4 cardinal leap squares at ``leap_distance``.
+
+    ``state``/``position``/``registry`` are optional and only needed for the
+    two GameState-aware bonuses below (omitted call sites just skip them,
+    same as every other optional-registry query in this module):
+
+        territory_movement_bonus:<N>  — moon_stalker's territory_bonus.
+            Adds N cardinal leap squares while ``position`` sits inside the
+            OPPONENT's Territory (mechanics.territory.is_in_territory).
+        graveyard_leap:<threshold>:<bonus>  — crypt_walker's
+            graveyard_scaling_movement. Adds ``bonus`` cardinal leap squares
+            once ``len(owner.graveyard) >= threshold``.
     """
     extras: list[tuple[int, int]] = []
     for effect in card.effects:
@@ -166,6 +189,21 @@ def get_movement_additions(
         if effect.params.get("add_leap"):
             d = effect.params.get("leap_distance", 2)
             extras.extend([(d, 0), (-d, 0), (0, d), (0, -d)])
+
+    if state is not None and position is not None:
+        for status in unit.statuses:
+            if status.startswith("territory_movement_bonus:"):
+                bonus = int(status.split(":")[1])
+                from game.mechanics.territory import is_in_territory
+                opponent = state.opponent_of(unit.owner)
+                if is_in_territory(state, position, opponent, registry):
+                    extras.extend([(bonus, 0), (-bonus, 0), (0, bonus), (0, -bonus)])
+            elif status.startswith("graveyard_leap:"):
+                _, threshold_s, bonus_s = status.split(":")
+                threshold, bonus = int(threshold_s), int(bonus_s)
+                if len(state.get_player(unit.owner).graveyard) >= threshold:
+                    extras.extend([(bonus, 0), (-bonus, 0), (0, bonus), (0, -bonus)])
+
     return extras
 
 
@@ -374,6 +412,7 @@ def check_immobilize_zone(
     state: "GameState",
     moving_unit: UnitInstance,
     target_pos: Position,
+    registry: "object | None" = None,
 ) -> bool:
     """
     Read side of ``immobilize_zone`` (write side:
@@ -384,8 +423,14 @@ def check_immobilize_zone(
     "any piece", including the caster's own.  Called from
     _execute_move_piece for every completed move (capture or not).
 
+    Stage: a spellbreaker's ``suppress_spell_zone`` aura neutralises this
+    (cursed_ground is a Spell) if ``target_pos`` lies within its radius —
+    see is_spell_zone_suppressed().
+
     Returns True if the moving unit was immobilized.
     """
+    if is_spell_zone_suppressed(state, target_pos, registry):
+        return False
     sq = state.board.get_square(target_pos)
     for eff in sq.temporary_effects:
         if eff.startswith("cursed:"):
@@ -395,6 +440,50 @@ def check_immobilize_zone(
             ]
             moving_unit.add_status(f"immobilized:{duration}")
             return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spell zone suppression (spellbreaker) — queried live like damage_aura
+# ─────────────────────────────────────────────────────────────────────────────
+
+def is_spell_zone_suppressed(
+    state: "GameState",
+    pos: Position,
+    registry: "object | None",
+) -> bool:
+    """
+    True if ``pos`` lies within the radius of ANY monster (either side)
+    carrying ``suppress_spell_zone`` — spellbreaker's "Continuous Spell
+    effects are suppressed while their affected squares overlap this
+    monster's radius". Scoped to the two Spell-authored continuous zone
+    tags (``blocked:`` — veil_of_stillness, ``cursed:`` — cursed_ground),
+    not to Monster-caused ``frozen:``/``scorched:`` square effects, which
+    aren't Spells.
+    """
+    if registry is None:
+        return False
+    from game.cards.card import MonsterCard
+
+    for owner in ("white", "black"):
+        for spos, unit in state.board.all_units_for(owner):
+            if unit.monster_id is None:
+                continue
+            try:
+                card = registry.get(unit.monster_id)
+            except KeyError:
+                continue
+            if not isinstance(card, MonsterCard):
+                continue
+            for effect in card.effects:
+                if effect.type != "suppress_spell_zone":
+                    continue
+                radius = effect.params.get("radius", 1)
+                if (
+                    abs(pos.file - spos.file) <= radius
+                    and abs(pos.rank - spos.rank) <= radius
+                ):
+                    return True
     return False
 
 
@@ -581,7 +670,10 @@ def apply_retaliate(
     occupies ``captured_pos`` after completing its capture.
 
     A card with ``weakened_target_bonus`` (executioner: "guaranteed_capture")
-    lets the attacker bypass retaliation — its finishing blow is clean.
+    lets the attacker bypass retaliation — but only when ``captured_unit``'s
+    own capture_protection was already spent (card text: "Excels against
+    units whose defensive effects have already been spent" —
+    condition.capture_protection_remaining == 0), not unconditionally.
 
     Returns True if the attacker was destroyed.
     """
@@ -590,7 +682,13 @@ def apply_retaliate(
     if "retaliate" not in captured_unit.statuses:
         return False
     if "guaranteed_capture_vs_no_shield" in attacker_unit.statuses:
-        return False
+        shield_remaining = 0
+        for status in captured_unit.statuses:
+            if status.startswith("shield:"):
+                shield_remaining = int(status.split(":")[1])
+                break
+        if shield_remaining == 0:
+            return False
 
     removed = state.board.remove_unit(captured_pos)
     if removed is None:

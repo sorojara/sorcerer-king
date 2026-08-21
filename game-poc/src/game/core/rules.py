@@ -100,6 +100,7 @@ from game.core.actions import (
     PlaceMercenaryPiece,
     PlaceTrap,
     PromotePawn,
+    ReorderTopDeck,
     RepositionUnit,
     SelectMercenaryCards,
     SelectRecomposeCards,
@@ -246,6 +247,8 @@ class RulesEngine:
                 events = self._execute_summon_monster(state, action, rng, registry=self._registry)
             elif isinstance(action, RepositionUnit):
                 events = self._execute_reposition_unit(state, action)
+            elif isinstance(action, ReorderTopDeck):
+                events = self._execute_reorder_top_deck(state, action)
             elif isinstance(action, DismissMonster):
                 events = self._execute_dismiss_monster(state, action, registry=self._registry)
             elif isinstance(action, ActivateMonsterAbility):
@@ -258,6 +261,8 @@ class RulesEngine:
                 events = self._execute_activate_trap(state, action, registry=self._registry)
             elif isinstance(action, StartConstruction):
                 events = self._execute_start_construction(state, action)
+            elif isinstance(action, ActivateRitual):
+                events = self._execute_activate_ritual(state, action, rng, registry=self._registry)
             elif isinstance(action, CoronateKing):
                 events = self._execute_coronate_king(state, action)
             elif isinstance(action, ChangeKing):
@@ -294,8 +299,93 @@ class RulesEngine:
         _log.debug("DONE     %s  → events=[%s]",
                    type(action).__name__,
                    ", ".join(type(e).__name__ for e in events))
+
+        # Stage 11: PlayerState.monsters_lost_count — a lifetime counter
+        # feeding the "allied_monsters_destroyed_at_least_N" Ritual
+        # predicate (mechanics/rituals.py). Centralized here (rather than
+        # patched into every MonsterDestroyed call site — the primary
+        # capture path in this file plus three in mechanics/monsters.py)
+        # so no future destruction path can silently miss it.
+        extra_events: list[Event] = []
+        for event in events:
+            if isinstance(event, MonsterDestroyed):
+                state.get_player(event.player_id).monsters_lost_count += 1
+                # Stage: bone_collector's graveyard_counter /
+                # capture_protection_from_counter and mourning_queen's
+                # death_trigger_draw — every surviving allied Monster of
+                # the DESTROYED unit's owner gets a chance to react.
+                self._apply_death_triggered_effects(state, event.player_id, extra_events, rng)
+        events.extend(extra_events)
+
         state.event_log.extend(events)
         return events
+
+    def _apply_death_triggered_effects(
+        self,
+        state: GameState,
+        destroyed_owner: str,
+        new_events: list[Event],
+        rng: DeterministicRNG,
+    ) -> None:
+        """
+        Central MonsterDestroyed reaction hook (see execute()). Scans
+        ``destroyed_owner``'s SURVIVING summoned Monsters — the just-
+        destroyed unit is already off the board by the time this runs, so
+        it never reacts to its own death.
+        """
+        if self._registry is None:
+            return
+        from game.cards.card import MonsterCard
+        from game.core.events import CardDrawn, DeckRecycled
+
+        ps = state.get_player(destroyed_owner)
+        for pos, unit in state.board.all_units_for(destroyed_owner):
+            if unit.monster_id is None:
+                continue
+            try:
+                card = self._registry.get(unit.monster_id)
+            except KeyError:
+                continue
+            if not isinstance(card, MonsterCard):
+                continue
+            effect_types = {e.type for e in card.effects}
+
+            # ── bone_collector: graveyard_counter + capture_protection_from_counter ──
+            if "graveyard_counter" in effect_types:
+                for idx, status in enumerate(unit.statuses):
+                    if not status.startswith("graveyard_counter:"):
+                        continue
+                    count = int(status.split(":")[1]) + 1
+                    unit.statuses[idx] = f"graveyard_counter:{count}"
+                    for eff in card.effects:
+                        if eff.type != "capture_protection_from_counter":
+                            continue
+                        required = eff.params.get("required_counters", 2)
+                        bonus_uses = eff.params.get("uses_per_counter", 1)
+                        if required > 0 and count % required == 0:
+                            shield_idx = next(
+                                (i for i, s in enumerate(unit.statuses) if s.startswith("shield:")),
+                                None,
+                            )
+                            if shield_idx is not None:
+                                current = int(unit.statuses[shield_idx].split(":")[1])
+                                unit.statuses[shield_idx] = f"shield:{current + bonus_uses}"
+                            else:
+                                unit.add_status(f"shield:{bonus_uses}")
+                    break
+
+            # ── mourning_queen: death_trigger_draw (limit_per_turn: 1) ──
+            if "death_trigger_draw" in effect_types and not ps.death_trigger_draw_used_this_turn:
+                ps.death_trigger_draw_used_this_turn = True
+                if not ps.deck and ps.graveyard:
+                    ps.deck = list(ps.graveyard)
+                    ps.graveyard.clear()
+                    rng.shuffle(ps.deck)
+                    new_events.append(DeckRecycled(player_id=destroyed_owner, card_count=len(ps.deck)))
+                if ps.deck:
+                    drawn = ps.deck.pop(0)
+                    ps.hand.append(drawn)
+                    new_events.append(CardDrawn(player_id=destroyed_owner, card_id=drawn))
 
     # ── Legal action generation ──────────────────────────────────────────
 
@@ -406,6 +496,18 @@ class RulesEngine:
             return actions
 
         if phase == Phase.PREPARATION:
+            # arcane_archivist's inspect_top_deck opens a REORDER_DECK
+            # PendingDecision mid-PREPARATION (after the SummonMonster that
+            # triggered it already consumed the preparation action) — only
+            # ReorderTopDeck permutations of the peeked cards are legal
+            # until it's resolved, mirroring CHESS's REPOSITION gating.
+            pd = state.pending_decision
+            if pd is not None and pd.decision_type == DecisionType.REORDER_DECK and pd.player_id == player_id:
+                from itertools import permutations
+                for perm in set(permutations(pd.options)):
+                    actions.append(ReorderTopDeck(player_id=player_id, card_ids=list(perm)))
+                return actions
+
             actions.append(EndPreparation(player_id=player_id))
             if not ps.preparation_action_used:
                 from game.cards.card import MonsterCard
@@ -605,6 +707,25 @@ class RulesEngine:
                             actions.append(ActivateTrap(
                                 player_id=player_id, trap_instance_id=trap.id,
                             ))
+                # Stage 11: Activate Ritual — one per legal sacrifice combo
+                # per not-yet-activated Ritual in the player's pool (see
+                # mechanics/rituals.find_ritual_candidates; bounded per
+                # condition type, no combinatorial explosion).
+                if registry is not None:
+                    from game.cards.card import RitualCard
+                    from game.mechanics.rituals import find_ritual_candidates
+                    for rstate in ps.ritual_pool:
+                        if rstate.activated or rstate.ritual_id not in registry:
+                            continue
+                        ritual = registry.get(rstate.ritual_id)
+                        if not isinstance(ritual, RitualCard):
+                            continue
+                        for combo in find_ritual_candidates(state, player_id, ritual, rstate, registry):
+                            actions.append(ActivateRitual(
+                                player_id=player_id,
+                                ritual_id=rstate.ritual_id,
+                                sacrifice_positions=combo,
+                            ))
             return actions
 
         if phase == Phase.CHESS:
@@ -641,6 +762,7 @@ class RulesEngine:
                         castling_rights=cr,
                         player_id=player_id,
                         registry=registry,
+                        state=state,
                     ):
                         actions.append(
                             MovePiece(
@@ -659,6 +781,15 @@ class RulesEngine:
             if registry is not None:
                 from game.mechanics.effects.registry import ACTIVATED_EFFECT_TYPES
                 from game.cards.card import MonsterCard as _MC
+                from game.core.phases import ConstructionStatus as _CS, RevelationState as _RS
+
+                # Ability types that need a specific target enumerated,
+                # rather than a single target=None action.
+                _TARGETED_ABILITIES = {
+                    "challenge_unit", "dismiss_monster",
+                    "disable_building", "ritual_requirement_reduction",
+                }
+
                 for pos, unit in state.board.all_units_for(player_id):
                     if unit.monster_id is None:
                         continue
@@ -669,14 +800,76 @@ class RulesEngine:
                     if not isinstance(card, _MC):
                         continue
                     for eff in card.effects:
-                        if eff.type in ACTIVATED_EFFECT_TYPES:
-                            actions.append(
-                                ActivateMonsterAbility(
-                                    player_id=player_id,
-                                    unit_position=pos,
-                                    ability_id=eff.type,
-                                )
-                            )
+                        if eff.type not in ACTIVATED_EFFECT_TYPES:
+                            continue
+                        if eff.type not in _TARGETED_ABILITIES:
+                            actions.append(ActivateMonsterAbility(
+                                player_id=player_id, unit_position=pos, ability_id=eff.type,
+                            ))
+                            continue
+
+                        if eff.type == "challenge_unit":
+                            for df in (-1, 0, 1):
+                                for dr in (-1, 0, 1):
+                                    if df == 0 and dr == 0:
+                                        continue
+                                    nf, nr = pos.file + df, pos.rank + dr
+                                    if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                                        continue
+                                    npos = Position(nf, nr)
+                                    nunit = state.board.get_unit(npos)
+                                    if nunit is not None and nunit.owner != player_id:
+                                        actions.append(ActivateMonsterAbility(
+                                            player_id=player_id, unit_position=pos,
+                                            ability_id=eff.type, target=(nf, nr),
+                                        ))
+                        elif eff.type == "dismiss_monster":
+                            for df in (-1, 0, 1):
+                                for dr in (-1, 0, 1):
+                                    if df == 0 and dr == 0:
+                                        continue
+                                    nf, nr = pos.file + df, pos.rank + dr
+                                    if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                                        continue
+                                    npos = Position(nf, nr)
+                                    nunit = state.board.get_unit(npos)
+                                    if (
+                                        nunit is not None and nunit.owner == player_id
+                                        and nunit.monster_id is not None
+                                    ):
+                                        actions.append(ActivateMonsterAbility(
+                                            player_id=player_id, unit_position=pos,
+                                            ability_id=eff.type, target=(nf, nr),
+                                        ))
+                        elif eff.type == "disable_building":
+                            for df in (-1, 0, 1):
+                                for dr in (-1, 0, 1):
+                                    if df == 0 and dr == 0:
+                                        continue
+                                    nf, nr = pos.file + df, pos.rank + dr
+                                    if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                                        continue
+                                    bld_id = state.board.get_square(Position(nf, nr)).building_id
+                                    if bld_id is None:
+                                        continue
+                                    bld = next((b for b in state.buildings if b.id == bld_id), None)
+                                    if (
+                                        bld is not None and bld.owner != player_id
+                                        and bld.status == _CS.COMPLETE
+                                    ):
+                                        actions.append(ActivateMonsterAbility(
+                                            player_id=player_id, unit_position=pos,
+                                            ability_id=eff.type, target=bld_id,
+                                        ))
+                        elif eff.type == "ritual_requirement_reduction":
+                            if "req_reduction:available" not in unit.statuses:
+                                continue
+                            for rstate in ps.ritual_pool:
+                                if rstate.revelation != _RS.REVEALED:
+                                    actions.append(ActivateMonsterAbility(
+                                        player_id=player_id, unit_position=pos,
+                                        ability_id=eff.type, target=rstate.ritual_id,
+                                    ))
 
             if not actions:
                 # No moves available — checkmate or stalemate handled by engine
@@ -924,6 +1117,7 @@ class RulesEngine:
             castling_rights=cr,
             player_id=action.player_id,
             registry=self._registry,
+            state=state,
         )
         if action.target not in legal:
             raise IllegalActionError(
@@ -1093,6 +1287,14 @@ class RulesEngine:
                         captured_by_piece_id=unit.piece.id,
                     ))
 
+                    # ── Stage 11: "losing the Queen" Ritual-revelation
+                    # trigger (README §15.1) ──────────────────────────────
+                    from game.mechanics.rituals import on_piece_lost
+                    on_piece_lost(
+                        state, captured.owner, captured.piece.piece_type,
+                        events, self._registry,
+                    )
+
                     # ── Stage 5: retaliate (thorn_boar) ──────────────────
                     # If the captured unit had "retaliate", the attacker is
                     # destroyed too — skip after-capture effects / damage
@@ -1176,7 +1378,7 @@ class RulesEngine:
                     # owner like Traps are.
                     if not scorch_destroyed:
                         from game.mechanics.monsters import check_immobilize_zone
-                        check_immobilize_zone(state, unit, action.target)
+                        check_immobilize_zone(state, unit, action.target, registry=self._registry)
 
             # King capture → Final Duel (never sets winner directly)
             if captured is not None and not shield_absorbed and captured.piece.piece_type == PieceType.KING:
@@ -1495,7 +1697,10 @@ class RulesEngine:
 
         # ── Stage 5: on-summon effects ────────────────────────────────────
         if card is not None and isinstance(card, MonsterCard):
-            apply_on_summon_effects(state, unit, card, events, rng=rng)
+            apply_on_summon_effects(
+                state, unit, card, events, rng=rng,
+                position=action.vessel_position, registry=registry,
+            )
 
         return events
 
@@ -1691,6 +1896,40 @@ class RulesEngine:
             to_phase=Phase.REACTION,
         ))
         return events
+
+    def _execute_reorder_top_deck(
+        self,
+        state: GameState,
+        action: ReorderTopDeck,
+    ) -> list[Event]:
+        """
+        Resolve a REORDER_DECK PendingDecision (arcane_archivist's
+        inspect_top_deck). ``action.card_ids`` must be a permutation of
+        ``pd.options`` — replaces the top ``len(card_ids)`` cards of the
+        owner's deck with that order (index 0 = new top). Stays in
+        Phase.PREPARATION (SummonMonster already consumed the preparation
+        action) so the player can continue normally afterwards.
+        """
+        from game.core.events import DeckReordered
+
+        self._require_phase(state, Phase.PREPARATION)
+        pd = state.pending_decision
+        if pd is None or pd.decision_type != DecisionType.REORDER_DECK:
+            raise IllegalActionError("No pending deck-reorder decision.")
+        if pd.player_id != action.player_id:
+            raise IllegalActionError("This reorder decision belongs to the other player.")
+        if sorted(action.card_ids) != sorted(pd.options):
+            raise IllegalActionError(
+                "card_ids must be a permutation of the inspected cards "
+                f"{pd.options!r}."
+            )
+
+        ps = state.get_player(action.player_id)
+        n = len(action.card_ids)
+        ps.deck[:n] = list(action.card_ids)
+        state.pending_decision = None
+
+        return [DeckReordered(player_id=action.player_id, card_ids=tuple(action.card_ids))]
 
     def _execute_activate_spell(
         self,
@@ -2121,6 +2360,12 @@ class RulesEngine:
             state, action.player_id, unit.piece.piece_type.value,
             construction_turns, self._registry,
         )
+        # Stage 8: master_mason's construction_speed_bonus (adjacent Monster).
+        from game.mechanics.buildings import monster_construction_speed_bonus
+        construction_turns = monster_construction_speed_bonus(
+            state, action.player_id, action.pawn_position,
+            construction_turns, self._registry,
+        )
 
         building_id = f"bld-{action.player_id}-{len(state.buildings)+1:03d}"
         building = BuildingInstance(
@@ -2144,6 +2389,68 @@ class RulesEngine:
             position=action.pawn_position,
             builder_piece_id=unit.piece.id,
         ))
+        return events
+
+    def _execute_activate_ritual(
+        self,
+        state: GameState,
+        action: ActivateRitual,
+        rng: DeterministicRNG,
+        registry: "object | None" = None,
+    ) -> list[Event]:
+        """
+        Stage 11 — attempt a Ritual summon (README §14).
+
+        ``action.sacrifice_positions`` is read as [...pure sacrifices...,
+        Vessel] — see mechanics/rituals.py's module docstring. Validation
+        (mechanics.rituals.validate_ritual) covers the condition-specific
+        checks (formation / material / state); this method only handles
+        the generic PREPARATION-action bookkeeping and the actual board
+        mutation (mechanics.rituals.execute_ritual), then runs the
+        summoned Monster's on-summon effects exactly like SummonMonster.
+        """
+        from game.cards.card import RitualCard
+        from game.mechanics.monsters import apply_on_summon_effects
+        from game.mechanics.rituals import execute_ritual, get_ritual_state, validate_ritual
+
+        self._require_phase(state, Phase.PREPARATION)
+        self._require_no_prep_used(state, action.player_id)
+
+        if registry is None:
+            raise IllegalActionError("No card registry available to resolve Rituals.")
+
+        try:
+            ritual = registry.get(action.ritual_id)
+        except KeyError:
+            raise IllegalActionError(f"Unknown Ritual: {action.ritual_id!r}")
+        if not isinstance(ritual, RitualCard):
+            raise IllegalActionError(f"Card {action.ritual_id!r} is not a Ritual card.")
+
+        rstate = get_ritual_state(state, action.player_id, action.ritual_id)
+        if rstate is None:
+            raise IllegalActionError(f"Ritual {action.ritual_id!r} is not in your pool.")
+
+        try:
+            validate_ritual(state, action.player_id, ritual, rstate, list(action.sacrifice_positions), registry)
+        except ValueError as exc:
+            raise IllegalActionError(str(exc))
+
+        events: list[Event] = []
+        self._mark_prep_used(state, action.player_id, "ActivateRitual", events)
+
+        _vessel_pos, vessel_unit = execute_ritual(
+            state, action.player_id, ritual, rstate, list(action.sacrifice_positions), events,
+            registry=registry,
+        )
+
+        summoned_card = registry.get(ritual.summon_monster_id)
+        from game.cards.card import MonsterCard
+        if isinstance(summoned_card, MonsterCard):
+            apply_on_summon_effects(
+                state, vessel_unit, summoned_card, events, rng=rng,
+                position=_vessel_pos, registry=registry,
+            )
+
         return events
 
     def _execute_coronate_king(
@@ -2687,6 +2994,14 @@ class RulesEngine:
                     if n > 0:
                         remaining_statuses.append(f"{prefix}:{n}")
                     # else: expired, don't add back
+                elif prefix == "challenged_by":
+                    # duelist's challenge_unit — "challenged_by:<piece_id>:<N>"
+                    # decays on the CHALLENGED unit's own EndTurn, same
+                    # convention as immobilized/exposed above.
+                    _, challenger_id, n_s = status.split(":")
+                    n = int(n_s) - 1
+                    if n > 0:
+                        remaining_statuses.append(f"challenged_by:{challenger_id}:{n}")
                 else:
                     remaining_statuses.append(status)
             u.statuses = remaining_statuses
@@ -2701,8 +3016,20 @@ class RulesEngine:
         # end of turn (same "counts the owner's own turns" convention as
         # burrow_cooldown/immobilized/exposed above) — completing when it
         # reaches 0 (README §12.2).
-        from game.mechanics.buildings import tick_construction
+        from game.mechanics.buildings import tick_construction, tick_disabled_buildings
         tick_construction(state, ending_player, events)
+        # Stage 8: saboteur's disable_building decays on the disabled
+        # Building's OWNER's own EndTurn ("until the start of the next
+        # owner turn" — mirrors burrow_cooldown/immobilized).
+        tick_disabled_buildings(state, ending_player)
+
+        # ── Stage 11: ritual_progress_boost (ritual_acolyte) — advances
+        # the ending player's Ritual revelation progress (README §15.1).
+        from game.mechanics.rituals import advance_ritual_progress, advance_ritual_reveal_tradeoff
+        advance_ritual_progress(state, ending_player, events, self._registry)
+        # Stage 11: ritual_reveal_tradeoff's "once_per_turn" variant
+        # (oracle_of_the_last_star) — the on_summon path only fires once.
+        advance_ritual_reveal_tradeoff(state, ending_player, events, self._registry, rng=None)
 
         # Switch to other player
         opponent = state.opponent_of(action.player_id)
@@ -2859,5 +3186,8 @@ class RulesEngine:
             ps.set_check(now_in_check)
             if not was_in_check and now_in_check:
                 events.append(CheckDetected(player_id=pid))
+                # Stage 11: "being checked" Ritual-revelation trigger (README §15.1).
+                from game.mechanics.rituals import on_check_detected
+                on_check_detected(state, pid, events, self._registry)
             elif was_in_check and not now_in_check:
                 events.append(CheckResolved(player_id=pid))

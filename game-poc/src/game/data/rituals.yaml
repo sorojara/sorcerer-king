@@ -1,0 +1,304 @@
+# rituals.yaml — Stage 11: shared Ritual roster (README §14-§15)
+#
+# One Ritual per Monster archetype family, several archetypes getting a
+# second entry for variety (13 total). Each player draws a random 3-of-13
+# pool at game setup (mechanics/rituals.py assign_random_ritual_pool),
+# mirroring King Pool assignment — NOT the full roster.
+#
+# condition.type:
+#   formation — geometric arrangement of the owner's own pieces around an
+#               anchor node (the Vessel — survives, hosts the summoned
+#               Monster). Every other node is a pure sacrifice.
+#   material  — the sacrificed pieces' combined chess value (pawn=1,
+#               knight=3, bishop=3, rook=5, queen=9) must reach
+#               min_material.
+#   state     — every predicate in state_checks must hold. Plain names
+#               (queen_lost, king_in_check, ritual_revealed,
+#               vessel_inside_enemy_territory) are fixed booleans;
+#               "<metric>_at_least_N" / "<metric>_at_most_N" /
+#               "<metric>_within_N" are parsed generically by
+#               mechanics/rituals.py's threshold dispatcher — see that
+#               module for the exact metric list and any documented gaps
+#               (enemy_royal_support references a Final Duel system that
+#               doesn't exist until Stage 12 and can never be satisfied
+#               yet).
+#
+# required_vessel constrains the LAST sacrifice_positions entry (the
+# Vessel)'s piece type — also exactly what an opponent learns once the
+# Ritual reaches FORETOLD (README §15 example: "Required Vessel: Rook").
+#
+# summon: the ritual_only MonsterCard (data/ritual_monsters.yaml) placed on
+# the Vessel's square when this Ritual completes.
+
+# ── 1. DRAGON — FORMATION ──────────────────────────────────────────────────
+
+- id: rite_of_the_wyrm
+  name: Rite of the Wyrm
+  archetype: dragon
+  required_vessel: bishop
+  condition:
+    type: formation
+    pattern:
+      - offset: [0, 0]
+        piece_type: bishop
+        anchor: true
+      - offset: [-1, 0]
+        piece_type: pawn
+      - offset: [0, 1]
+        piece_type: knight
+  reveal_progress_threshold: 3
+  summon: stormcall_wyrm
+  description: >
+    A dragon-summoning rite. Sacrifice a Pawn and a Knight arranged around
+    a Bishop, which becomes the Wyrm's Vessel.
+
+
+# ── 2. SPELLCASTER — MATERIAL ─────────────────────────────────────────────
+
+- id: circle_of_the_arcane
+  name: Circle of the Arcane
+  archetype: spellcaster
+  required_vessel: bishop
+  condition:
+    type: material
+    min_material: 9
+  reveal_progress_threshold: 3
+  summon: archon_of_the_veil
+  description: >
+    Sacrifice chess material worth at least 9 points, with a Bishop as the
+    Vessel, to bind an Archon of the Veil.
+
+
+# ── 3. WARRIOR — STATE ────────────────────────────────────────────────────
+
+- id: vow_of_desperation
+  name: Vow of Desperation
+  archetype: warrior
+  required_vessel: rook
+  condition:
+    type: state
+    state_checks:
+      - queen_lost
+  min_sacrifices: 1
+  reveal_progress_threshold: 3
+  summon: vengeance_warlord
+  description: >
+    Once your Queen has fallen, a Rook may swear the Vow. No additional
+    material tribute is required beyond the Rook itself.
+
+
+# ── 4. DRAGON — MATERIAL / SIEGE ──────────────────────────────────────────
+
+- id: pyre_of_dominion
+  name: Pyre of Dominion
+  archetype: dragon
+  required_vessel: rook
+  condition:
+    type: material
+    min_material: 11
+  min_sacrifices: 3
+  reveal_progress_threshold: 4
+  summon: sovereign_of_embers
+  description: >
+    Sacrifice at least three pieces worth a combined 11 material points,
+    with a Rook as the Vessel. The pyre consumes a significant portion of
+    the army to call forth a siege dragon.
+
+
+# ── 5. SPELLCASTER — STATE / INFORMATION ──────────────────────────────────
+
+- id: constellation_rite
+  name: Constellation Rite
+  archetype: spellcaster
+  required_vessel: queen
+  condition:
+    type: state
+    state_checks:
+      - ritual_revealed
+      - hand_size_at_least_5
+  min_sacrifices: 2
+  reveal_progress_threshold: 4
+  summon: oracle_of_the_last_star
+  description: >
+    Once you have fully REVEALED at least one Ritual and hold at least
+    5 cards, sacrifice one additional piece alongside your Queen to summon
+    the Oracle of the Last Star.
+
+
+# ── 6. RITUALIST — FORMATION ──────────────────────────────────────────────
+
+- id: sevenfold_circle
+  name: Sevenfold Circle
+  archetype: ritualist
+  required_vessel: bishop
+  condition:
+    type: formation
+    pattern:
+      - offset: [0, 0]
+        piece_type: bishop
+        anchor: true
+      - offset: [-1, 0]
+        piece_type: pawn
+      - offset: [1, 0]
+        piece_type: pawn
+      - offset: [0, 1]
+        piece_type: pawn
+      - offset: [0, -1]
+        piece_type: pawn
+  reveal_progress_threshold: 5
+  summon: high_hierophant_of_the_circle
+  description: >
+    Surround a Bishop with four Pawns in a cross formation. The Pawns are
+    sacrificed while the Bishop becomes the Vessel of the High Hierophant.
+
+
+# ── 7. WARRIOR — FORMATION ────────────────────────────────────────────────
+
+- id: march_of_the_last_banner
+  name: March of the Last Banner
+  archetype: warrior
+  required_vessel: knight
+  condition:
+    type: formation
+    pattern:
+      - offset: [0, 0]
+        piece_type: knight
+        anchor: true
+      - offset: [-1, 0]
+        piece_type: pawn
+      - offset: [1, 0]
+        piece_type: pawn
+      - offset: [0, -1]
+        piece_type: rook
+  reveal_progress_threshold: 4
+  summon: bannerlord_eternal
+  description: >
+    A Knight stands at the center of a battle standard guarded by two
+    Pawns and a Rook. The surrounding pieces are sacrificed and the Knight
+    becomes the Bannerlord Eternal.
+
+
+# ── 8. KINGDOM — STATE / BUILDINGS ────────────────────────────────────────
+
+- id: rite_of_stone_and_crown
+  name: Rite of Stone and Crown
+  archetype: kingdom
+  required_vessel: rook
+  condition:
+    type: state
+    state_checks:
+      - buildings_at_least_2
+      - friendly_territory_squares_at_least_6
+  min_sacrifices: 2
+  reveal_progress_threshold: 4
+  summon: titan_of_the_foundation
+  description: >
+    Once the kingdom controls at least 2 completed Buildings and at least
+    6 friendly Territory squares, sacrifice one additional piece with a
+    Rook to awaken the Titan of the Foundation.
+
+
+# ── 9. KINGDOM — STATE / PAWN ECONOMY ─────────────────────────────────────
+
+- id: grand_works
+  name: Grand Works
+  archetype: kingdom
+  required_vessel: rook
+  condition:
+    type: state
+    state_checks:
+      - pawns_built_at_least_2
+      - building_destroyed_or_completed_at_least_3
+  min_sacrifices: 2
+  reveal_progress_threshold: 5
+  summon: worldforge_colossus
+  description: >
+    The Grand Works may begin once at least two Pawns have completed
+    construction and at least three Buildings have been completed or
+    destroyed during the match. A Rook becomes the Colossus's Vessel.
+
+
+# ── 10. ASSASSIN — STATE / KING PRESSURE ──────────────────────────────────
+
+- id: moonless_hunt
+  name: Moonless Hunt
+  archetype: assassin
+  required_vessel: knight
+  condition:
+    type: state
+    state_checks:
+      - vessel_inside_enemy_territory
+      - enemy_king_within_3
+      - enemy_royal_support_at_most_2
+  min_sacrifices: 1
+  reveal_progress_threshold: 4
+  summon: eclipse_executioner
+  description: >
+    A Knight deep inside enemy Territory may perform the Moonless Hunt
+    when it is within 3 squares of an isolated enemy King. The Knight
+    becomes the Eclipse Executioner.
+
+    NOTE: enemy_royal_support_at_most_2 references the Royal Support tally
+    from the Final Duel system (README §27), which doesn't exist until
+    Stage 12 — this Ritual cannot be completed yet. Documented gap, not a
+    bug; see mechanics/rituals.py.
+
+
+# ── 11. NECROMANCER — GRAVEYARD STATE ─────────────────────────────────────
+
+- id: throne_of_remains
+  name: Throne of Remains
+  archetype: necromancer
+  required_vessel: queen
+  condition:
+    type: state
+    state_checks:
+      - graveyard_cards_at_least_8
+      - allied_monsters_destroyed_at_least_3
+  min_sacrifices: 1
+  reveal_progress_threshold: 5
+  summon: ossuary_king
+  description: >
+    Once at least 8 cards fill your Graveyard and at least 3 allied
+    Monsters have fallen, the Queen may become the Vessel of the
+    Ossuary King.
+
+
+# ── 12. NECROMANCER / BEAST — DESPERATION STATE ───────────────────────────
+
+- id: empty_throne_rite
+  name: Empty Throne Rite
+  archetype: necromancer
+  required_vessel: rook
+  condition:
+    type: state
+    state_checks:
+      - queen_lost
+      - graveyard_cards_at_least_6
+      - pieces_remaining_at_most_6
+  min_sacrifices: 1
+  reveal_progress_threshold: 4
+  summon: revenant_of_the_empty_throne
+  description: >
+    When the Queen is gone, the Graveyard contains at least 6 cards, and
+    the army has been reduced to 6 or fewer pieces, a Rook may become the
+    Revenant of the Empty Throne.
+
+
+# ── 13. BEAST — STATE / TERRITORY ─────────────────────────────────────────
+
+- id: hunt_beneath_the_moon
+  name: Hunt Beneath the Moon
+  archetype: beast
+  required_vessel: knight
+  condition:
+    type: state
+    state_checks:
+      - vessel_inside_enemy_territory
+  min_sacrifices: 1
+  reveal_progress_threshold: 4
+  summon: primordial_moonbeast
+  description: >
+    A Knight that has crossed fully into enemy Territory may answer the
+    Hunt Beneath the Moon and become the Vessel of the Primordial
+    Moonbeast. No further material tribute is required.

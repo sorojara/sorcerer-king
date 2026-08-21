@@ -137,3 +137,4 @@ class DecisionType(Enum):
     CHOOSE_TARGET = "choose_target"
     CHOOSE_SACRIFICE = "choose_sacrifice"
     REPOSITION = "reposition"          # Stage 5: move a piece to a chosen square
+    REORDER_DECK = "reorder_deck"      # arcane_archivist: reorder the top N cards

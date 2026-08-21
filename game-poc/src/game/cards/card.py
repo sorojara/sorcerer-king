@@ -78,6 +78,7 @@ class CardType(Enum):
     TRAP = "trap"
     BUILDING = "building"
     KING = "king"
+    RITUAL = "ritual"
 
 
 class BuildingSize(Enum):
@@ -172,6 +173,14 @@ class MonsterCard:
     # needing a YAML entry — the file itself is expected to be dropped in
     # later; the UI shows a "no image available" placeholder until then.
     image_path: str = ""
+    # Stage 11: True for a Monster that only ever enters play as the payoff
+    # of a Ritual (README §14 "Ritual Monsters exist in a separate Ritual /
+    # Extra Pool. They are not normally drawn."). Excluded from
+    # Game._build_deck_from_registry's Main Deck sampling; otherwise behaves
+    # exactly like any other MonsterCard once summoned (same on-summon
+    # effects, same board rendering — a Ritual Monster is not a distinct
+    # runtime type, just a card that reaches the board a different way).
+    ritual_only: bool = False
 
     @property
     def card_type(self) -> CardType:
@@ -309,8 +318,69 @@ class KingCard:
         return CardType.KING
 
 
+@dataclass(frozen=True)
+class RitualCard:
+    """
+    Stage 11 — one entry in the shared Ritual roster (README §14-§15).
+
+    Each player draws a random 3-of-N ``ritual_pool`` from the shared
+    roster at game setup (mechanics/rituals.py assign_random_ritual_pool),
+    mirroring KingCard's own "pool of 3" model. All begin SEALED.
+
+    ``condition_type`` selects which of README §14.1's condition families
+    this Ritual uses (the PoC folds "Control" and "Tactical" into "state" —
+    see mechanics/rituals.py's module docstring for the reasoning):
+
+        "formation" — ``pattern`` must match a formation of the owner's own
+                       pieces (README's Knight/Pawn-Bishop example).
+        "material"  — the sacrificed pieces' combined chess value must reach
+                       ``min_material`` (pawn=1, knight=3, bishop=3, rook=5,
+                       queen=9).
+        "state"     — a named predicate in ``state_checks`` about the
+                       current game state must hold (e.g. "queen_lost").
+
+    In every case, the LAST position in ActivateRitual.sacrifice_positions
+    is the Ritual's Vessel — it survives and hosts ``summon_monster_id``,
+    exactly like a normal SummonMonster (README §3). Every earlier position
+    is a pure sacrifice: removed from the board entirely. ``required_vessel``
+    (shown to the opponent once FORETOLD — README §15's example) constrains
+    the Vessel's piece type; None means any non-King piece qualifies.
+
+    ``pattern`` entries (formation only) are
+    ``{"offset": [file_delta, rank_delta], "piece_type": str, "anchor": bool}``
+    — offsets are relative to the Vessel (the anchor node, offset (0, 0)) in
+    ABSOLUTE board coordinates, not mirrored per player color. This is a
+    deliberate PoC simplification (README §57 lists "precise Monster
+    movement rules" etc. as open questions) — the same literal geometry
+    applies to both players rather than adding orientation-mirroring logic
+    that has no gameplay payoff yet.
+
+    ``reveal_progress_threshold`` — how much ``ritual_progress_boost``
+    (ritual_acolyte) accumulation is needed to advance one revelation step
+    (see mechanics/rituals.py advance_ritual_progress).
+    """
+
+    id: str
+    name: str
+    archetype: str
+    condition_type: str                          # "formation" | "material" | "state"
+    required_vessel: str | None = None
+    pattern: tuple[dict[str, Any], ...] = ()      # formation nodes
+    min_material: int = 0
+    state_checks: tuple[str, ...] = ()
+    min_sacrifices: int = 1
+    reveal_progress_threshold: int = 3
+    summon_monster_id: str = ""
+    description: str = ""
+    image_path: str = ""
+
+    @property
+    def card_type(self) -> CardType:
+        return CardType.RITUAL
+
+
 # Union
-AnyCard = MonsterCard | SpellCard | TrapCard | BuildingCard | KingCard
+AnyCard = MonsterCard | SpellCard | TrapCard | BuildingCard | KingCard | RitualCard
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,6 +420,9 @@ class CardRegistry:
 
     def all_kings(self) -> list[KingCard]:
         return [c for c in self._cards.values() if isinstance(c, KingCard)]
+
+    def all_rituals(self) -> list[RitualCard]:
+        return [c for c in self._cards.values() if isinstance(c, RitualCard)]
 
     def __len__(self) -> int:
         return len(self._cards)
@@ -407,6 +480,31 @@ def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ig
                     duel_ability=d.get("duel_ability"),
                     description=d.get("description", ""),
                     image_path=d.get("image", f"{d['id']}.png"),
+                    ritual_only=d.get("ritual_only", False),
+                )
+            )
+
+    # ── Ritual Monsters (Stage 11) ───────────────────────────────────────
+    # Separate file (README §14 "Ritual Monsters exist in a separate
+    # Ritual / Extra Pool") — same MonsterCard schema, but every card
+    # loaded here is forced ritual_only=True regardless of the YAML,
+    # so Game._build_deck_from_registry's Main Deck sampling (which reads
+    # registry.all_monsters()) can never pick one up.
+    ritual_monsters_path = data_dir / "ritual_monsters.yaml"
+    if ritual_monsters_path.exists():
+        docs = yaml.safe_load(ritual_monsters_path.read_text())
+        for d in (docs or []):
+            registry.register(
+                MonsterCard(
+                    id=d["id"],
+                    name=d["name"],
+                    archetype=d.get("archetype", "generic"),
+                    supported_vessels=tuple(d.get("supported_vessels", [])),
+                    effects=_build_effects(d.get("effects", [])),
+                    duel_ability=d.get("duel_ability"),
+                    description=d.get("description", ""),
+                    image_path=d.get("image", f"{d['id']}.png"),
+                    ritual_only=True,
                 )
             )
 
@@ -480,6 +578,29 @@ def load_registry_from_yaml(data_dir: "str | Path") -> CardRegistry:  # type: ig
                     effects=_build_effects(d.get("effects", [])),
                     duel_ability=d.get("duel_ability"),
                     duel_effect=_build_single_effect(d.get("duel_effect")),
+                    description=d.get("description", ""),
+                    image_path=d.get("image", f"{d['id']}.png"),
+                )
+            )
+
+    # ── Rituals (Stage 11) ───────────────────────────────────────────────
+    rituals_path = data_dir / "rituals.yaml"
+    if rituals_path.exists():
+        docs = yaml.safe_load(rituals_path.read_text())
+        for d in (docs or []):
+            registry.register(
+                RitualCard(
+                    id=d["id"],
+                    name=d["name"],
+                    archetype=d.get("archetype", "generic"),
+                    condition_type=d["condition"]["type"],
+                    required_vessel=d.get("required_vessel"),
+                    pattern=tuple(d["condition"].get("pattern", [])),
+                    min_material=d["condition"].get("min_material", 0),
+                    state_checks=tuple(d["condition"].get("state_checks", [])),
+                    min_sacrifices=d.get("min_sacrifices", 1),
+                    reveal_progress_threshold=d.get("reveal_progress_threshold", 3),
+                    summon_monster_id=d["summon"],
                     description=d.get("description", ""),
                     image_path=d.get("image", f"{d['id']}.png"),
                 )

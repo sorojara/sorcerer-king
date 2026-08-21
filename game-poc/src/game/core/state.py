@@ -70,10 +70,32 @@ class PendingDecision:
 
 @dataclass
 class RitualState:
-    """Tracks one ritual card in a player's pool and its revelation progress."""
+    """
+    Tracks one Ritual card in a player's pool and its revelation progress.
+
+    ``progress``               — Stage 11: accumulator fed by
+        ``ritual_progress_boost`` (ritual_acolyte, end-of-turn — see
+        mechanics/rituals.py advance_ritual_progress). Reaching the
+        RitualCard's ``reveal_progress_threshold`` advances ``revelation``
+        one step (SEALED→FORETOLD or FORETOLD→REVEALED) and resets to 0.
+    ``requirement_reduction``  — Stage 11: forbidden_priest's once-per-
+        summon ``ritual_requirement_reduction`` effect. Lowers the
+        effective min_material / min_sacrifices / non-anchor pattern-node
+        count needed to activate this Ritual by this many (see
+        mechanics/rituals.py _effective_requirement). Activating it also
+        forces ``revelation`` to REVEALED (card text).
+    ``activated``              — True once this Ritual has been summoned
+        (ActivateRitual succeeded). A completed Ritual cannot be attempted
+        again — mirrors "a retired King cannot become active again"
+        (README §19), applied here to a one-shot summon rather than a
+        policy switch.
+    """
 
     ritual_id: str
     revelation: RevelationState = RevelationState.SEALED
+    progress: int = 0
+    requirement_reduction: int = 0
+    activated: bool = False
 
 
 @dataclass
@@ -127,6 +149,11 @@ class BuildingInstance:
     status: ConstructionStatus = ConstructionStatus.UNDER_CONSTRUCTION
     builder_piece_id: str | None = None
     remaining_turns: int = 0  # construction countdown; 0 when complete
+    # saboteur's ``disable_building``: turns remaining before this
+    # COMPLETE Building's aura/support effects resume. Ticks down on the
+    # OWNER's own EndTurn (mirrors burrow_cooldown/immobilized — "until
+    # the start of the next owner turn").
+    disabled_turns: int = 0
 
 
 @dataclass
@@ -226,6 +253,12 @@ class PlayerState:
     archetype: str | None = None
 
     ritual_pool: list[RitualState] = field(default_factory=list)
+    # Stage 11: lifetime count of this player's OWN Monsters destroyed
+    # (across the whole match, never reset) — feeds the Ritual state
+    # predicate "allied_monsters_destroyed_at_least_N" (throne_of_remains).
+    # Incremented centrally in core/rules.py RulesEngine.execute() for
+    # every MonsterDestroyed event, so no destruction path can miss it.
+    monsters_lost_count: int = 0
 
     building_pool: list[BuildingPoolEntry] = field(default_factory=list)
 
@@ -244,12 +277,16 @@ class PlayerState:
     # the FIRST allied Monster destroyed each turn (README-style "once per
     # turn" cap — see mechanics/kings.py maybe_recycle_destroyed_monster).
     king_recycle_used_this_turn: bool = False
+    # mourning_queen's ``death_trigger_draw`` (limit_per_turn: 1) — only the
+    # FIRST allied Monster destroyed on this player's turn draws a card.
+    death_trigger_draw_used_this_turn: bool = False
 
     def reset_turn_flags(self) -> None:
         """Call at the start of this player's turn."""
         self.preparation_action_used = False
         self.chess_move_used = False
         self.king_recycle_used_this_turn = False
+        self.death_trigger_draw_used_this_turn = False
 
     def is_in_check(self) -> bool:
         """

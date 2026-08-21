@@ -1,0 +1,360 @@
+# ritual_monsters.yaml — Stage 11: the Ritual / Extra Pool (README §14)
+#
+#   "Ritual Monsters exist in a separate Ritual / Extra Pool. They are not
+#    normally drawn."
+#
+# Kept in a dedicated file — NOT data/monsters.yaml — so the Main Deck
+# sampler (Game._build_deck_from_registry, which draws from
+# registry.all_monsters()) can never accidentally pick one up. Every card
+# loaded from this file is a MonsterCard exactly like any other (same
+# schema, same on-summon effect pipeline, same board rendering once
+# summoned) with ``ritual_only`` forced True by the loader regardless of
+# what's written here — see cards/card.py load_registry_from_yaml.
+#
+# Each entry is the ``summon:`` target of exactly one Ritual in
+# data/rituals.yaml. ``supported_vessels`` is informational only — Ritual
+# summoning (mechanics/rituals.py execute_ritual) places the Monster
+# directly on the Ritual's required Vessel, bypassing the normal
+# vessel-compatibility check entirely.
+#
+# NOTE on effect types below that reference systems not yet built (Stage
+# 6/7/8/12 STUBs — building_aura, territory_expansion, construction_speed_
+# bonus as a monster-level effect, restore_builder, repair_building,
+# pass_through_units, capture_protection_from_counter, formation_support /
+# king_support_bonus / graveyard_recycle / graveyard_threshold_bonus /
+# enemy_territory_mobility / royal_support_suppression used outside their
+# King-policy or Final-Duel context): these resolve to a logged no-op
+# exactly like the existing PoC roster's royal_guard, siege_captain,
+# guild_foreman, frontier_warden, master_mason, bone_collector,
+# crypt_walker, mourning_queen, kingsbane, and phantom_lancer already do —
+# not a new gap introduced here, the same documented STUB convention used
+# throughout mechanics/effects/. Effects actually wired up on these cards:
+# damage_aura, capture_protection, scorch_square, building_damage_bonus,
+# spell_radius_bonus, ritual_reveal_tradeoff (on_summon AND the new
+# once_per_turn end-of-turn path — mechanics/rituals.py
+# advance_ritual_reveal_tradeoff), ritual_requirement_reduction (activated),
+# ritual_progress_boost (end_of_turn), burrow, retaliate.
+
+# ── DRAGON ─────────────────────────────────────────────────────────────────
+
+- id: stormcall_wyrm
+  name: Stormcall Wyrm
+  archetype: dragon
+  supported_vessels:
+    - bishop
+  effects:
+    - type: damage_aura
+      params:
+        radius: 1
+        trigger: enter_radius
+        owner_immune: true
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: draconic_charge
+  description: >
+    Summoned by the Rite of the Wyrm. A storm-wreathed dragon whose
+    presence destroys any enemy piece that strays within 1 square, and
+    which survives the first capture attempt against it.
+
+- id: sovereign_of_embers
+  name: Sovereign of Embers
+  archetype: dragon
+  supported_vessels:
+    - rook
+  effects:
+    - type: scorch_square
+      params:
+        trigger: on_capture
+        duration_turns: 2
+        owner_immune: true
+    - type: building_damage_bonus
+      params:
+        destroy_on_capture: true
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: infernal_siege
+  description: >
+    Summoned by the Pyre of Dominion. The Sovereign leaves scorched ground
+    wherever it captures and tears through enemy infrastructure. Its first
+    attempted capture against it is prevented.
+
+
+# ── SPELLCASTER / RITUALIST ────────────────────────────────────────────────
+
+- id: archon_of_the_veil
+  name: Archon of the Veil
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+  effects:
+    - type: spell_radius_bonus
+      params:
+        bonus: 2
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: arcane_intervention
+  description: >
+    Summoned by the Circle of the Arcane. Amplifies nearby Spells by 2
+    squares of radius and survives the first capture attempt against it.
+
+- id: oracle_of_the_last_star
+  name: Oracle of the Last Star
+  archetype: spellcaster
+  supported_vessels:
+    - queen
+  effects:
+    - type: inspect_top_deck
+      params:
+        count: 5
+        trigger: on_summon
+    - type: reorder_top_deck
+      params:
+        count: 5
+        trigger: after_inspect
+    - type: ritual_reveal_tradeoff
+      params:
+        trigger: once_per_turn
+        reveal_own: 1
+        draw_cards: 1
+  duel_ability: celestial_foreknowledge
+  description: >
+    Summoned by the Constellation Rite. The Oracle manipulates future
+    draws and turns Ritual knowledge into card advantage.
+
+- id: high_hierophant_of_the_circle
+  name: High Hierophant of the Circle
+  archetype: ritualist
+  supported_vessels:
+    - bishop
+  effects:
+    - type: ritual_requirement_reduction
+      params:
+        amount: 1
+        limit_per_turn: 1
+    - type: ritual_activation_range
+      params:
+        radius_bonus: 1
+    - type: ritual_progress_boost
+      params:
+        amount: 1
+        trigger: end_of_turn
+  duel_ability: grand_invocation
+  description: >
+    Summoned by the Sevenfold Circle. The Hierophant becomes a living
+    Ritual focus, making future invocations easier and accelerating
+    Ritual progress while it remains on the board.
+
+
+# ── WARRIOR ────────────────────────────────────────────────────────────────
+
+- id: vengeance_warlord
+  name: Vengeance Warlord
+  archetype: warrior
+  supported_vessels:
+    - rook
+  effects:
+    - type: capture_protection
+      params:
+        uses: 2
+    - type: retaliate
+      params:
+        trigger: capture_attempt
+        destroy_attacker_if_destroyed: true
+  duel_ability: last_charge
+  description: >
+    Summoned by the Vow of Desperation, sworn only after the Queen has
+    fallen. Absorbs two capture attempts, and destroys whatever finally
+    destroys it.
+
+- id: bannerlord_eternal
+  name: Bannerlord Eternal
+  archetype: warrior
+  supported_vessels:
+    - knight
+  effects:
+    - type: formation_support
+      params:
+        archetype: warrior
+        radius: 1
+        capture_protection_bonus: 1
+        limit_per_unit: 1
+    - type: king_support_bonus
+      params:
+        archetype: warrior
+        radius: 2
+        bonus: 1
+  duel_ability: final_standard
+  description: >
+    Summoned by the March of the Last Banner. Warriors fighting near the
+    Bannerlord gain protection, and nearby soldiers contribute greater
+    Royal Support when the King is threatened.
+
+
+# ── KINGDOM / BUILDERS ─────────────────────────────────────────────────────
+
+- id: titan_of_the_foundation
+  name: Titan of the Foundation
+  archetype: kingdom
+  supported_vessels:
+    - rook
+  effects:
+    - type: building_aura
+      params:
+        radius: 2
+        allied_building_bonus:
+          durability: 1
+    - type: territory_expansion
+      params:
+        radius_bonus: 1
+        source: adjacent_buildings
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: living_fortress
+  description: >
+    Summoned by the Rite of Stone and Crown. The Titan strengthens nearby
+    Buildings, expands developed Territory, and serves as a living fortress
+    for the kingdom.
+
+- id: worldforge_colossus
+  name: Worldforge Colossus
+  archetype: kingdom
+  supported_vessels:
+    - rook
+  effects:
+    - type: construction_speed_bonus
+      params:
+        radius: 2
+        turns_reduced: 1
+        minimum_turns: 1
+    - type: restore_builder
+      params:
+        trigger: on_summon
+        max_targets: 2
+        target: allied_pawn
+    - type: repair_building
+      params:
+        trigger: end_of_turn
+        radius: 2
+        amount: 1
+  duel_ability: bastion_of_creation
+  description: >
+    Summoned by the Grand Works. The Worldforge Colossus restores exhausted
+    builders and turns the surrounding battlefield into a center of rapid
+    construction and repair.
+
+
+# ── ASSASSIN ───────────────────────────────────────────────────────────────
+
+- id: eclipse_executioner
+  name: Eclipse Executioner
+  archetype: assassin
+  supported_vessels:
+    - knight
+  effects:
+    - type: enemy_territory_mobility
+      params:
+        archetype: assassin
+        movement_bonus: 2
+        condition:
+          inside_enemy_territory: true
+    - type: royal_support_suppression
+      params:
+        radius: 2
+        amount: 1
+    - type: pass_through_units
+      params:
+        max_units: 1
+        destination_must_be_empty: true
+  duel_ability: eclipse_strike
+  description: >
+    Summoned by the Moonless Hunt. Designed to penetrate enemy territory,
+    isolate the opposing King, and weaken the defenders available during
+    the Final Duel.
+
+
+# ── NECROMANCER ────────────────────────────────────────────────────────────
+
+- id: ossuary_king
+  name: Ossuary King
+  archetype: necromancer
+  supported_vessels:
+    - queen
+  effects:
+    - type: graveyard_recycle
+      params:
+        trigger: allied_monster_destroyed
+        destination: bottom_of_deck
+        count: 1
+        limit_per_turn: 1
+    - type: graveyard_threshold_bonus
+      params:
+        threshold: 6
+        bonus:
+          capture_protection_uses: 1
+        target_archetype: necromancer
+    - type: death_trigger_draw
+      params:
+        trigger: allied_monster_destroyed
+        count: 1
+        limit_per_turn: 1
+  duel_ability: legion_of_bones
+  description: >
+    Summoned by the Throne of Remains. Every loss feeds the Ossuary King's
+    engine, returning fallen Monsters to the deck and turning casualties
+    into protection and card advantage.
+
+- id: revenant_of_the_empty_throne
+  name: Revenant of the Empty Throne
+  archetype: necromancer
+  supported_vessels:
+    - rook
+  effects:
+    - type: graveyard_scaling_movement
+      params:
+        threshold: 5
+        bonus_leap: 1
+    - type: royal_support_suppression
+      params:
+        radius: 1
+        amount: 1
+    - type: capture_protection_from_counter
+      params:
+        required_counters: 2
+        uses_per_counter: 1
+  duel_ability: deathless_march
+  description: >
+    Summoned by the Empty Throne Rite. The Revenant grows stronger as the
+    Graveyard fills and weakens enemy defenders when it reaches the royal
+    court.
+
+
+# ── BEAST ──────────────────────────────────────────────────────────────────
+
+- id: primordial_moonbeast
+  name: Primordial Moonbeast
+  archetype: beast
+  supported_vessels:
+    - knight
+  effects:
+    - type: burrow
+      params:
+        max_distance: 3
+        ignore_units: true
+        destination_must_be_empty: true
+        cooldown_turns: 2
+    - type: trap_immunity
+      params:
+        uses: 1
+    - type: retaliate
+      params:
+        trigger: capture_attempt
+        destroy_attacker_if_destroyed: true
+  duel_ability: primal_rampage
+  description: >
+    Summoned by the Hunt Beneath the Moon. The Moonbeast moves through
+    occupied lines, ignores the first Trap that affects it, and drags its
+    killer down with it when finally destroyed.

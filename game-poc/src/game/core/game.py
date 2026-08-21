@@ -130,7 +130,10 @@ class Game:
         the other categories.  Cards are NOT shared between players — each call
         produces an independent random sample using the provided RNG.
         """
-        monsters = [c.id for c in registry.all_monsters()]
+        # Stage 11: ritual_only Monsters (data/ritual_monsters.yaml) never
+        # enter a Main Deck (README §14 "not normally drawn") — they only
+        # reach the board via ActivateRitual.
+        monsters = [c.id for c in registry.all_monsters() if not c.ritual_only]
         spells   = [c.id for c in registry.all_spells()]
         traps    = [c.id for c in registry.all_traps()]
 
@@ -264,6 +267,13 @@ class Game:
         from game.mechanics.kings import assign_random_king_pool
         assign_random_king_pool(white, registry, rng)
         assign_random_king_pool(black, registry, rng)
+
+        # Stage 11: each player draws a random 3-of-N Ritual Pool (README
+        # §14), mirroring King Pool assignment. A no-op when no registry is
+        # given (e.g. registry-less unit tests).
+        from game.mechanics.rituals import assign_random_ritual_pool
+        assign_random_ritual_pool(white, registry, rng)
+        assign_random_ritual_pool(black, registry, rng)
 
         board = BoardState.make_standard_start()
         state = GameState(

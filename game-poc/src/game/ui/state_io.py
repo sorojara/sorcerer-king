@@ -134,10 +134,22 @@ def _king_card_from_d(d: dict) -> KingCardState:
     return KingCardState(king_card_id=d["king_card_id"], status=KingCardStatus(d["status"]))
 
 def _ritual_to_d(rs: RitualState) -> dict:
-    return {"ritual_id": rs.ritual_id, "revelation": rs.revelation.value}
+    return {
+        "ritual_id": rs.ritual_id,
+        "revelation": rs.revelation.value,
+        "progress": rs.progress,
+        "requirement_reduction": rs.requirement_reduction,
+        "activated": rs.activated,
+    }
 
 def _ritual_from_d(d: dict) -> RitualState:
-    return RitualState(ritual_id=d["ritual_id"], revelation=RevelationState(d["revelation"]))
+    return RitualState(
+        ritual_id=d["ritual_id"],
+        revelation=RevelationState(d["revelation"]),
+        progress=d.get("progress", 0),
+        requirement_reduction=d.get("requirement_reduction", 0),
+        activated=d.get("activated", False),
+    )
 
 def _building_pool_entry_to_d(e: BuildingPoolEntry) -> dict:
     return {"building_card_id": e.building_card_id, "copies_available": e.copies_available}
@@ -158,11 +170,13 @@ def _player_to_d(ps: PlayerState) -> dict:
         "retired_kings": list(ps.retired_kings),
         "archetype": ps.archetype,
         "ritual_pool": [_ritual_to_d(r) for r in ps.ritual_pool],
+        "monsters_lost_count": ps.monsters_lost_count,
         "building_pool": [_building_pool_entry_to_d(b) for b in ps.building_pool],
         "castling_rights": _castling_to_d(ps.castling_rights),
         "preparation_action_used": ps.preparation_action_used,
         "chess_move_used": ps.chess_move_used,
         "king_recycle_used_this_turn": ps.king_recycle_used_this_turn,
+        "death_trigger_draw_used_this_turn": ps.death_trigger_draw_used_this_turn,
         "in_check": ps._in_check,
     }
 
@@ -178,11 +192,13 @@ def _player_from_d(d: dict) -> PlayerState:
         retired_kings=d.get("retired_kings", []),
         archetype=d.get("archetype"),
         ritual_pool=[_ritual_from_d(r) for r in d.get("ritual_pool", [])],
+        monsters_lost_count=d.get("monsters_lost_count", 0),
         building_pool=[_building_pool_entry_from_d(b) for b in d.get("building_pool", [])],
         castling_rights=_castling_from_d(d["castling_rights"]),
         preparation_action_used=d.get("preparation_action_used", False),
         chess_move_used=d.get("chess_move_used", False),
         king_recycle_used_this_turn=d.get("king_recycle_used_this_turn", False),
+        death_trigger_draw_used_this_turn=d.get("death_trigger_draw_used_this_turn", False),
     )
     ps._in_check = d.get("in_check", False)
     return ps
@@ -235,6 +251,7 @@ def _building_to_d(b: BuildingInstance) -> dict:
         "id": b.id, "owner": b.owner, "building_card_id": b.building_card_id,
         "position": _pos_to_d(b.position), "status": b.status.value,
         "builder_piece_id": b.builder_piece_id, "remaining_turns": b.remaining_turns,
+        "disabled_turns": b.disabled_turns,
     }
 
 def _building_from_d(d: dict) -> BuildingInstance:
@@ -242,6 +259,7 @@ def _building_from_d(d: dict) -> BuildingInstance:
         id=d["id"], owner=d["owner"], building_card_id=d["building_card_id"],
         position=_pos_from_d(d["position"]), status=ConstructionStatus(d["status"]),
         builder_piece_id=d.get("builder_piece_id"), remaining_turns=d.get("remaining_turns", 0),
+        disabled_turns=d.get("disabled_turns", 0),
     )
 
 def _duel_to_d(ds: DuelState) -> dict:

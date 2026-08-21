@@ -117,8 +117,42 @@ def _building_zone_squares(
         from game.mechanics.kings import building_territory_radius_bonus
         radius += building_territory_radius_bonus(state, player_id, registry)
 
+        # Stage 8/9: frontier_warden's territory_expansion — an allied
+        # Monster adjacent to THIS Building extends its own radius by 1
+        # ("Adjacent Buildings project Territory one additional square"),
+        # unlike the architect_king bonus above which applies to every
+        # Building unconditionally.
+        radius += _adjacent_territory_expansion_bonus(state, player_id, b.position, registry)
+
         squares.update(expand_area(b.position, radius, "square"))
     return squares
+
+
+def _adjacent_territory_expansion_bonus(
+    state: "GameState", player_id: str, building_pos: Position, registry: "object | None",
+) -> int:
+    """frontier_warden: sum of radius_bonus from every owned Monster adjacent
+    to ``building_pos`` carrying ``territory_expansion``."""
+    if registry is None:
+        return 0
+    from game.cards.card import MonsterCard
+
+    bonus = 0
+    for pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None:
+            continue
+        if max(abs(pos.file - building_pos.file), abs(pos.rank - building_pos.rank)) != 1:
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard):
+            continue
+        for effect in card.effects:
+            if effect.type == "territory_expansion":
+                bonus += effect.params.get("radius_bonus", 1)
+    return bonus
 
 
 def territory_squares(state: "GameState", player_id: str, registry: "object | None" = None) -> set[Position]:

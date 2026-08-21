@@ -93,6 +93,63 @@ def cancel_construction(
     ))
 
 
+def monster_construction_speed_bonus(
+    state: "GameState",
+    owner: str,
+    builder_position: "Position",
+    base_turns: int,
+    registry: "object | None",
+) -> int:
+    """
+    IMPLEMENTED — master_mason's ``construction_speed_bonus``.
+
+    Final ``remaining_turns`` for a construction just started at
+    ``builder_position``, after every owned Monster within
+    ``radius`` squares of it that carries this effect (mirrors
+    mechanics.kings.apply_construction_speed_bonus's King-policy
+    equivalent, applied on top of it in
+    RulesEngine._execute_start_construction).
+    """
+    if registry is None:
+        return base_turns
+    from game.cards.card import MonsterCard
+
+    turns = base_turns
+    for pos, unit in state.board.all_units_for(owner):
+        if unit.monster_id is None:
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard):
+            continue
+        for effect in card.effects:
+            if effect.type != "construction_speed_bonus":
+                continue
+            radius = effect.params.get("radius", 1)
+            if (
+                abs(builder_position.file - pos.file) <= radius
+                and abs(builder_position.rank - pos.rank) <= radius
+            ):
+                reduced = turns - effect.params.get("turns_reduced", 1)
+                minimum = effect.params.get("minimum_turns", 1)
+                turns = max(reduced, minimum)
+    return turns
+
+
+def tick_disabled_buildings(state: "GameState", owner: str) -> None:
+    """
+    Called once per ``owner``'s own EndTurn. Ticks down ``disabled_turns``
+    on every Building they own (saboteur's ``disable_building`` — decays
+    on the VICTIM owner's own turn, same convention as burrow_cooldown /
+    immobilized: "until the start of the next owner turn").
+    """
+    for b in state.buildings:
+        if b.owner == owner and b.disabled_turns > 0:
+            b.disabled_turns -= 1
+
+
 def tick_construction(state: "GameState", owner: str, events: "list[Event]") -> None:
     """
     Called once per ``owner``'s own EndTurn.  Every UNDER_CONSTRUCTION
@@ -138,6 +195,8 @@ def apply_building_auras(state: "GameState", player_id: str, registry: "object |
     for b in state.buildings:
         if b.owner != player_id or b.status != ConstructionStatus.COMPLETE:
             continue
+        if b.disabled_turns > 0:
+            continue  # saboteur's disable_building — auras suspended
         try:
             card = registry.get(b.building_card_id)
         except KeyError:
@@ -197,6 +256,8 @@ def trap_radius_bonus(state: "GameState", trap: "TrapInstance", registry: "objec
     for b in state.buildings:
         if b.owner != trap.owner or b.status != ConstructionStatus.COMPLETE:
             continue
+        if b.disabled_turns > 0:
+            continue  # saboteur's disable_building — bonus suspended
         try:
             card = registry.get(b.building_card_id)
         except KeyError:
