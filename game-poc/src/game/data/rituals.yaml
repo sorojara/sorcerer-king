@@ -164,11 +164,11 @@
       - offset: [0, 0]
         piece_type: knight
         anchor: true
-      - offset: [-1, 0]
+      - offset: [-1, -1]
         piece_type: pawn
-      - offset: [1, 0]
+      - offset: [1, -1]
         piece_type: pawn
-      - offset: [0, -1]
+      - offset: [0, -2]
         piece_type: rook
   reveal_progress_threshold: 4
   summon: bannerlord_eternal

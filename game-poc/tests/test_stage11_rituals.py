@@ -659,11 +659,13 @@ class TestNewRituals:
         assert state.board.get_unit(Position.from_algebraic("d4")).monster_id == "high_hierophant_of_the_circle"
 
     def test_march_of_the_last_banner_formation(self, registry, rng):
+        # Formation per card image: knight at top, pawns flanking one rank
+        # below, rook two ranks below (offsets [-1,-1],[+1,-1],[0,-2]).
         board = BoardState()
         _place(board, "white", PieceType.KNIGHT, "d4", "white-knight-1")
-        _place(board, "white", PieceType.PAWN, "c4", "white-pawn-1")
-        _place(board, "white", PieceType.PAWN, "e4", "white-pawn-2")
-        _place(board, "white", PieceType.ROOK, "d3", "white-rook-1")
+        _place(board, "white", PieceType.PAWN, "c3", "white-pawn-1")   # [-1,-1]
+        _place(board, "white", PieceType.PAWN, "e3", "white-pawn-2")   # [+1,-1]
+        _place(board, "white", PieceType.ROOK, "d2", "white-rook-1")   # [0,-2]
         white = _make_player("white")
         black = _make_player("black")
         state = _game_state(board, white, black)
@@ -672,8 +674,8 @@ class TestNewRituals:
         engine.execute(state, ActivateRitual(
             player_id="white", ritual_id="march_of_the_last_banner",
             sacrifice_positions=[
-                Position.from_algebraic("c4"), Position.from_algebraic("e4"),
-                Position.from_algebraic("d3"), Position.from_algebraic("d4"),
+                Position.from_algebraic("c3"), Position.from_algebraic("e3"),
+                Position.from_algebraic("d2"), Position.from_algebraic("d4"),
             ],
         ), rng)
         assert state.board.get_unit(Position.from_algebraic("d4")).monster_id == "bannerlord_eternal"

@@ -354,6 +354,13 @@ def import_state(path: str | Path, registry: "Any | None" = None) -> Game:
 
     ``registry`` — optional CardRegistry; pass the same registry used at game
     start so monster vessel-compatibility checks work after loading.
+
+    Migration: saves created before Stage 11 (ritual pools) have
+    ``ritual_pool=[]`` for both players.  When detected, the pools are
+    re-derived deterministically by replaying the same RNG draws that
+    ``Game.new`` would have made from ``rng_seed``, so the result is
+    identical to what the game would have assigned had the feature existed
+    at the time the save was created.
     """
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -381,5 +388,36 @@ def import_state(path: str | Path, registry: "Any | None" = None) -> Game:
 
     rng = DeterministicRNG(seed=doc.get("rng_seed", 0))
     rng.load_state(_rng_state_from_json(doc["rng_state"]))
+
+    # Migration: back-fill missing ritual pools without touching the live RNG.
+    # Re-spin a fresh RNG from the original seed and replay the exact same
+    # draws Game.new() made, so the pools land at the identical RNG position.
+    if registry is not None and any(
+        not ps.ritual_pool for ps in players.values()
+    ):
+        from game.core.game import Game as _Game
+        from game.mechanics.kings import assign_random_king_pool
+        from game.mechanics.rituals import assign_random_ritual_pool
+
+        setup_rng = DeterministicRNG(seed=doc.get("rng_seed", 0))
+        # Replay _build_deck_from_registry (3 internal shuffles each) + the
+        # two post-build deck shuffles from Game.new()
+        white_cards = _Game._build_deck_from_registry(registry, setup_rng)
+        black_cards = _Game._build_deck_from_registry(registry, setup_rng)
+        setup_rng.shuffle(white_cards)
+        setup_rng.shuffle(black_cards)
+        # Replay king pool assignment (advances RNG the same amount)
+        white_ps = players["white"]
+        black_ps = players["black"]
+        assign_random_king_pool(white_ps, registry, setup_rng)
+        assign_random_king_pool(black_ps, registry, setup_rng)
+        # Restore the real king pools from the save (replay above overwrote them)
+        white_ps.king_pool = _player_from_d(doc["players"]["white"]).king_pool
+        black_ps.king_pool = _player_from_d(doc["players"]["black"]).king_pool
+        # Now we are at exactly the RNG point Game.new() was at when it called
+        # assign_random_ritual_pool — assign any missing pools
+        for pid, ps in players.items():
+            if not ps.ritual_pool:
+                assign_random_ritual_pool(ps, registry, setup_rng)
 
     return Game(state=state, rng=rng, registry=registry)
