@@ -72,12 +72,22 @@ def _ray_moves(
 
     ``sliding=True``  → keep sliding until blocked (Queen, Rook, Bishop).
     ``sliding=False`` → one step per direction (King, Knight).
+
+    wall_of_mist's ``walled:`` tag stops a SLIDING ray outright (can't
+    land on or pass through it) — Knights and King use ``sliding=False``
+    so they never even reach this check, matching "Knights and effects
+    that leap may cross it". Blocks both sides equally, same convention
+    as frozen/blocked squares.
     """
     targets: list[Position] = []
     for df, dr in deltas:
         f, r = pos.file + df, pos.rank + dr
         while 0 <= f <= 7 and 0 <= r <= 7:
             candidate = Position(f, r)
+            if sliding and any(
+                eff.startswith("walled:") for eff in board.get_square(candidate).temporary_effects
+            ):
+                break
             occupant = board.get_unit(candidate)
             if occupant is None:
                 targets.append(candidate)
@@ -276,6 +286,18 @@ def get_pseudo_legal_moves(
                 m for m in moves
                 if abs(m.file - pos.file) <= cap and abs(m.rank - pos.rank) <= cap
             ]
+
+    # ── fractured_path's movement_cost_zone ───────────────────────────────
+    # A unit starting its move inside the zone is capped to max_dist
+    # squares this turn, regardless of side.
+    for eff in board.get_square(pos).temporary_effects:
+        if eff.startswith("cost_zone:"):
+            zone_max_dist = int(eff.split(":")[3])
+            moves = [
+                m for m in moves
+                if abs(m.file - pos.file) <= zone_max_dist and abs(m.rank - pos.rank) <= zone_max_dist
+            ]
+            break
 
     # ── duelist's challenge_unit ───────────────────────────────────────────
     # This unit under challenge: captures are restricted to the challenger.

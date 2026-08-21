@@ -201,6 +201,16 @@ class PiecePushed(Event):
 
 
 @dataclass(frozen=True)
+class PiecePulled(Event):
+    """A ``pull_unit`` Spell/Trap effect pulled a piece one square toward a
+    reference point (magnetic_reversal, gravity_well)."""
+    piece_id: str
+    owner: str
+    source: Position
+    target: Position
+
+
+@dataclass(frozen=True)
 class Retaliated(Event):
     """
     A ``retaliate`` monster effect destroyed the attacker when its unit

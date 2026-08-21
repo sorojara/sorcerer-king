@@ -410,8 +410,9 @@ class Game:
         ]
         # Stage 8: refresh COMPLETE Buildings' start-of-turn auras
         # (Fortress capture-protection, Shrine spell-radius) for this player.
-        from game.mechanics.buildings import apply_building_auras
+        from game.mechanics.buildings import apply_building_auras, apply_builders_ward_aura
         apply_building_auras(self._state, player_id, self._registry)
+        apply_builders_ward_aura(self._state, player_id, self._registry)
         # Stage 10: refresh the ACTIVE King's aura-style policy effects
         # (formation_support, graveyard_threshold_bonus, spell_radius_bonus).
         from game.mechanics.kings import apply_king_policy_auras

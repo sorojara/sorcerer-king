@@ -154,7 +154,7 @@
 - id: wall_of_mist
   name: Wall of Mist
   spell_type: spatial
-  target_type: zone
+  target_type: position
   effects:
     - type: block_line_of_sight
       params:
@@ -172,10 +172,10 @@
   name: Fractured Path
   spell_type: spatial
   target_type: position
+  radius: 1
   effects:
     - type: movement_cost_zone
       params:
-        radius: 1
         max_movement_distance: 1
         duration_turns: 2
   description: >
@@ -186,10 +186,10 @@
   name: Sanctuary
   spell_type: spatial
   target_type: position
+  radius: 1
   effects:
     - type: prohibit_summoning
       params:
-        radius: 1
         affected_owner: both
         duration_turns: 2
   description: >
@@ -200,10 +200,10 @@
   name: Dispel Field
   spell_type: instant
   target_type: position
+  radius: 1
   effects:
     - type: remove_spatial_effects
       params:
-        radius: 1
         include_own: true
         include_enemy: true
   description: >

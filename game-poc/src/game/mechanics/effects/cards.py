@@ -18,6 +18,10 @@ reorder_top_deck    INERT PLACEHOLDER — the actual reorder is resolved by the
                                    recognised and never logged as unresolved
 graveyard_to_deck   IMPLEMENTED  — return the owner's own first Graveyard card
                                    to the bottom of the deck (grave_scholar)
+discard_card        IMPLEMENTED  — blood_price: the CAPTURING player
+                                   (ctx.unit.owner — see check_capture_traps'
+                                   "target of the Trap's effects is the
+                                   CAPTURING piece") discards 1 random card
 """
 
 from __future__ import annotations
@@ -169,6 +173,33 @@ def _graveyard_to_deck(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# discard_card  (blood_price)
+# ---------------------------------------------------------------------------
+
+def _discard_card(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — blood_price (capture-trigger Trap). ``ctx.unit`` is the
+    CAPTURING piece (see mechanics.monsters.check_capture_traps), so
+    ``ctx.unit.owner`` is the player who must discard — the attacker
+    succeeds at the capture but pays a card cost.
+    """
+    from game.core.events import CardDiscarded
+
+    if ctx.unit is None or ctx.state is None:
+        return
+    owner = ctx.unit.owner
+    ps = ctx.state.get_player(owner)
+    count = ctx.effect.params.get("count", 1)
+    for _ in range(count):
+        if not ps.hand:
+            break
+        card_id = ctx.rng.choice(ps.hand) if ctx.rng is not None else ps.hand[0]
+        ps.hand.remove(card_id)
+        ps.graveyard.append(card_id)
+        ctx.events.append(CardDiscarded(player_id=owner, card_id=card_id))
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -177,4 +208,5 @@ CARDS_HANDLERS: dict[str, object] = {
     "inspect_top_deck":  _inspect_top_deck,
     "reorder_top_deck":  _reorder_top_deck,
     "graveyard_to_deck": _graveyard_to_deck,
+    "discard_card":      _discard_card,
 }

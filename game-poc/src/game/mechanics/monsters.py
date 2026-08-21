@@ -208,6 +208,29 @@ def get_movement_additions(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# suppress_monster_effects (monster_seal spell, nullification_glyph trap)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def is_effects_suppressed(unit: UnitInstance) -> bool:
+    """
+    True if ``unit`` carries ``effects_suppressed:N`` — its Monster's
+    LIVE/passive contributions (damage_aura, movement_restriction,
+    vessel_support, suppress_spell_zone, obscure_influence,
+    capture_protection, activated abilities) are disabled while this
+    holds. "Vessel movement remains intact" per the card text: this never
+    touches the vessel's own base movement, only checks scattered across
+    the various board-scanning functions below.
+
+    Scope note: statuses already granted at summon time (shield:N,
+    spell_radius_bonus:N, ...) are NOT retroactively revoked — there's no
+    generic "undo an already-applied on_summon effect" machinery in this
+    engine. Suppression stops NEW live contributions; it doesn't erase
+    ones already banked before it was applied.
+    """
+    return any(s.startswith("effects_suppressed:") for s in unit.statuses)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Capture protection
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -219,10 +242,14 @@ def apply_capture_protection(unit: UnitInstance) -> bool:
     Returns False if the unit has no shield — normal capture proceeds.
 
     Stage 6: a unit with "exposed:N" (capture_vulnerability — pit_trap,
-    counter_strike) never has its shield checked at all — it is captured
-    normally even if it holds shield charges.
+    counter_strike; also reused verbatim by vengeance_mark's "Vulnerable"
+    status) never has its shield checked at all — it is captured normally
+    even if it holds shield charges. Same for a unit whose Monster
+    effects are suppressed (monster_seal, nullification_glyph).
     """
     if any(s.startswith("exposed:") for s in unit.statuses):
+        return False
+    if is_effects_suppressed(unit):
         return False
     for idx, status in enumerate(unit.statuses):
         if status.startswith("shield:"):
@@ -297,6 +324,8 @@ def check_damage_aura(
     destroyed = False
     for pos, unit in state.board.all_units_for(opponent):
         if unit.monster_id is None:
+            continue
+        if is_effects_suppressed(unit):
             continue
         try:
             card = registry.get(unit.monster_id)
@@ -444,6 +473,66 @@ def check_immobilize_zone(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# cancel_capture (guardian_sigils) — checked alongside apply_capture_protection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_cancel_capture_trap(
+    state: "GameState", target_pos: Position, registry: "object | None",
+) -> "object | None":
+    """
+    guardian_sigils: the first armed (charges != 0) ``cancel_capture``
+    Trap belonging to the DEFENDER (``protected_owner: trap_owner`` — the
+    Trap owner IS the protected side, i.e. the Trap must belong to
+    whoever currently occupies ``target_pos``) whose radius covers
+    ``target_pos``, or None. Called from _execute_move_piece BEFORE the
+    board mutation, alongside apply_capture_protection — same "check
+    before you leap" ordering as the shield check.
+    """
+    if registry is None:
+        return None
+    target_unit = state.board.get_unit(target_pos)
+    if target_unit is None:
+        return None
+    from game.cards.card import TrapCard, TrapTrigger
+    from game.mechanics.area import in_area
+
+    for trap in state.traps:
+        if trap.owner != target_unit.owner or trap.charges == 0:
+            continue
+        try:
+            card = registry.get(trap.card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.CAPTURE:
+            continue
+        for effect in card.effects:
+            if effect.type == "cancel_capture" and in_area(target_pos, trap.position, trap.radius, trap.shape):
+                return trap
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summoning prohibition (sanctuary spell, vessel_lock trap)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def is_summoning_prohibited(board, pos: Position, player_id: str) -> bool:
+    """
+    True if ``pos`` carries a ``no_summon:`` tag that applies to
+    ``player_id`` (either ``blocked == "both"`` or ``blocked ==
+    player_id``) — see mechanics.effects.board_control._prohibit_summoning
+    for the tag format.
+    """
+    for eff in board.get_square(pos).temporary_effects:
+        if not eff.startswith("no_summon:"):
+            continue
+        parts = eff.split(":")
+        blocked = parts[3] if len(parts) > 3 else "both"
+        if blocked == "both" or blocked == player_id:
+            return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Spell zone suppression (spellbreaker) — queried live like damage_aura
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -468,6 +557,8 @@ def is_spell_zone_suppressed(
     for owner in ("white", "black"):
         for spos, unit in state.board.all_units_for(owner):
             if unit.monster_id is None:
+                continue
+            if is_effects_suppressed(unit):
                 continue
             try:
                 card = registry.get(unit.monster_id)
@@ -511,6 +602,8 @@ def get_movement_cap(
     opponent = "black" if owner == "white" else "white"
     cap: "int | None" = None
     for enemy_pos, enemy_unit in board.all_units_for(opponent):
+        if is_effects_suppressed(enemy_unit):
+            continue
         for status in enemy_unit.statuses:
             if not status.startswith("movement_restriction:"):
                 continue
@@ -554,6 +647,8 @@ def get_extra_vessel_types(
     extra: set[str] = set()
     for pos, unit in state.board.all_units_for(owner):
         if unit.monster_id is None:
+            continue
+        if is_effects_suppressed(unit):
             continue
         try:
             card = registry.get(unit.monster_id)
@@ -775,7 +870,10 @@ def _fire_trap(
             ctx = _make_ctx(
                 state, triggering_unit, triggering_pos, card, effect, events,
                 rng=rng, registry=registry, trigger=trigger_name,
-                extra={"owner_override": trap.owner},
+                extra={
+                    "owner_override": trap.owner,
+                    "trap_position": (trap.position.file, trap.position.rank),
+                },
             )
             try:
                 resolve_effect(ctx)
@@ -827,6 +925,44 @@ def check_enter_radius_traps(
         if not in_area(target_pos, trap.position, radius, card.shape):
             continue
         _fire_trap(state, trap, moving_unit, target_pos, "enter_radius", events, registry, rng=rng)
+
+
+def check_summon_traps(
+    state: "GameState",
+    summoned_unit: UnitInstance,
+    summon_pos: Position,
+    events: "list[Event]",
+    registry: "object | None",
+    rng: "DeterministicRNG | None" = None,
+) -> None:
+    """
+    Fire every enemy-owned ``summon`` Trap whose area contains
+    ``summon_pos`` (transformation_alarm, nullification_glyph). Called
+    from ``_execute_summon_monster`` / ``_execute_activate_ritual`` right
+    after the Monster is placed — the summon itself is never prevented,
+    matching both cards' own text ("The summon is not prevented" /
+    "enters normally").
+    """
+    from game.cards.card import TrapCard, TrapTrigger
+    from game.mechanics.area import in_area
+
+    if registry is None:
+        return
+
+    for trap in list(state.traps):
+        if trap.owner == summoned_unit.owner:
+            continue
+        try:
+            card = registry.get(trap.card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.SUMMON:
+            continue
+        from game.mechanics.buildings import trap_radius_bonus
+        radius = card.radius + trap_radius_bonus(state, trap, registry)
+        if not in_area(summon_pos, trap.position, radius, card.shape):
+            continue
+        _fire_trap(state, trap, summoned_unit, summon_pos, "summon", events, registry, rng=rng)
 
 
 def check_capture_traps(

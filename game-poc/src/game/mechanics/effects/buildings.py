@@ -20,6 +20,28 @@ disable_building              IMPLEMENTED — saboteur activated ability; suspen
                                  BuildingInstance.disabled_turns
 territory_expansion          IMPLEMENTED — frontier_warden; consumed in
                                  mechanics.territory._building_zone_squares()
+advance_construction         IMPLEMENTED — rapid_construction (Spell,
+                                 target_type "building"); real logic in
+                                 mechanics.buildings.advance_one_building()
+building_vulnerability        ARMED, DORMANT — siege_order. Same blocker as
+                                 building_aura/repair_building: no Building
+                                 durability system exists to reduce
+temporary_building_protection ARMED, DORMANT — emergency_fortifications. Same
+                                 blocker: no "destroy attempt" to protect
+                                 against
+building_damage               ARMED, DORMANT — demolition_charge. Same
+                                 blocker: no durability field to damage
+protect_builder                IMPLEMENTED — builders_ward (real logic lives
+                                 elsewhere: mechanics.buildings.
+                                 apply_builders_ward_aura(), refreshed at the
+                                 start of the Trap owner's own turn rather
+                                 than through its declared ``enter_radius``
+                                 trigger — see that function's docstring for
+                                 why enter_radius doesn't fit this card).
+                                 This entry is a no-op placeholder so the
+                                 type is recognised and never logged as
+                                 unresolved if check_enter_radius_traps ever
+                                 does match it against an enemy piece
 """
 
 from __future__ import annotations
@@ -129,10 +151,66 @@ def _territory_expansion(ctx: "EffectContext") -> None:
     pass
 
 
+def _advance_construction(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — rapid_construction. ``ctx.extra["building_instance_id"]``
+    names the target (supplied by RulesEngine._resolve_spell_on_building).
+    Real logic: mechanics.buildings.advance_one_building().
+    """
+    if ctx.state is None:
+        return
+    building_id = (ctx.extra or {}).get("building_instance_id")
+    if building_id is None:
+        return
+    building = next((b for b in ctx.state.buildings if b.id == building_id), None)
+    if building is None:
+        return
+    from game.mechanics.buildings import advance_one_building
+    turns = ctx.effect.params.get("turns", 1)
+    advance_one_building(ctx.state, building, turns, ctx.events)
+
+
+def _building_vulnerability(ctx: "EffectContext") -> None:
+    """
+    ARMED, DORMANT — siege_order. No Building durability field exists to
+    reduce; registered as a no-op so activating the Spell doesn't crash.
+    """
+    pass
+
+
+def _temporary_building_protection(ctx: "EffectContext") -> None:
+    """
+    ARMED, DORMANT — emergency_fortifications. No "destroy attempt" to
+    protect against yet; registered as a no-op so activating the Spell
+    doesn't crash.
+    """
+    pass
+
+
+def _building_damage(ctx: "EffectContext") -> None:
+    """
+    ARMED, DORMANT — demolition_charge. No Building durability field
+    exists to damage; registered as a no-op so this Trap triggering
+    doesn't crash or log unresolved.
+    """
+    pass
+
+
+def _protect_builder(ctx: "EffectContext") -> None:
+    """No-op placeholder — see module docstring. Real logic lives in
+    mechanics.buildings.apply_builders_ward_aura()."""
+    pass
+
+
 BUILDINGS_HANDLERS: dict[str, object] = {
     "construction_speed_bonus": _construction_speed_bonus,
     "repair_building":          _repair_building,
     "building_aura":            _building_aura,
     "disable_building":         _disable_building,
     "territory_expansion":      _territory_expansion,
+    "advance_construction":     _advance_construction,
+    "building_vulnerability":   _building_vulnerability,
+    "temporary_building_protection": _temporary_building_protection,
+    "building_damage":          _building_damage,
+    "protect_builder":          _protect_builder,
 }

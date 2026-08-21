@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from game.chess.pieces import UnitInstance
     from game.core.events import Event
     from game.core.rng import DeterministicRNG
-    from game.core.state import GameState, PlayerState, RitualState
+    from game.core.state import GameState, PlayerState, RitualState, TrapInstance
 
 
 # README §14.1 "Material Ritual" — standard chess relative values.
@@ -765,6 +765,41 @@ def execute_ritual(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# profane_interruption — RITUAL_ACTIVATION Trap detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_interrupting_trap(
+    state: "GameState", player_id: str, sacrifice_positions: "list[Position]",
+    registry: "object | None",
+) -> "TrapInstance | None":
+    """
+    profane_interruption: the first enemy-owned ``interrupt_ritual`` Trap
+    (armed — charges != 0) whose radius covers ANY of
+    ``sacrifice_positions``, or None. Called from
+    RulesEngine._execute_activate_ritual BEFORE validate_ritual runs, so
+    an interrupted attempt never touches the board.
+    """
+    if registry is None:
+        return None
+    from game.cards.card import TrapCard, TrapTrigger
+    from game.mechanics.area import in_area
+
+    opponent = state.opponent_of(player_id)
+    for trap in state.traps:
+        if trap.owner != opponent or trap.charges == 0:
+            continue
+        try:
+            card = registry.get(trap.card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.RITUAL_ACTIVATION:
+            continue
+        if any(in_area(pos, trap.position, trap.radius, trap.shape) for pos in sacrifice_positions):
+            return trap
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Revelation — one-step promotion + triggers (README §15.1 / §15.2)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -863,7 +898,8 @@ def advance_ritual_progress(state: "GameState", ending_player: str, events: "lis
         return
 
     total_amount = 0
-    for _pos, unit in state.board.all_units_for(ending_player):
+    booster_positions: list[Position] = []
+    for pos, unit in state.board.all_units_for(ending_player):
         if unit.monster_id is None:
             continue
         try:
@@ -878,6 +914,7 @@ def advance_ritual_progress(state: "GameState", ending_player: str, events: "lis
             if effect.params.get("trigger", "end_of_turn") != "end_of_turn":
                 continue
             total_amount += effect.params.get("amount", 1)
+            booster_positions.append(pos)
     if total_amount <= 0:
         return
 
@@ -886,6 +923,41 @@ def advance_ritual_progress(state: "GameState", ending_player: str, events: "lis
     while target.progress >= threshold and target.revelation != RevelationState.REVEALED:
         target.progress -= threshold
         promote_one_step(state, ending_player, target.ritual_id, events)
+
+    # omen_bell: an enemy RITUAL_PROGRESS Trap covering the booster's
+    # square forces ONE of the advancing player's SEALED Rituals to
+    # FORETOLD too — "advances a Ritual using a unit inside this radius".
+    _check_omen_bell(state, ending_player, booster_positions, events, registry)
+
+
+def _check_omen_bell(
+    state: "GameState", advancing_player: str, booster_positions: "list[Position]",
+    events: "list[Event]", registry: "object",
+) -> None:
+    from game.cards.card import TrapCard, TrapTrigger
+    from game.mechanics.area import in_area
+
+    opponent = state.opponent_of(advancing_player)
+    for trap in list(state.traps):
+        if trap.owner != opponent or trap.charges == 0:
+            continue
+        try:
+            card = registry.get(trap.card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, TrapCard) or card.trigger != TrapTrigger.RITUAL_PROGRESS:
+            continue
+        if not any(in_area(pos, trap.position, trap.radius, trap.shape) for pos in booster_positions):
+            continue
+
+        from game.core.events import TrapTriggered
+        reveal_random_sealed(state, advancing_player, events, rng=None)
+        events.append(TrapTriggered(trap_instance_id=trap.id, triggering_piece_id=None))
+        if trap.charges is not None:
+            trap.charges -= 1
+            if trap.charges <= 0:
+                state.traps = [t for t in state.traps if t.id != trap.id]
+        break
 
 
 def advance_ritual_reveal_tradeoff(

@@ -202,6 +202,13 @@ def get_activatable_effects(unit: "UnitInstance", registry: "Any | None") -> lis
     if not isinstance(card, MonsterCard):
         return []
 
+    # monster_seal / nullification_glyph: a suppressed Monster's activated
+    # abilities are unavailable too. Deferred import — mechanics.monsters
+    # itself imports from this package at module level.
+    from game.mechanics.monsters import is_effects_suppressed
+    if is_effects_suppressed(unit):
+        return []
+
     return [
         eff.type
         for eff in card.effects

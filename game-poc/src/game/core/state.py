@@ -89,6 +89,13 @@ class RitualState:
         again — mirrors "a retired King cannot become active again"
         (README §19), applied here to a one-shot summon rather than a
         policy switch.
+    ``bluff_turns``            — false_prophecy's ``ritual_bluff``. While
+        > 0 on a SEALED Ritual, the OPPONENT's Observation reports a
+        fabricated FORETOLD requirement for it (see core/observation.py);
+        the owner's own view and every engine check still treat it as
+        truly SEALED. Ticks down on the opponent's own EndTurn (mirrors
+        square-effect durations — blocks their true information for
+        exactly N of their own turns).
     """
 
     ritual_id: str
@@ -96,6 +103,7 @@ class RitualState:
     progress: int = 0
     requirement_reduction: int = 0
     activated: bool = False
+    bluff_turns: int = 0
 
 
 @dataclass

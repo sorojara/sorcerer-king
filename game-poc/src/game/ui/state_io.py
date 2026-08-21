@@ -140,6 +140,7 @@ def _ritual_to_d(rs: RitualState) -> dict:
         "progress": rs.progress,
         "requirement_reduction": rs.requirement_reduction,
         "activated": rs.activated,
+        "bluff_turns": rs.bluff_turns,
     }
 
 def _ritual_from_d(d: dict) -> RitualState:
@@ -149,6 +150,7 @@ def _ritual_from_d(d: dict) -> RitualState:
         progress=d.get("progress", 0),
         requirement_reduction=d.get("requirement_reduction", 0),
         activated=d.get("activated", False),
+        bluff_turns=d.get("bluff_turns", 0),
     )
 
 def _building_pool_entry_to_d(e: BuildingPoolEntry) -> dict:

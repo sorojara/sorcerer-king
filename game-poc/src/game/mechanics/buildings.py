@@ -150,31 +150,52 @@ def tick_disabled_buildings(state: "GameState", owner: str) -> None:
             b.disabled_turns -= 1
 
 
+def _complete_building(state: "GameState", b: "BuildingInstance", events: "list[Event]") -> None:
+    """Shared completion side effects: COMPLETE status, spend the Builder
+    token, emit BuildingCompleted. Called once ``remaining_turns`` hits 0,
+    whether from a normal tick or rapid_construction's advance_construction."""
+    from game.core.events import BuildingCompleted
+
+    b.status = ConstructionStatus.COMPLETE
+    found = state.board.find_unit_by_piece_id(b.builder_piece_id) if b.builder_piece_id else None
+    if found is not None:
+        _, builder_unit = found
+        builder_unit.builder_available = False  # README §12.3: once-per-match token spent
+    events.append(BuildingCompleted(
+        player_id=b.owner,
+        building_instance_id=b.id,
+        building_card_id=b.building_card_id,
+        position=b.position,
+    ))
+
+
+def advance_one_building(state: "GameState", b: "BuildingInstance", turns: int, events: "list[Event]") -> None:
+    """
+    IMPLEMENTED — rapid_construction's ``advance_construction``. Reduces
+    ONE specific UNDER_CONSTRUCTION Building's ``remaining_turns`` by
+    ``turns`` (floored at 0), completing it immediately if that reaches 0
+    — "It may complete immediately if this satisfies its remaining
+    construction time."
+    """
+    if b.status != ConstructionStatus.UNDER_CONSTRUCTION:
+        return
+    b.remaining_turns = max(0, b.remaining_turns - turns)
+    if b.remaining_turns <= 0:
+        _complete_building(state, b, events)
+
+
 def tick_construction(state: "GameState", owner: str, events: "list[Event]") -> None:
     """
     Called once per ``owner``'s own EndTurn.  Every UNDER_CONSTRUCTION
     Building they own advances by one turn; at 0 remaining it completes.
     """
-    from game.core.events import BuildingCompleted
-
     for b in state.buildings:
         if b.owner != owner or b.status != ConstructionStatus.UNDER_CONSTRUCTION:
             continue
         b.remaining_turns -= 1
         if b.remaining_turns > 0:
             continue
-
-        b.status = ConstructionStatus.COMPLETE
-        found = state.board.find_unit_by_piece_id(b.builder_piece_id) if b.builder_piece_id else None
-        if found is not None:
-            _, builder_unit = found
-            builder_unit.builder_available = False  # README §12.3: once-per-match token spent
-        events.append(BuildingCompleted(
-            player_id=b.owner,
-            building_instance_id=b.id,
-            building_card_id=b.building_card_id,
-            position=b.position,
-        ))
+        _complete_building(state, b, events)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,6 +256,60 @@ def _apply_spell_radius_aura(state: "GameState", player_id: str, center: "Positi
             continue
         if not any(s.startswith("spell_radius_bonus:") for s in unit.statuses):
             unit.add_status("spell_radius_bonus:1")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live effects — builders_ward (Trap, not a Building, but grants
+# capture_protection to a committed Builder Pawn the same way Fortress does
+# for Monsters)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_builders_ward_aura(state: "GameState", player_id: str, registry: "object | None") -> None:
+    """
+    IMPLEMENTED — builders_ward's ``protect_builder``, refreshed at the
+    start of ``player_id``'s own turn (same call site as
+    apply_building_auras) rather than an ``enter_radius`` movement
+    trigger: the card protects the OWNER's own committed Builder Pawn
+    ("An allied Pawn currently constructing"), and check_enter_radius_traps
+    only ever fires a Trap against the OPPONENT entering it — an
+    always-armed Trap can't be "entered" by its own owner's already-
+    stationary Pawn under that model. Grants ``shield:N`` (idempotent —
+    skips a Pawn that already has one) to any of the owner's own
+    UNDER_CONSTRUCTION Buildings' Builder Pawns within the Trap's radius.
+    """
+    if registry is None:
+        return
+    from game.cards.card import TrapCard
+    from game.core.phases import ConstructionStatus
+
+    for trap in state.traps:
+        if trap.owner != player_id:
+            continue
+        try:
+            card = registry.get(trap.card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, TrapCard):
+            continue
+        for effect in card.effects:
+            if effect.type != "protect_builder":
+                continue
+            uses = effect.params.get("capture_protection_uses", 1)
+            for b in state.buildings:
+                if (
+                    b.owner != player_id
+                    or b.status != ConstructionStatus.UNDER_CONSTRUCTION
+                    or b.builder_piece_id is None
+                ):
+                    continue
+                if not in_area(b.position, trap.position, trap.radius, trap.shape):
+                    continue
+                found = state.board.find_unit_by_piece_id(b.builder_piece_id)
+                if found is None:
+                    continue
+                _, builder_unit = found
+                if not any(s.startswith("shield:") for s in builder_unit.statuses):
+                    builder_unit.add_status(f"shield:{uses}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

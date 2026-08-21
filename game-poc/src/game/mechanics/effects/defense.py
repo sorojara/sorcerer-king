@@ -19,6 +19,22 @@ retaliate           IMPLEMENTED  — destroy attacker when this unit is captured
 capture_vulnerability IMPLEMENTED — Stage 6: "Exposed" — bypasses
                                     capture_protection for a few turns
                                     (pit_trap, counter_strike)
+mark_unit           IMPLEMENTED  — vengeance_mark's "Vulnerable" status;
+                                    mechanically identical to
+                                    capture_vulnerability's "Exposed" (arms
+                                    "exposed:N" on the capturing piece), so
+                                    it reuses the same handler rather than
+                                    introducing a parallel status nothing
+                                    else would ever read
+cancel_capture      IMPLEMENTED  — guardian_sigils; the real logic runs
+                                    PRE-EMPTIVELY in
+                                    mechanics.monsters.find_cancel_capture_trap(),
+                                    called from _execute_move_piece
+                                    alongside apply_capture_protection,
+                                    BEFORE the capture happens — there's no
+                                    "after the capture" moment to react to,
+                                    so this entry is a no-op placeholder
+                                    only so the type is recognised
 """
 
 from __future__ import annotations
@@ -151,6 +167,12 @@ def _capture_vulnerability(ctx: "EffectContext") -> None:
     ctx.unit.add_status(f"exposed:{duration}")
 
 
+def _cancel_capture(ctx: "EffectContext") -> None:
+    """No-op placeholder — see module docstring. Real logic lives in
+    mechanics.monsters.find_cancel_capture_trap()."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
@@ -161,4 +183,6 @@ DEFENSE_HANDLERS: dict[str, object] = {
     "intercept":             _intercept,
     "retaliate":             _retaliate,
     "capture_vulnerability": _capture_vulnerability,
+    "mark_unit":             _capture_vulnerability,
+    "cancel_capture":        _cancel_capture,
 }

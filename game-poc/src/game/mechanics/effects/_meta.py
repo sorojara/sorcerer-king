@@ -63,6 +63,13 @@ restore_builder              IMPLEMENTED — on summon, restore the Builder
 capture_then_retreat        IMPLEMENTED — post-capture retreat away from the
                                   enemy King (dusk_reaver; reuses the
                                   REPOSITION PendingDecision machinery)
+temporary_vessel_class      IMPLEMENTED — unstable_transmutation (Spell): one
+                                  owned piece additionally counts as each of
+                                  ``vessel_classes`` for SummonMonster
+                                  compatibility only (never gains that
+                                  class's movement); consumed in
+                                  RulesEngine._execute_summon_monster /
+                                  get_legal_actions
 spell_radius_bonus          IMPLEMENTED (flag only)
 """
 
@@ -641,8 +648,54 @@ def _capture_then_retreat(ctx: "EffectContext") -> None:
         )
 
 
+def _suppress_monster_effects(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — monster_seal (Spell) and nullification_glyph (Trap).
+
+    Arms ``effects_suppressed:<duration_turns>`` on ``ctx.unit`` — see
+    mechanics.monsters.is_effects_suppressed() for the full list of
+    live-query functions gated on it (damage_aura, movement_restriction,
+    vessel_support, suppress_spell_zone, obscure_influence,
+    capture_protection, activated abilities), and its scope-limitation
+    note (already-banked on_summon statuses aren't retroactively undone).
+    Decays on the SUPPRESSED unit's OWNER's own EndTurn (mirrors
+    immobilized/exposed — "until its owner's next turn").
+    """
+    if ctx.unit is None:
+        return
+    duration = ctx.effect.params.get("duration_turns", 1)
+    ctx.unit.statuses = [s for s in ctx.unit.statuses if not s.startswith("effects_suppressed:")]
+    ctx.unit.add_status(f"effects_suppressed:{duration}")
+
+
+def _temporary_vessel_class(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — unstable_transmutation. Arms
+    ``vessel_class_override:<duration>:<class1>|<class2>|...`` on
+    ``ctx.unit``. Read in RulesEngine._execute_summon_monster / SummonMonster
+    legal-action enumeration: a SummonMonster whose card doesn't support
+    the unit's real piece type is still allowed if it supports one of the
+    overridden classes instead. Decays on the unit OWNER's own EndTurn
+    (immobilized-style — matches "until the end of the turn").
+    """
+    from game.core.phases import PieceType
+
+    if ctx.unit is None:
+        return
+    if ctx.unit.piece.piece_type == PieceType.KING:
+        return
+    duration = ctx.effect.params.get("duration_turns", 1)
+    classes = ctx.effect.params.get("vessel_classes", [])
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("vessel_class_override:")
+    ]
+    ctx.unit.add_status(f"vessel_class_override:{duration}:{'|'.join(classes)}")
+
+
 META_HANDLERS: dict[str, object] = {
     "spell_radius_bonus":               _spell_radius_bonus,
+    "suppress_monster_effects":         _suppress_monster_effects,
+    "temporary_vessel_class":           _temporary_vessel_class,
     "copy_effect":                      _copy_effect,
     "vessel_support":                   _vessel_support,
     "ignore_terrain":                   _ignore_terrain,

@@ -155,6 +155,18 @@ def _adjacent_territory_expansion_bonus(
     return bonus
 
 
+def _temporary_territory_squares(state: "GameState", player_id: str) -> set[Position]:
+    """border_beacon's ``temporary_territory`` — squares tagged
+    ``temp_territory:<duration>:<owner>:<card_id>`` for ``player_id``."""
+    squares: set[Position] = set()
+    for pos, sq in state.board.squares.items():
+        for eff in sq.temporary_effects:
+            if eff.startswith(f"temp_territory:") and eff.split(":")[2] == player_id:
+                squares.add(pos)
+                break
+    return squares
+
+
 def territory_squares(state: "GameState", player_id: str, registry: "object | None" = None) -> set[Position]:
     """Every square that counts as ``player_id``'s Territory right now."""
     squares = {
@@ -163,13 +175,16 @@ def territory_squares(state: "GameState", player_id: str, registry: "object | No
         for r in HOME_RANKS.get(player_id, ())
     }
     squares.update(_building_zone_squares(state, player_id, registry))
+    squares.update(_temporary_territory_squares(state, player_id))
     return squares
 
 
 def is_in_territory(state: "GameState", pos: Position, player_id: str, registry: "object | None" = None) -> bool:
     if is_home_territory(pos, player_id):
         return True
-    return pos in _building_zone_squares(state, player_id, registry)
+    if pos in _building_zone_squares(state, player_id, registry):
+        return True
+    return pos in _temporary_territory_squares(state, player_id)
 
 
 def trap_zone_squares(state: "GameState", player_id: str, registry: "object | None" = None) -> set[Position]:

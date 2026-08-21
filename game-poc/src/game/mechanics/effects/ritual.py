@@ -14,6 +14,31 @@ ritual_requirement_reduction    IMPLEMENTED — Stage 11 — reduce a chosen
                                  Ritual's requirement by 1, once
 ritual_reveal_tradeoff          IMPLEMENTED — Stage 11 — reveal own ritual
                                  to draw
+reveal_ritual                   IMPLEMENTED — two usages sharing one type:
+                                 ``own_ritual: true`` (ritual_insight) reveals
+                                 the caster's own first not-REVEALED Ritual one
+                                 step + draws cards; ``target_owner: opponent``
+                                 (omen_bell) forces one of the triggering
+                                 enemy's SEALED Rituals to FORETOLD
+reveal_enemy_ritual              IMPLEMENTED — forbidden_knowledge: one random
+                                 SEALED enemy Ritual becomes FORETOLD (reuses
+                                 reveal_random_sealed; "selection: player" is
+                                 simplified to random — no interactive
+                                 mid-Spell target-choice flow exists)
+ritual_bluff                     IMPLEMENTED — false_prophecy: one of the
+                                 caster's own SEALED Rituals shows the
+                                 OPPONENT a fabricated FORETOLD requirement
+                                 for ``duration_turns`` (RitualState.bluff_turns
+                                 — see core/observation.py); the Ritual stays
+                                 truly SEALED for every engine check
+interrupt_ritual                 IMPLEMENTED — profane_interruption: blocks
+                                 ONE enemy ActivateRitual attempt whose
+                                 sacrifice material overlaps the Trap's
+                                 radius (RulesEngine._execute_activate_ritual,
+                                 before validate_ritual runs — so nothing is
+                                 sacrificed); consumes the Trap like any other
+                                 single-charge Trap, rather than tracking a
+                                 literal "retry next turn" delay
 
 Stage 11 wiring note: ``ritual_progress_boost`` (ritual_acolyte)'s actual
 effect — advancing a Ritual's revelation progress — is NOT applied via this
@@ -190,6 +215,124 @@ def _ritual_reveal_tradeoff(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# reveal_ritual  (ritual_insight spell, omen_bell trap)
+# ---------------------------------------------------------------------------
+
+def _reveal_ritual(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — two independent modes sharing one effect type:
+
+    1. ``own_ritual: true`` (ritual_insight, target_type "none" — dispatched
+       via _resolve_spell_untargeted, ``ctx.unit is None``): the CASTER
+       (``ctx.extra["caster_owner"]``) reveals their own first not-REVEALED
+       Ritual one step and, if ``benefit == "draw_card"``, draws
+       ``draw_count`` cards — structurally identical to
+       ``_ritual_reveal_tradeoff`` above.
+
+    2. Otherwise (omen_bell, fired via _fire_trap on RITUAL_PROGRESS —
+       ``ctx.unit`` is the enemy piece whose Ritual just advanced): one of
+       ``ctx.unit.owner``'s SEALED Rituals is forced to FORETOLD
+       (reveal_random_sealed — matches ``from: sealed, to: foretold``).
+    """
+    if ctx.state is None:
+        return
+    params = ctx.effect.params
+
+    if params.get("own_ritual"):
+        owner = (ctx.extra or {}).get("caster_owner")
+        if owner is None:
+            return
+        from game.core.phases import RevelationState
+        from game.mechanics.rituals import promote_one_step
+
+        ps = ctx.state.get_player(owner)
+        target = next((rs for rs in ps.ritual_pool if rs.revelation != RevelationState.REVEALED), None)
+        if target is None:
+            return
+        if not promote_one_step(ctx.state, owner, target.ritual_id, ctx.events):
+            return
+        if params.get("benefit") == "draw_card":
+            from game.core.events import CardDrawn, DeckRecycled
+
+            count = params.get("draw_count", 1)
+            for _ in range(count):
+                if not ps.deck and ps.graveyard:
+                    ps.deck = list(ps.graveyard)
+                    ps.graveyard.clear()
+                    if ctx.rng is not None:
+                        ctx.rng.shuffle(ps.deck)
+                    ctx.events.append(DeckRecycled(player_id=owner, card_count=len(ps.deck)))
+                if ps.deck:
+                    card_id = ps.deck.pop(0)
+                    ps.hand.append(card_id)
+                    ctx.events.append(CardDrawn(player_id=owner, card_id=card_id))
+        return
+
+    if ctx.unit is None:
+        return
+    from game.mechanics.rituals import reveal_random_sealed
+    reveal_random_sealed(ctx.state, ctx.unit.owner, ctx.events, rng=ctx.rng)
+
+
+# ---------------------------------------------------------------------------
+# reveal_enemy_ritual  (forbidden_knowledge)
+# ---------------------------------------------------------------------------
+
+def _reveal_enemy_ritual(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — forbidden_knowledge (target_type "none" — ``ctx.unit is
+    None``, caster from ``ctx.extra["caster_owner"]``). One random SEALED
+    Ritual belonging to the caster's opponent becomes FORETOLD.
+    """
+    if ctx.state is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    if owner is None:
+        return
+    from game.mechanics.rituals import reveal_random_sealed
+    reveal_random_sealed(ctx.state, ctx.state.opponent_of(owner), ctx.events, rng=ctx.rng)
+
+
+# ---------------------------------------------------------------------------
+# ritual_bluff  (false_prophecy)
+# ---------------------------------------------------------------------------
+
+def _ritual_bluff(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — false_prophecy (target_type "none"). Arms
+    ``bluff_turns`` on the caster's own first SEALED Ritual (pool order —
+    "the choice rarely matters" simplification used throughout this
+    module). See RitualState.bluff_turns and core/observation.py for the
+    read side, and RulesEngine._execute_end_turn for the decay.
+    """
+    if ctx.state is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    if owner is None:
+        return
+    from game.core.phases import RevelationState
+
+    ps = ctx.state.get_player(owner)
+    target = next((rs for rs in ps.ritual_pool if rs.revelation == RevelationState.SEALED), None)
+    if target is None:
+        return
+    target.bluff_turns = ctx.effect.params.get("duration_turns", 2)
+
+
+# ---------------------------------------------------------------------------
+# interrupt_ritual  (profane_interruption) — consumed pre-emptively in
+# RulesEngine._execute_activate_ritual, BEFORE validate_ritual runs; see
+# mechanics.rituals.find_interrupting_trap(). This handler is never
+# dispatched through resolve_effect (there's no "the Ritual already
+# happened" moment to react to — the whole point is stopping it before it
+# starts) but is registered so the type is recognised.
+# ---------------------------------------------------------------------------
+
+def _interrupt_ritual(ctx: "EffectContext") -> None:
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -198,4 +341,8 @@ RITUAL_HANDLERS: dict[str, object] = {
     "ritual_pattern_substitute":    _ritual_pattern_substitute,
     "ritual_requirement_reduction": _ritual_requirement_reduction,
     "ritual_reveal_tradeoff":       _ritual_reveal_tradeoff,
+    "reveal_ritual":                _reveal_ritual,
+    "reveal_enemy_ritual":          _reveal_enemy_ritual,
+    "ritual_bluff":                 _ritual_bluff,
+    "interrupt_ritual":             _interrupt_ritual,
 }

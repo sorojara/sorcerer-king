@@ -214,9 +214,13 @@ def _obscured_by_veil_conjurer(state: "GameState", pos: "Position", registry: "o
         return False
     from game.cards.card import MonsterCard
 
+    from game.mechanics.monsters import is_effects_suppressed
+
     for owner in ("white", "black"):
         for spos, unit in state.board.all_units_for(owner):
             if unit.monster_id is None:
+                continue
+            if is_effects_suppressed(unit):
                 continue
             try:
                 card = registry.get(unit.monster_id)
@@ -279,18 +283,28 @@ def build_observation(
         for pos, unit in state.board.all_units()
     )
 
-    # Stage 6: active square effects (frozen/scorched/blocked/cursed) — all
-    # public battlefield state, never hidden information.
+    # Stage 6: active square effects (frozen/scorched/blocked/cursed/walled/
+    # cost_zone) — all public battlefield state, never hidden information.
     square_effects: list[PublicSquareEffect] = []
     for pos, sq in state.board.squares.items():
         for eff in sq.temporary_effects:
             parts = eff.split(":")
             effect_type = parts[0]
-            if effect_type not in ("frozen", "scorched", "blocked", "cursed"):
+            if effect_type not in (
+                "frozen", "scorched", "blocked", "cursed", "walled",
+                "cost_zone", "no_summon", "temp_territory",
+            ):
                 continue
             duration = int(parts[1]) if len(parts) > 1 else 0
             owner = parts[2] if len(parts) > 2 else None
-            card_id = parts[3] if len(parts) > 3 and parts[3] != "-" else None
+            # cost_zone/no_summon carry one extra field (max_dist / blocked)
+            # before card_id (see mechanics.effects.board_control).
+            card_id_idx = 4 if effect_type in ("cost_zone", "no_summon") else 3
+            card_id = (
+                parts[card_id_idx]
+                if len(parts) > card_id_idx and parts[card_id_idx] != "-"
+                else None
+            )
             # veil_conjurer's obscure_influence: within radius of a
             # veil_conjurer, this square's EXACT modifier (which card
             # caused it) is hidden from anyone who isn't the effect's own
@@ -334,6 +348,27 @@ def build_observation(
     opp_ritual_info = []
     for rs in opp.ritual_pool:
         if rs.revelation == RevelationState.SEALED:
+            # false_prophecy's ritual_bluff: a still-SEALED Ritual whose
+            # owner spent this deception shows a FABRICATED FORETOLD
+            # requirement to the opponent — a different real Ritual's
+            # archetype/required_vessel, picked deterministically (first
+            # OTHER RitualCard in registry order) so it reads as plausible
+            # card data rather than an obviously-fake placeholder. The
+            # owner's own Observation (this branch only runs for ``opp``,
+            # never ``ps``) and every engine check still see it as truly
+            # SEALED — see mechanics.rituals for where that matters.
+            if rs.bluff_turns > 0 and registry is not None and rs.ritual_id in registry:
+                decoy = next(
+                    (r for r in registry.all_rituals() if r.id != rs.ritual_id),
+                    None,
+                )
+                if decoy is not None:
+                    opp_ritual_info.append(PublicRitualInfo(
+                        revelation=RevelationState.FORETOLD,
+                        archetype=getattr(decoy, "archetype", None),
+                        required_vessel=getattr(decoy, "required_vessel", None),
+                    ))
+                    continue
             opp_ritual_info.append(PublicRitualInfo(revelation=RevelationState.SEALED))
         elif rs.revelation == RevelationState.FORETOLD:
             # Stage 11: partial reveal (README §15 example) — archetype +

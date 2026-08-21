@@ -18,6 +18,32 @@ destroy_monster_or_piece IMPLEMENTED — Stage 6: destroys just the Monster,
                                        sparing its Vessel, if the triggering
                                        piece hosts one; destroys the whole
                                        piece otherwise (pit_trap)
+block_line_of_sight    IMPLEMENTED  — a 4-square line sliding pieces cannot
+                                       move onto or through (wall_of_mist);
+                                       write side here, read side in
+                                       chess.movement._ray_moves
+movement_cost_zone     IMPLEMENTED  — units starting their move inside the
+                                       zone are capped to max_movement_distance
+                                       (fractured_path); write side here, read
+                                       side in chess.movement.get_pseudo_legal_moves
+prohibit_summoning     IMPLEMENTED  — SummonMonster is illegal on a tagged
+                                       square for the affected side(s)
+                                       (sanctuary, vessel_lock); write side
+                                       here, read side in
+                                       RulesEngine._execute_summon_monster /
+                                       get_legal_actions
+remove_spatial_effects IMPLEMENTED  — dispel_field: strips every
+                                       Spell-generated zone tag (identified
+                                       by looking up each tag's trailing
+                                       card_id in the registry and checking
+                                       it's a SpellCard) from the area —
+                                       "Buildings and Traps are unaffected"
+                                       falls out naturally since their tags'
+                                       card_id resolves to a different card type
+temporary_territory    IMPLEMENTED  — border_beacon: tags the Trap's own
+                                       radius as the owner's Territory for
+                                       duration_turns; read side in
+                                       mechanics.territory
 """
 
 from __future__ import annotations
@@ -277,6 +303,187 @@ def _destroy_monster_or_piece(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# block_line_of_sight  (wall_of_mist)
+# ---------------------------------------------------------------------------
+
+def _block_line_of_sight(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — wall_of_mist.
+
+    ``_resolve_spell_on_area`` dispatches this once (radius 0 → a single
+    anchor square), so this handler expands the whole ``length``-square
+    line itself: starting at ``ctx.position``, extending in the +file
+    direction (clamped to the board edge — a fixed, deterministic
+    orientation rather than a player-chosen one, keeping the target shape
+    a plain (file, rank) like every other "position" Spell). Each square
+    gets a ``walled:<duration>:<owner>`` tag. Read side: chess.movement.
+    _ray_moves refuses to enter OR pass through a walled square for
+    sliding pieces (Queen/Rook/Bishop) only — Knights and leap-based
+    monster movement additions don't ray-walk at all, so they already
+    ignore it, matching "Knights and effects that leap may cross it".
+    Blocks BOTH sides equally, same convention as block_zone/veil_of_stillness.
+    """
+    from game.chess.pieces import Position
+
+    if ctx.state is None or ctx.position is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    params = ctx.effect.params
+    length = params.get("length", 4)
+    duration = params.get("duration_turns", 2)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+
+    for i in range(length):
+        f = ctx.position.file + i
+        if f > 7:
+            break
+        ctx.state.board.get_square(Position(f, ctx.position.rank)).add_effect(
+            f"walled:{duration}:{owner}:{card_id}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# movement_cost_zone  (fractured_path)
+# ---------------------------------------------------------------------------
+
+def _movement_cost_zone(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — fractured_path.
+
+    ``_resolve_spell_on_area`` calls this once per square in the resolved
+    3×3 area (matches freeze_square/immobilize_zone's convention), tagging
+    each with ``cost_zone:<duration>:<owner>:<max_dist>``. Read side:
+    chess.movement.get_pseudo_legal_moves caps a unit's move distance to
+    ``max_dist`` (Chebyshev) whenever its OWN current square carries this
+    tag — "Units beginning their movement inside the area" — affects
+    either side, same convention as block_zone.
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    params = ctx.effect.params
+    duration = params.get("duration_turns", 2)
+    max_dist = params.get("max_movement_distance", 1)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+    ctx.state.board.get_square(ctx.position).add_effect(
+        f"cost_zone:{duration}:{owner}:{max_dist}:{card_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# prohibit_summoning  (sanctuary spell, vessel_lock trap)
+# ---------------------------------------------------------------------------
+
+def _prohibit_summoning(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — sanctuary (Spell, dispatched once per square by
+    _resolve_spell_on_area) and vessel_lock (Trap, dispatched once per
+    square of its own radius by _execute_activate_trap).
+
+    Tags ``ctx.position`` with ``no_summon:<duration>:<caster_owner>:<blocked>:<card_id>``
+    — ``caster_owner`` occupies the usual "owner" slot so decay follows
+    the standard convention (ticks down on the CASTER's opponent's own
+    EndTurn, blocking for exactly N of their turns), while ``blocked``
+    (resolved from ``affected_owner`` at write time: "both"/"opponent"/
+    "self") names who is actually barred from summoning there — read in
+    RulesEngine._execute_summon_monster / get_legal_actions.
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    caster = (ctx.extra or {}).get("caster_owner")
+    params = ctx.effect.params
+    affected = params.get("affected_owner", "opponent")
+    duration = params.get("duration_turns", 1)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+
+    if affected == "both" or caster is None:
+        blocked = "both"
+    elif affected == "self":
+        blocked = caster
+    else:  # "opponent" (default)
+        blocked = ctx.state.opponent_of(caster)
+
+    ctx.state.board.get_square(ctx.position).add_effect(
+        f"no_summon:{duration}:{caster}:{blocked}:{card_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# remove_spatial_effects  (dispel_field)
+# ---------------------------------------------------------------------------
+
+_ZONE_TAG_PREFIXES = ("frozen", "scorched", "blocked", "cursed", "walled", "cost_zone", "no_summon")
+
+
+def _remove_spatial_effects(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — dispel_field. Strips every zone tag on ``ctx.position``
+    whose source card (the trailing ``card_id`` field, always the LAST
+    ``:``-separated component in every one of these formats) resolves to
+    a SpellCard in the registry — "Spell-generated zones" specifically,
+    per the card text; Monster-caused ``frozen:``/``scorched:`` and any
+    Trap/Building-authored tag resolve to a different card type and are
+    left untouched ("Buildings and Traps are unaffected").
+    ``include_own``/``include_enemy`` filter by whether the zone's own
+    owner (the caster who originally set it) is the current caster.
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    from game.cards.card import SpellCard
+
+    caster = (ctx.extra or {}).get("caster_owner")
+    params = ctx.effect.params
+    include_own = params.get("include_own", True)
+    include_enemy = params.get("include_enemy", True)
+
+    sq = ctx.state.board.get_square(ctx.position)
+    remaining = []
+    for eff in sq.temporary_effects:
+        parts = eff.split(":")
+        if parts[0] not in _ZONE_TAG_PREFIXES:
+            remaining.append(eff)
+            continue
+        owner = parts[2] if len(parts) > 2 else None
+        card_id = parts[-1]
+        is_spell = False
+        if ctx.registry is not None and card_id in ctx.registry:
+            card = ctx.registry.get(card_id)
+            is_spell = isinstance(card, SpellCard)
+        if not is_spell:
+            remaining.append(eff)
+            continue
+        if owner == caster and not include_own:
+            remaining.append(eff)
+        elif owner != caster and not include_enemy:
+            remaining.append(eff)
+        # else: dispelled — don't add back
+    sq.temporary_effects = remaining
+
+
+# ---------------------------------------------------------------------------
+# temporary_territory  (border_beacon)
+# ---------------------------------------------------------------------------
+
+def _temporary_territory(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — border_beacon (Trap, manual trigger — dispatched once
+    per square of its own radius by _execute_activate_trap). Tags
+    ``ctx.position`` with ``temp_territory:<duration>:<owner>:<card_id>``;
+    read by mechanics.territory.territory_squares()/is_in_territory().
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner") or (ctx.extra or {}).get("trap_owner")
+    if owner is None:
+        return
+    duration = ctx.effect.params.get("duration_turns", 2)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+    ctx.state.board.get_square(ctx.position).add_effect(
+        f"temp_territory:{duration}:{owner}:{card_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -288,4 +495,9 @@ BOARD_CONTROL_HANDLERS: dict[str, object] = {
     "destroy_monster_or_piece": _destroy_monster_or_piece,
     "damage_aura":          _damage_aura,
     "immobilize_zone":      _immobilize_zone,
+    "block_line_of_sight":  _block_line_of_sight,
+    "movement_cost_zone":   _movement_cost_zone,
+    "prohibit_summoning":   _prohibit_summoning,
+    "remove_spatial_effects": _remove_spatial_effects,
+    "temporary_territory":  _temporary_territory,
 }

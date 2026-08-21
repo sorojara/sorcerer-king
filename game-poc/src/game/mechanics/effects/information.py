@@ -16,6 +16,12 @@ obscure_influence   IMPLEMENTED — hides a square effect's exact card_id
                              filtering (queried live, like damage_aura)
 reveal_enemy_hand_card IMPLEMENTED — Stage 6: one-time peek at N random
                              opponent hand cards (alarm_beacon)
+reveal_own_hand_card IMPLEMENTED — forbidden_knowledge: the caster's
+                             opponent peeks at one random card from the
+                             CASTER's own hand ("selection: opponent" is
+                             simplified to random, same as
+                             reveal_enemy_ritual's "selection: player" —
+                             no interactive mid-Spell choice flow exists)
 """
 
 from __future__ import annotations
@@ -118,6 +124,33 @@ def _reveal_enemy_hand_card(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# reveal_own_hand_card
+# ---------------------------------------------------------------------------
+
+def _reveal_own_hand_card(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — forbidden_knowledge (target_type "none" — ``ctx.unit``
+    is None; caster from ``ctx.extra["caster_owner"]``, supplied by
+    _resolve_spell_untargeted). One random card from the CASTER's own
+    hand is revealed to the OPPONENT — reuses EnemyCardRevealed with
+    ``player_id`` set to the opponent (the one who "gets to know").
+    """
+    from game.core.events import EnemyCardRevealed
+
+    if ctx.state is None:
+        return
+    caster = (ctx.extra or {}).get("caster_owner")
+    if caster is None:
+        return
+    opponent = ctx.state.opponent_of(caster)
+    pool = list(ctx.state.get_player(caster).hand)
+    if not pool:
+        return
+    card_id = ctx.rng.choice(pool) if ctx.rng is not None else pool[0]
+    ctx.events.append(EnemyCardRevealed(player_id=opponent, revealed_card_id=card_id))
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -125,4 +158,5 @@ INFORMATION_HANDLERS: dict[str, object] = {
     "reveal_hidden_info": _reveal_hidden_info,
     "obscure_influence":  _obscure_influence,
     "reveal_enemy_hand_card": _reveal_enemy_hand_card,
+    "reveal_own_hand_card": _reveal_own_hand_card,
 }
