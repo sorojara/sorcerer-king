@@ -49,6 +49,10 @@ v0.1 events (minimal required set for Stage 0 invariant tests):
     Check / Duel:
         CheckDetected, CheckResolved, FinalDuelTriggered
         GameOver
+
+    Final Duel (Stage 12):
+        DuelSupportSpent, DuelStrikeResolved, DuelRoundAdvanced,
+        RoyalEscapeTriggered
 """
 
 from __future__ import annotations
@@ -561,3 +565,48 @@ class FinalDuelTriggered(Event):
 class GameOver(Event):
     winner: str
     reason: str  # "final_duel_victory" | "duel_forfeit" | …
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final Duel actions (Stage 12) — see mechanics/duel.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class DuelSupportSpent(Event):
+    """A queued DuelSupportItem (piece / building / king) was spent."""
+
+    player_id: str
+    item_id: str
+    source: str    # "piece" | "building" | "king"
+    ability: str
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class DuelStrikeResolved(Event):
+    """An attacker Strike was attempted — landed, or blocked by a Guard/Bypass."""
+
+    player_id: str
+    blocked: bool
+    strikes_landed: int
+    strikes_needed: int
+
+
+@dataclass(frozen=True)
+class DuelRoundAdvanced(Event):
+    """Both sides acted this Duel round — round_number increments."""
+
+    round_number: int
+    max_rounds: int
+
+
+@dataclass(frozen=True)
+class RoyalEscapeTriggered(Event):
+    """
+    Defender survived the Duel (README §33). The King relocates and gains
+    temporary capture protection (Royal Immunity, implemented as shield:N).
+    """
+
+    defender: str
+    new_position: Position | None
+    duels_survived: int

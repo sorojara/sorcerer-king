@@ -173,6 +173,20 @@ def format_event(event: "ev.Event", registry: "object | None" = None) -> str:
     if isinstance(event, ev.GameOver):
         return f"Game over — {event.winner} wins ({event.reason})"
 
+    # Stage 12: Final Duel round-by-round actions (see ui/pygame_app.py's
+    # dedicated on-screen Duel Log for the primary, more prominent feed —
+    # these formatters just keep the sidebar Event Log readable too).
+    if isinstance(event, ev.DuelSupportSpent):
+        return f"{event.player_id} (Duel): {event.label or event.ability}"
+    if isinstance(event, ev.DuelStrikeResolved):
+        outcome = f"HIT ({event.strikes_landed}/{event.strikes_needed})" if not event.blocked else "blocked"
+        return f"{event.player_id} (Duel): Strike → {outcome}"
+    if isinstance(event, ev.DuelRoundAdvanced):
+        return f"Duel round {event.round_number}/{event.max_rounds}"
+    if isinstance(event, ev.RoyalEscapeTriggered):
+        pos = _pos(event.new_position)
+        return f"{event.defender}'s King escapes to {pos}! (Royal Escape #{event.duels_survived})"
+
     # Generic fallback: class name + field=value pairs.
     try:
         parts = ", ".join(f"{f.name}={getattr(event, f.name)!r}" for f in fields(event))

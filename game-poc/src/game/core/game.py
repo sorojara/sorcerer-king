@@ -370,11 +370,15 @@ class Game:
 
     def resolve_final_duel_immediately(self) -> None:
         """
-        Stage 3 shortcut: skip the card-based Final Duel and immediately
-        declare the attacker as winner.
+        Pre-Stage-12 shortcut, kept for tests/tools that don't care how the
+        Duel plays out and just want the match to conclude: declares the
+        attacker the winner outright instead of running the real Duel.
 
-        In the full game (Stage 12+) this would be replaced by the card-draw
-        duel mechanic.  For now, checkmate/king-capture → instant win.
+        The real Final Duel (README §22-33) is implemented in
+        mechanics/duel.py — see FinalDuelAction / RulesEngine.execute() and
+        Game.get_legal_actions() during Phase.FINAL_DUEL. The pygame UI
+        (ui/pygame_app.py) plays that out interactively and never calls this
+        method; it remains only as a manual override.
         """
         if not self._state.is_final_duel_active():
             return

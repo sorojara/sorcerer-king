@@ -96,6 +96,7 @@ from game.core.actions import (
     DismissMonster,
     EndPreparation,
     EndTurn,
+    FinalDuelAction,
     MovePiece,
     PlaceMercenaryPiece,
     PlaceTrap,
@@ -285,6 +286,8 @@ class RulesEngine:
                 events = self._execute_end_preparation(state, action)
             elif isinstance(action, EndTurn):
                 events = self._execute_end_turn(state, action)
+            elif isinstance(action, FinalDuelAction):
+                events = self._execute_final_duel_action(state, action, registry=self._registry)
             else:
                 raise IllegalActionError(
                     f"Unrecognized or not-yet-implemented action: {type(action).__name__}"
@@ -410,10 +413,19 @@ class RulesEngine:
         """
         # Use per-call registry if given, else fall back to engine-level registry
         registry = registry or self._registry
-        if state.active_player != player_id:
-            return []
 
         if state.is_game_over():
+            return []
+
+        # Stage 12: Final Duel turn order is defender-then-attacker each
+        # round, independent of state.active_player — see mechanics/duel.py.
+        if state.phase == Phase.FINAL_DUEL:
+            if state.duel is None or player_id not in (state.duel.attacker, state.duel.defender):
+                return []
+            from game.mechanics.duel import get_legal_duel_actions
+            return get_legal_duel_actions(state, player_id)
+
+        if state.active_player != player_id:
             return []
 
         phase = state.phase
@@ -1084,6 +1096,19 @@ class RulesEngine:
                     f"not {action.player_id!r}."
                 )
             return
+        # Stage 12: inside a Final Duel, turn order is defender-then-attacker
+        # each round (mechanics/duel.py) — NOT state.active_player, which
+        # still names whoever's normal-turn move triggered the Duel.
+        if state.phase == Phase.FINAL_DUEL and state.duel is not None:
+            expected = (
+                state.duel.defender if not state.duel.defender_acted_this_round
+                else state.duel.attacker
+            )
+            if action.player_id != expected:
+                raise IllegalActionError(
+                    f"It is {expected!r}'s Duel action, not {action.player_id!r}'s."
+                )
+            return
         if action.player_id != state.active_player:
             raise IllegalActionError(
                 f"It is {state.active_player!r}'s turn, "
@@ -1501,19 +1526,11 @@ class RulesEngine:
             # King capture → Final Duel (never sets winner directly)
             if captured is not None and not shield_absorbed and captured.piece.piece_type == PieceType.KING:
                 move_snapshot.triggered_duel = True
-                duel = DuelState(
-                    duel_type=FinalDuelType.ASSAULT,
-                    attacker=action.player_id,
-                    defender=captured.owner,
+                self._trigger_final_duel(
+                    state, FinalDuelType.ASSAULT, action.player_id, captured.owner,
+                    events, trigger_position=action.target,
+                    captured_king_piece_id=captured.piece.id,
                 )
-                state.duel = duel
-                state.phase = Phase.FINAL_DUEL
-                events.append(FinalDuelTriggered(
-                    attacker=action.player_id,
-                    defender=captured.owner,
-                    duel_type=FinalDuelType.ASSAULT,
-                    trigger_position=action.target,
-                ))
                 self._revoke_castling_rights_for_captured_rook(
                     state, captured, action.target
                 )
@@ -1554,31 +1571,11 @@ class RulesEngine:
 
         if is_checkmate(state.board, opp_id, opp_ep, opp_cr):
             move_snapshot.triggered_duel = True
-            state.duel = DuelState(
-                duel_type=FinalDuelType.SIEGE,
-                attacker=action.player_id,
-                defender=opp_id,
-            )
-            state.phase = Phase.FINAL_DUEL
-            events.append(FinalDuelTriggered(
-                attacker=action.player_id,
-                defender=opp_id,
-                duel_type=FinalDuelType.SIEGE,
-            ))
+            self._trigger_final_duel(state, FinalDuelType.SIEGE, action.player_id, opp_id, events)
         elif is_stalemate(state.board, opp_id, opp_ep, opp_cr):
             move_snapshot.triggered_duel = True
             events.append(StalemateDetected(player_id=opp_id))
-            state.duel = DuelState(
-                duel_type=FinalDuelType.LAST_STAND,
-                attacker=action.player_id,
-                defender=opp_id,
-            )
-            state.phase = Phase.FINAL_DUEL
-            events.append(FinalDuelTriggered(
-                attacker=action.player_id,
-                defender=opp_id,
-                duel_type=FinalDuelType.LAST_STAND,
-            ))
+            self._trigger_final_duel(state, FinalDuelType.LAST_STAND, action.player_id, opp_id, events)
 
         # If not in an interrupt phase, advance to REACTION.
         # Exception: if a REPOSITION decision is pending (blade_dancer after-capture),
@@ -1671,30 +1668,10 @@ class RulesEngine:
         opp_id = state.opponent_of(action.player_id)
         opp_ps = state.get_player(opp_id)
         if is_checkmate(state.board, opp_id, state.en_passant_target, opp_ps.castling_rights):
-            state.duel = DuelState(
-                duel_type=FinalDuelType.SIEGE,
-                attacker=action.player_id,
-                defender=opp_id,
-            )
-            state.phase = Phase.FINAL_DUEL
-            events.append(FinalDuelTriggered(
-                attacker=action.player_id,
-                defender=opp_id,
-                duel_type=FinalDuelType.SIEGE,
-            ))
+            self._trigger_final_duel(state, FinalDuelType.SIEGE, action.player_id, opp_id, events)
         elif is_stalemate(state.board, opp_id, state.en_passant_target, opp_ps.castling_rights):
             events.append(StalemateDetected(player_id=opp_id))
-            state.duel = DuelState(
-                duel_type=FinalDuelType.LAST_STAND,
-                attacker=action.player_id,
-                defender=opp_id,
-            )
-            state.phase = Phase.FINAL_DUEL
-            events.append(FinalDuelTriggered(
-                attacker=action.player_id,
-                defender=opp_id,
-                duel_type=FinalDuelType.LAST_STAND,
-            ))
+            self._trigger_final_duel(state, FinalDuelType.LAST_STAND, action.player_id, opp_id, events)
 
         if state.phase == Phase.CHESS:
             old = state.phase
@@ -3379,6 +3356,73 @@ class RulesEngine:
                         if restored:
                             break
                 break  # only the first matching effect entry per medic
+
+    # ── Final Duel (Stage 12) ────────────────────────────────────────────
+
+    def _trigger_final_duel(
+        self,
+        state: GameState,
+        duel_type: FinalDuelType,
+        attacker: str,
+        defender: str,
+        events: list[Event],
+        trigger_position: "Position | None" = None,
+        captured_king_piece_id: str | None = None,
+    ) -> None:
+        """
+        Single entry point for entering Phase.FINAL_DUEL (README §22 — King
+        capture and checkmate both trigger the Duel instead of an instant
+        win). Builds the DuelState via mechanics/duel.initialize_duel (Royal
+        Support tally — README §27) and appends FinalDuelTriggered.
+
+        Called from every capture/checkmate/stalemate detection site instead
+        of constructing DuelState inline, so all five sites share one
+        initialization path.
+        """
+        from game.mechanics.duel import initialize_duel
+
+        duel = DuelState(duel_type=duel_type, attacker=attacker, defender=defender)
+        state.duel = duel
+        state.phase = Phase.FINAL_DUEL
+        initialize_duel(
+            state, duel, self._registry, events,
+            trigger_position=trigger_position,
+            captured_king_piece_id=captured_king_piece_id,
+        )
+        events.append(FinalDuelTriggered(
+            attacker=attacker,
+            defender=defender,
+            duel_type=duel_type,
+            trigger_position=trigger_position,
+        ))
+
+    def _execute_final_duel_action(
+        self,
+        state: GameState,
+        action: FinalDuelAction,
+        registry: "object | None" = None,
+    ) -> list[Event]:
+        """Dispatch a Duel Action (README §32) to mechanics/duel.py."""
+        self._require_phase(state, Phase.FINAL_DUEL)
+        if state.duel is None:
+            raise IllegalActionError("No active Final Duel.")
+        from game.mechanics.duel import get_legal_duel_actions, resolve_duel_action
+
+        item_id = action.parameters.get("item_id")
+        legal = get_legal_duel_actions(state, action.player_id)
+        if not any(
+            a.duel_action_type == action.duel_action_type
+            and a.parameters.get("item_id") == item_id
+            for a in legal
+        ):
+            raise IllegalActionError(
+                f"Illegal Duel action {action.duel_action_type!r} "
+                f"(item_id={item_id!r}) for {action.player_id!r}."
+            )
+
+        events: list[Event] = []
+        resolve_duel_action(state, action, events, registry)
+        return events
 
     # ── Castling rights helpers (Stage 1) ────────────────────────────────
 

@@ -60,6 +60,7 @@ from game.core.actions import (
     DismissMonster,
     EndPreparation,
     EndTurn,
+    FinalDuelAction,
     MovePiece,
     PlaceMercenaryPiece,
     PlaceTrap,
@@ -316,6 +317,14 @@ class AppController:
         self._ritual_picker_actions: list = []          # legal ActivateRitual actions, filtered as the flow narrows
         self._ritual_picker_row_ids: list[str] = []     # row index → ritual_id, including disabled rows (see _do_ritual)
 
+        # Stage 12: Final Duel action picker. Unlike the King/Ritual pickers
+        # above (multi-step flows persisted across frames), this one is
+        # stateless — rebuilt fresh every _render() call from the current
+        # legal Duel actions, since who's acting (defender/attacker) and
+        # what's available flips every round. Reused only so the click
+        # handler can read the row_rects the most recent draw() computed.
+        self._duel_picker: "_KingDialog | None" = None
+
         # Auto-advance past phases that need no user input
         self._auto_advance()
 
@@ -387,6 +396,8 @@ class AppController:
                 self._king_picker._mouse_pos = event.pos
             if self._ritual_picker is not None:
                 self._ritual_picker._mouse_pos = event.pos
+            if self._duel_picker is not None:
+                self._duel_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
@@ -419,6 +430,13 @@ class AppController:
                     self._cancel_ritual_mode()
                 elif result is not None:
                     self._on_ritual_picker_choice(result)
+                return
+            if self._duel_picker is not None:
+                result = self._duel_picker.handle_click(mx, my)
+                # No "cancel" concept for the Duel picker — "Advance" (always
+                # present) is the safe pass; a miss just does nothing.
+                if result is not None and result != "cancel":
+                    self._on_duel_picker_choice(result)
                 return
             if self._promotion_dialog is not None:
                 self._handle_promotion_click(mx, my)
@@ -2033,12 +2051,22 @@ class AppController:
         """
         _log.debug("UI→ENG   %s  player=%s", type(action).__name__, player_id)
         try:
-            self._game.execute(action)
+            result = self._game.execute(action)
         except Exception as exc:
             _log.warning("UI→ENG   FAILED  %s: %s", type(action).__name__, exc)
             self._deselect()
             self._show_toast(f"Illegal action: {exc}")
             return
+
+        # Stage 12: a Duel that just concluded clears state.duel — the Duel
+        # Log panel disappears with it, so surface the outcome as a toast
+        # instead (the round-by-round feed already covered how it got there).
+        from game.core.events import GameOver, RoyalEscapeTriggered
+        for ev in result.events:
+            if isinstance(ev, RoyalEscapeTriggered):
+                self._show_toast(f"👑 {ev.defender}'s King escapes the Final Duel!")
+            elif isinstance(ev, GameOver) and ev.reason == "final_duel_victory":
+                self._show_toast(f"⚔ {ev.winner} wins the Final Duel!")
 
         self._deselect()
         self._cancel_summon()   # clear summon mode after any executed action
@@ -2056,6 +2084,64 @@ class AppController:
             return  # wait for user to choose
 
         self._auto_advance()
+
+    # ── Final Duel (Stage 12) ────────────────────────────────────────────
+
+    def _build_duel_picker(self) -> "_KingDialog | None":
+        """
+        Build a fresh Duel Action picker for the currently-acting HUMAN
+        side, or None if it's not a human's Duel turn — AI sides are
+        played by _tick_ai instead. Rebuilt every _render() call rather
+        than persisted: who's acting (defender/attacker) and what's
+        available changes every round, unlike the King/Ritual pickers'
+        multi-step flows.
+        """
+        duel = self._game.state.duel
+        if duel is None:
+            return None
+        acting = duel.defender if not duel.defender_acted_this_round else duel.attacker
+        if self._player_modes.get(acting) == "ai":
+            return None
+        legal = self._game.get_legal_actions(acting)
+        if not legal:
+            return None
+
+        pool = duel.defender_support if acting == duel.defender else duel.attacker_support
+        icons = {"support": "🛡️", "building": "🏰", "king_policy": "👑"}
+        rows: list[tuple[str, Any]] = []
+        for action in legal:
+            item_id = action.parameters.get("item_id")
+            if action.duel_action_type == "advance":
+                label = "🚶  Advance (pass)"
+            elif action.duel_action_type == "strike":
+                label = "⚔️  Strike"
+            else:
+                item = next((i for i in pool if i.item_id == item_id), None)
+                icon = icons.get(action.duel_action_type, "•")
+                label = f"{icon}  {item.label if item else action.duel_action_type}"
+            rows.append((label, (action.duel_action_type, item_id, acting)))
+
+        role = "Defender" if acting == duel.defender else "Attacker"
+        rounds = "∞" if not duel.escape_allowed else str(duel.max_rounds)
+        title = (
+            f"⚔ Final Duel — Round {duel.round_number}/{rounds} — "
+            f"Strikes {duel.strikes_landed}/{duel.strikes_needed} — "
+            f"{role} ({acting}) — Guards {duel.defender_guards} / Bypass {duel.attacker_bypass}"
+        )
+        return _KingDialog(
+            self._screen, self._font_small, title, rows,
+            accent=(230, 90, 90), border=(180, 60, 60),
+        )
+
+    def _on_duel_picker_choice(self, key: "tuple[str, str | None, str]") -> None:
+        duel_action_type, item_id, player_id = key
+        action = FinalDuelAction(
+            player_id=player_id,
+            duel_action_type=duel_action_type,
+            parameters=({"item_id": item_id} if item_id else {}),
+        )
+        self._duel_picker = None
+        self._execute_and_advance(action, player_id)
 
     # ── Export / Import ───────────────────────────────────────────────────
 
@@ -2184,6 +2270,26 @@ class AppController:
         obs = self._current_obs()
         active = obs.active_player
 
+        # Stage 12: Final Duel — turn order is defender-then-attacker each
+        # round, NOT obs.active_player (that still names whoever's normal
+        # chess move triggered the Duel). No think-delay: Duel rounds are
+        # meant to resolve quickly (README §23, "should be short").
+        if obs.phase == Phase.FINAL_DUEL:
+            duel = self._game.state.duel
+            if duel is None:
+                return
+            acting = duel.defender if not duel.defender_acted_this_round else duel.attacker
+            if self._player_modes.get(acting) != "ai":
+                return
+            legal = self._game.get_legal_actions(acting)
+            if not legal:
+                return
+            bot = self._bots[acting]
+            action = bot.choose_action(self._game.get_observation(acting), legal)
+            _log.debug("AI       %s chose Duel action %s", acting, action.duel_action_type)
+            self._execute_and_advance(action, acting)
+            return
+
         # AI promotion: auto-pick queen whenever it's an AI's turn in
         # PROMOTION_SELECTION — regardless of whether a dialog is showing.
         # (The dialog is only created for human players in _execute_and_advance.)
@@ -2308,7 +2414,9 @@ class AppController:
           DRAW        → engine auto-resolves to PREPARATION via Game.execute()
           REACTION    → EndTurn
           END         → EndTurn
-          FINAL_DUEL  → resolve_final_duel_immediately() (Stage 3: no card duel)
+          FINAL_DUEL  → stop (Stage 12): _tick_ai plays an AI side's Duel
+                        turn every frame; a human side is shown the Duel
+                        Action picker (_build_duel_picker, drawn in _render)
 
         After EndTurn the engine sets Phase.START for the next player; the
         next loop iteration drives that through to PREPARATION automatically.
@@ -2317,10 +2425,12 @@ class AppController:
           • Phase is PREPARATION (player may play a card — Stage 4).
           • Phase is CHESS       (player must click a move).
           • Phase is PROMOTION_SELECTION (dialog is showing).
+          • Phase is FINAL_DUEL  (Duel Action picker / AI Duel turn — Stage 12).
           • game.is_over()       (GAME_OVER or winner set)
         """
         _stop = {Phase.PREPARATION, Phase.CHESS, Phase.PROMOTION_SELECTION, Phase.DISCARD,
-                 Phase.RECOMPOSE_SELECTION, Phase.MERCENARY_SELECTION, Phase.MERCENARY_PLACEMENT}
+                 Phase.RECOMPOSE_SELECTION, Phase.MERCENARY_SELECTION, Phase.MERCENARY_PLACEMENT,
+                 Phase.FINAL_DUEL}
         _max_iters = 20   # safety valve — never loop forever
         for _ in range(_max_iters):
             if self._game.is_over():
@@ -2352,13 +2462,7 @@ class AppController:
             if obs.phase in _stop:
                 break
 
-            if obs.phase == Phase.FINAL_DUEL:
-                # Stage 3: no card-based duel — attacker wins immediately.
-                # Full duel mechanic deferred to Stage 12.
-                self._game.resolve_final_duel_immediately()
-                break  # game is now over; render loop will show the banner
-
-            elif obs.phase == Phase.START:
+            if obs.phase == Phase.START:
                 # Advance START → DRAW → PREPARATION without consuming the
                 # player's preparation action.  We must NOT call
                 # execute(EndPreparation) here — that would skip PREPARATION
@@ -2691,6 +2795,21 @@ class AppController:
         if self._ritual_picker is not None:
             self._ritual_picker.draw()
 
+        # Stage 12: Final Duel round-by-round log — always visible while a
+        # Duel is active, for BOTH sides' actions (including an AI's, which
+        # has no picker to look at). Answers "what did the other King just
+        # do" without digging through the sidebar Event Log.
+        if self._game.state.duel is not None:
+            self._draw_duel_log(self._game.state.duel)
+
+        # Stage 12: Final Duel Action picker — rebuilt fresh every frame
+        # (see _build_duel_picker docstring). None while it's an AI Duel
+        # turn (handled by _tick_ai) or after GAME_OVER/Royal Escape.
+        self._duel_picker = self._build_duel_picker()
+        if self._duel_picker is not None:
+            self._duel_picker._mouse_pos = self._mouse_pos
+            self._duel_picker.draw()
+
         # Game-over banner
         if self._game.is_over():
             self._draw_game_over_banner()
@@ -2715,6 +2834,57 @@ class AppController:
         tx = (_BOARD_W - text_surf.get_width()) // 2
         ty = _BOARD_H // 2 - text_surf.get_height() // 2
         self._screen.blit(text_surf, (tx, ty))
+
+    def _draw_duel_log(self, duel: "object") -> None:
+        """
+        Stage 12 — a small always-on panel pinned to the top of the board
+        showing the last few Duel actions (both sides), newest at the
+        bottom. Distinct from the Duel Action picker (_build_duel_picker):
+        this draws every frame the Duel is active regardless of whose turn
+        it is or whether that side is AI, so a human watching an AI
+        opponent — or spectating an AI-vs-AI Duel — can follow along.
+        """
+        lines: list[str] = duel.log[-7:]
+        if not lines:
+            return
+
+        line_h = self._font_small.render("Ag", True, (230, 230, 230)).get_height() + 3
+        pad = 8
+        header_h = self._font_small.render("Ag", True, (230, 230, 230)).get_height()
+        w = 380
+        h = pad * 2 + header_h + 4 + line_h * len(lines)
+        x = (_BOARD_W - w) // 2
+        y = 8
+
+        panel = pygame.Surface((w, h), pygame.SRCALPHA)
+        panel.fill((18, 14, 20, 215))
+        self._screen.blit(panel, (x, y))
+        pygame.draw.rect(self._screen, (150, 70, 70), (x, y, w, h), 1, border_radius=4)
+
+        header = self._font_small.render("⚔ Duel Log", True, (230, 150, 90))
+        self._screen.blit(header, (x + pad, y + pad))
+        ly = y + pad + header_h + 4
+
+        for line in lines:
+            if line.startswith("white"):
+                color = (235, 235, 240)
+            elif line.startswith("black"):
+                color = (175, 175, 210)
+            elif line.startswith("—"):
+                color = (150, 130, 100)
+            elif line.startswith("⚔"):
+                color = (230, 150, 90)
+            else:
+                color = (210, 210, 210)
+            surf = self._font_small.render(line, True, color)
+            inner_w = w - pad * 2
+            if surf.get_width() > inner_w:
+                trimmed = line
+                while trimmed and surf.get_width() > inner_w:
+                    trimmed = trimmed[:-1]
+                    surf = self._font_small.render(trimmed + "…", True, color)
+            self._screen.blit(surf, (x + pad, ly))
+            ly += line_h
 
     def _draw_toast(self) -> None:
         """
