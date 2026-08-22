@@ -11,9 +11,9 @@ purpose: *test engine stability, validate legal-action generation, fuzz
 unusual states, run automated simulations*.
 
 Controllers are ordinary ``PlayerController`` implementations, so the same
-harness runs RandomBot mirrors, HeuristicBot mirrors, SearchBot mirrors, or
-any head-to-head between them — which is how each AI stage is measured
-against the one before it.
+harness runs RandomBot mirrors, HeuristicBot mirrors, SearchBot mirrors,
+MonteCarloBot mirrors, or any head-to-head between them — which is how each
+AI stage is measured against the one before it.
 
 Usage (library):
 
@@ -28,6 +28,8 @@ Usage (CLI):
 
     python -m game.sim --matches 50 --white heuristic --black random
     python -m game.sim --matches 20 --white search --black heuristic --search-depth 3
+    python -m game.sim --matches 10 --white montecarlo --black search --mc-samples 16
+    python -m game.sim --matches 10 --white personality --white-personality ritualist
     python -m game.sim --matches 200 --csv telemetry.csv --json summary.json
 
 Information rules (README §44) hold here exactly as in the UI: each
@@ -44,12 +46,14 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
+from game.ai.personality import DEFAULT_PERSONALITY, PERSONALITY_KEYS
 from game.logger import get_logger
 from game.core.phases import Phase
 from game.telemetry import MatchStats, TelemetryAggregator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from game.ai.controller import PlayerController
+    from game.ai.monte_carlo import MonteCarloLimits
     from game.ai.search import SearchLimits
     from game.cards.card import CardRegistry
     from game.core.game import Game
@@ -67,7 +71,9 @@ DEFAULT_MAX_STEPS = 4000
 # Controller factory
 # ─────────────────────────────────────────────────────────────────────────────
 
-CONTROLLER_KINDS: list[str] = ["random", "heuristic", "search"]
+CONTROLLER_KINDS: list[str] = [
+    "random", "heuristic", "search", "montecarlo", "personality",
+]
 
 
 def make_controller(
@@ -76,20 +82,31 @@ def make_controller(
     player_id: str,
     registry: "CardRegistry | None" = None,
     search_limits: "SearchLimits | None" = None,
+    mc_limits: "MonteCarloLimits | None" = None,
+    personality: str | None = None,
 ) -> "PlayerController":
     """
     Build a controller by short name.
 
-    ``"random"``    — AI Stage 0 RandomBot     (README §45)
-    ``"heuristic"`` — AI Stage 1 HeuristicBot  (README §46)
-    ``"search"``    — AI Stage 2 SearchBot     (README §47)
+    ``"random"``      — AI Stage 0 RandomBot      (README §45)
+    ``"heuristic"``   — AI Stage 1 HeuristicBot   (README §46)
+    ``"search"``      — AI Stage 2 SearchBot      (README §47)
+    ``"montecarlo"``  — AI Stage 4 MonteCarloBot  (README §49)
+    ``"personality"`` — an AI Personality         (README §51), a SearchBot
+                        over retuned weights; ``personality`` names which
+                        one ("conqueror", "architect", "ritualist",
+                        "assassin", "opportunist").
 
     ``registry`` (the public card definitions, not game state — see §44)
     sharpens HeuristicBot's Monster and hand-quality scoring and SearchBot's
-    Monster-aware move generation; RandomBot ignores it.
+    Monster-aware move generation; RandomBot ignores it.  MonteCarloBot
+    *needs* it — the card pool is what its sampled worlds are drawn from —
+    and degrades to Stage 2 behaviour without one.
 
-    ``search_limits`` sets SearchBot's per-decision budget; ignored by the
-    other two.
+    ``search_limits`` sets the tree-search budget (SearchBot,
+    PersonalityBot, and MonteCarloBot's non-sampled phases); ``mc_limits``
+    sets Stage 4's sampling budget.  Both are ignored by the bots that have
+    no use for them, as is ``personality``.
     """
     kind = kind.lower()
     if kind == "random":
@@ -106,6 +123,28 @@ def make_controller(
 
         bot = SearchBot(
             seed=seed,
+            registry=registry,
+            limits=search_limits or _SearchLimits(),
+        )
+    elif kind == "montecarlo":
+        from game.ai.monte_carlo import MonteCarloBot
+        from game.ai.monte_carlo import MonteCarloLimits as _MonteCarloLimits
+        from game.ai.search import SearchLimits as _SearchLimits
+
+        bot = MonteCarloBot(
+            seed=seed,
+            registry=registry,
+            limits=search_limits or _SearchLimits(),
+            mc_limits=mc_limits or _MonteCarloLimits(),
+        )
+    elif kind == "personality":
+        from game.ai.personality import DEFAULT_PERSONALITY
+        from game.ai.personality_bot import PersonalityBot
+        from game.ai.search import SearchLimits as _SearchLimits
+
+        bot = PersonalityBot(
+            seed=seed,
+            personality=personality or DEFAULT_PERSONALITY,
             registry=registry,
             limits=search_limits or _SearchLimits(),
         )
@@ -261,6 +300,9 @@ def run_matches(
     stop_on_error: bool = False,
     progress: bool = False,
     search_limits: "SearchLimits | None" = None,
+    mc_limits: "MonteCarloLimits | None" = None,
+    white_personality: str | None = None,
+    black_personality: str | None = None,
 ) -> SimulationResult:
     """
     Run ``count`` matches and aggregate their telemetry.
@@ -277,8 +319,14 @@ def run_matches(
     for i in range(count):
         seed = base_seed + i
         controllers = {
-            "white": make_controller(white, seed * 2 + 1, "white", registry, search_limits),
-            "black": make_controller(black, seed * 2 + 2, "black", registry, search_limits),
+            "white": make_controller(
+                white, seed * 2 + 1, "white", registry, search_limits,
+                mc_limits, white_personality,
+            ),
+            "black": make_controller(
+                black, seed * 2 + 2, "black", registry, search_limits,
+                mc_limits, black_personality,
+            ),
         }
         try:
             stats = play_match(
@@ -342,6 +390,24 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="SearchBot: node ceiling per decision")
     parser.add_argument("--search-seconds", type=float, default=None,
                         help="SearchBot: wall-clock ceiling per decision")
+    # AI Stage 4 (README §49) sampling budget — ignored by the other bots.
+    parser.add_argument("--mc-samples", type=int, default=None,
+                        help="MonteCarloBot: worlds sampled per PREPARATION decision")
+    parser.add_argument("--mc-depth", type=int, default=None,
+                        help="MonteCarloBot: plies searched inside each world")
+    parser.add_argument("--mc-chess-samples", type=int, default=None,
+                        help="MonteCarloBot: worlds sampled per CHESS decision")
+    parser.add_argument("--mc-chess-depth", type=int, default=None,
+                        help="MonteCarloBot: plies searched per CHESS world")
+    parser.add_argument("--mc-seconds", type=float, default=None,
+                        help="MonteCarloBot: wall-clock ceiling per decision")
+    # AI Personalities (README §51) — ignored unless the side is "personality".
+    parser.add_argument("--white-personality", default=None,
+                        choices=PERSONALITY_KEYS,
+                        help="play style for --white personality")
+    parser.add_argument("--black-personality", default=None,
+                        choices=PERSONALITY_KEYS,
+                        help="play style for --black personality")
     parser.add_argument("--no-registry", action="store_true",
                         help="run without the YAML card registry")
     parser.add_argument("--csv", default=None, help="write per-match rows here")
@@ -353,7 +419,7 @@ def main(argv: "list[str] | None" = None) -> int:
     registry = None if args.no_registry else load_default_registry()
 
     search_limits = None
-    if "search" in (args.white, args.black):
+    if {"search", "montecarlo", "personality"} & {args.white, args.black}:
         from game.ai.search import SearchLimits as _SearchLimits
 
         default = _SearchLimits()
@@ -364,6 +430,24 @@ def main(argv: "list[str] | None" = None) -> int:
             else default.max_nodes,
             max_seconds=args.search_seconds if args.search_seconds is not None
             else default.max_seconds,
+        )
+
+    mc_limits = None
+    if "montecarlo" in (args.white, args.black):
+        from game.ai.monte_carlo import MonteCarloLimits as _MonteCarloLimits
+
+        mc_default = _MonteCarloLimits()
+        mc_limits = _MonteCarloLimits(
+            samples=args.mc_samples if args.mc_samples is not None
+            else mc_default.samples,
+            depth=args.mc_depth if args.mc_depth is not None
+            else mc_default.depth,
+            chess_samples=args.mc_chess_samples if args.mc_chess_samples is not None
+            else mc_default.chess_samples,
+            chess_depth=args.mc_chess_depth if args.mc_chess_depth is not None
+            else mc_default.chess_depth,
+            max_seconds=args.mc_seconds if args.mc_seconds is not None
+            else mc_default.max_seconds,
         )
 
     print(
@@ -379,16 +463,31 @@ def main(argv: "list[str] | None" = None) -> int:
         max_steps=args.max_steps,
         progress=not args.quiet,
         search_limits=search_limits,
+        mc_limits=mc_limits,
+        white_personality=args.white_personality,
+        black_personality=args.black_personality,
     )
 
     summary = result.aggregator.summary()
     summary["white_controller"] = args.white
     summary["black_controller"] = args.black
+    if args.white == "personality":
+        summary["white_personality"] = args.white_personality or DEFAULT_PERSONALITY
+    if args.black == "personality":
+        summary["black_personality"] = args.black_personality or DEFAULT_PERSONALITY
     if search_limits is not None:
         summary["search_limits"] = {
             "max_depth": search_limits.max_depth,
             "max_nodes": search_limits.max_nodes,
             "max_seconds": search_limits.max_seconds,
+        }
+    if mc_limits is not None:
+        summary["mc_limits"] = {
+            "samples": mc_limits.samples,
+            "depth": mc_limits.depth,
+            "chess_samples": mc_limits.chess_samples,
+            "chess_depth": mc_limits.chess_depth,
+            "max_seconds": mc_limits.max_seconds,
         }
     summary["base_seed"] = base_seed
     summary["errors"] = [{"seed": s, "error": e} for s, e in result.errors]

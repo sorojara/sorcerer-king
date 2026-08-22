@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pygame
@@ -45,6 +46,9 @@ _log = get_logger(__name__)
 
 from game.ai.controller import PlayerController
 from game.ai.heuristic_bot import HeuristicBot
+from game.ai.monte_carlo import MonteCarloBot, MonteCarloLimits
+from game.ai.personality import DEFAULT_PERSONALITY, PERSONALITIES
+from game.ai.personality_bot import PersonalityBot
 from game.ai.random_bot import RandomBot
 from game.ai.search import SearchLimits
 from game.ai.search_bot import SearchBot
@@ -124,6 +128,116 @@ _FONT_PX: int = 52    # chess glyph + large UI text
 _FONT_SM_PX: int = 14  # small labels
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The player roster — everything a side can be driven by
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class _PlayerChoice:
+    """
+    One selectable controller: a difficulty tier, a README §51 play style,
+    or the human.
+
+    The roster is the single source of truth for the picker popup AND for
+    the sidebar button's label, so adding a controller means adding one
+    entry here and nothing else.
+
+    ``tier`` is the §52 difficulty word shown next to a stage bot's name;
+    play styles leave it empty, because §51 is about *how* the bot plays,
+    not how hard it thinks.
+    """
+
+    mode: str                       # "human" | "ai"
+    kind: str                       # _ai_kinds value ("random", "search", …)
+    personality: str | None         # set only when kind == "personality"
+    name: str                       # picker row title
+    tier: str                       # "Easy" / "Hard" / "" for a play style
+    subtitle: str                   # one-line description, under the name
+    detail: tuple[str, ...]         # what the detail panel lists
+    label: str                      # sidebar button text
+
+    def matches(self, mode: str, kind: str, personality: str | None) -> bool:
+        if self.mode != mode:
+            return False
+        if mode != "ai":
+            return True
+        if self.kind != kind:
+            return False
+        return self.kind != "personality" or self.personality == personality
+
+
+def _build_player_roster() -> list[_PlayerChoice]:
+    """
+    The picker's rows, in the order they are shown: the four AI stages by
+    README §52 difficulty, then the five README §51 play styles, then the
+    human.  Difficulty first because it is the coarse choice — a player
+    picks how hard the game should be before they pick its flavour.
+    """
+    roster = [
+        _PlayerChoice(
+            mode="ai", kind="random", personality=None,
+            name="Random", tier="Idiot",
+            subtitle="Picks a legal action at random.",
+            detail=("No evaluation, no search",
+                    "Every legal action is equally likely",
+                    "AI Stage 0 — README §45"),
+            label="RANDOM AI",
+        ),
+        _PlayerChoice(
+            mode="ai", kind="heuristic", personality=None,
+            name="Heuristic", tier="Easy",
+            subtitle="Scores every legal action once.",
+            detail=("Weighted position evaluation",
+                    "No search — one move deep",
+                    "AI Stage 1 — README §46"),
+            label="HEURISTIC AI",
+        ),
+        _PlayerChoice(
+            mode="ai", kind="search", personality=None,
+            name="Search", tier="Medium",
+            subtitle="Searches the board a few moves ahead.",
+            detail=("Alpha-beta, 3 plies, move ordering",
+                    "Card decisions fall back to Easy",
+                    "AI Stage 2 — README §47"),
+            label="SEARCH AI",
+        ),
+        _PlayerChoice(
+            mode="ai", kind="montecarlo", personality=None,
+            name="Monte Carlo", tier="Hard",
+            subtitle="Guesses your hand, then searches.",
+            detail=("Samples the hidden cards into whole worlds",
+                    "Searches inside every world it draws",
+                    "AI Stage 4 — README §49"),
+            label="MONTE CARLO AI",
+        ),
+    ]
+    roster += [
+        _PlayerChoice(
+            mode="ai", kind="personality", personality=style.key,
+            name=style.name, tier="",
+            subtitle=style.blurb,
+            detail=style.priorities,
+            label=f"{style.name.upper()} AI",
+        )
+        for style in PERSONALITIES.values()
+    ]
+    roster.append(
+        _PlayerChoice(
+            mode="human", kind="random", personality=None,
+            name="Human", tier="",
+            subtitle="You play this side yourself.",
+            detail=("Click the board to move",
+                    "The hand strip and sidebar buttons are yours"),
+            label="HUMAN",
+        )
+    )
+    return roster
+
+
+#: Every controller a side can be driven by, in picker order.
+_PLAYER_ROSTER: list[_PlayerChoice] = _build_player_roster()
+
+
 class AppController:
     """
     Pygame application controller.
@@ -134,18 +248,25 @@ class AppController:
       • Input state (selected_pos, legal_dests, castle_dests).
       • Player mode config: each side is Human or one of the AI models.
 
-    Each side's controller is picked from the sidebar button, which cycles
-    HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI → HUMAN, so any two models
-    can be matched against each other (or against a human) without leaving
-    the app.  ``_player_modes`` keeps the coarse "human" / "ai" split every
-    phase handler branches on, while ``_ai_kinds`` records WHICH bot plays
-    an "ai" side:
+    Each side's controller is picked from the sidebar button, which opens a
+    popup listing the whole roster — the four AI stages labelled by README
+    §52 difficulty, the five README §51 play styles, and the human — so any
+    two of them can be matched against each other without leaving the app.
+    ``_PLAYER_ROSTER`` is the single source of truth for that list and for
+    the button's own label.
 
-        "random"    — AI Stage 0 RandomBot     (README §45)
-        "heuristic" — AI Stage 1 HeuristicBot  (README §46)
-        "search"    — AI Stage 2 SearchBot     (README §47)
+    ``_player_modes`` keeps the coarse "human" / "ai" split every phase
+    handler branches on, while ``_ai_kinds`` records WHICH bot plays an
+    "ai" side:
 
-    All three are ordinary PlayerControllers, so they receive an Observation and
+        "random"      — AI Stage 0 RandomBot      (README §45)  "Idiot"
+        "heuristic"   — AI Stage 1 HeuristicBot   (README §46)  "Easy"
+        "search"      — AI Stage 2 SearchBot      (README §47)  "Medium"
+        "montecarlo"  — AI Stage 4 MonteCarloBot  (README §49)  "Hard"
+        "personality" — an AI Personality         (README §51); which play
+                        style is in ``_ai_personalities``
+
+    All five are ordinary PlayerControllers, so they receive an Observation and
     the legal action list and nothing else (README §44).  A short visual
     delay (_AI_THINK_FRAMES) lets the human see each AI move before the
     next action.
@@ -228,6 +349,10 @@ class AppController:
         # "human" → human input; "ai" → the bot named by _ai_kinds plays.
         self._player_modes: dict[str, str] = {"white": "human", "black": "human"}
         self._ai_kinds: dict[str, str] = {"white": "random", "black": "random"}
+        # README §51 play style used when _ai_kinds says "personality".
+        self._ai_personalities: dict[str, str] = {
+            "white": DEFAULT_PERSONALITY, "black": DEFAULT_PERSONALITY,
+        }
         self._bot_seeds: dict[str, int] = {"white": 1, "black": 2}
         self._bots: dict[str, PlayerController] = {
             pid: self._make_bot(pid) for pid in ("white", "black")
@@ -337,6 +462,13 @@ class AppController:
         self._ritual_picker_actions: list = []          # legal ActivateRitual actions, filtered as the flow narrows
         self._ritual_picker_row_ids: list[str] = []     # row index → ritual_id, including disabled rows (see _do_ritual)
 
+        # Player picker: the "who plays this side" popup opened by either
+        # controller selector. ``_player_picker_side`` is the side being
+        # configured. Opening it commits nothing, so Cancel needs no undo
+        # state — the side is untouched until a row is clicked.
+        self._player_picker: "_PlayerPicker | None" = None
+        self._player_picker_side: str | None = None
+
         # Stage 12: Final Duel action picker. Unlike the King/Ritual pickers
         # above (multi-step flows persisted across frames), this one is
         # stateless — rebuilt fresh every _render() call from the current
@@ -356,7 +488,11 @@ class AppController:
             for event in pygame.event.get():
                 self._handle_event(event)
 
-            self._tick_ai()    # let AI play if it's their turn
+            # The player picker is a setup dialog, not a game decision:
+            # freeze the match while it is open so the board does not move
+            # on under the player choosing a controller.
+            if self._player_picker is None:
+                self._tick_ai()    # let AI play if it's their turn
             self._render()
             self._tick_toast()
             self._clock.tick(60)
@@ -384,6 +520,9 @@ class AppController:
                     return
                 if self._ritual_picker is not None:
                     self._cancel_ritual_mode()
+                    return
+                if self._player_picker is not None:
+                    self._close_player_picker()
                     return
                 self._cancel_summon()
                 self._cancel_targeting_mode()
@@ -418,11 +557,20 @@ class AppController:
                 self._ritual_picker._mouse_pos = event.pos
             if self._duel_picker is not None:
                 self._duel_picker._mouse_pos = event.pos
+            if self._player_picker is not None:
+                self._player_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+            if self._player_picker is not None:
+                result = self._player_picker.handle_click(mx, my)
+                if result == "cancel":
+                    self._close_player_picker()
+                elif result is not None:
+                    self._on_player_choice(result)
+                return
             if self._mercenary_picker is not None:
                 result = self._mercenary_picker.handle_click(mx, my)
                 if result == "cancel":
@@ -2307,15 +2455,11 @@ class AppController:
 
     # ── Player mode selector ──────────────────────────────────────────────
 
-    # The selectable controllers, in cycle order. Each entry is
-    # (player_mode, ai_kind, label) — ai_kind is ignored for "human".
-    # Adding an AI stage to the game means adding one row here.
-    _MODE_CYCLE: list[tuple[str, str, str]] = [
-        ("human", "random",    "HUMAN"),
-        ("ai",    "random",    "RANDOM AI"),
-        ("ai",    "heuristic", "HEURISTIC AI"),
-        ("ai",    "search",    "SEARCH AI"),
-    ]
+    # Every controller a side can be driven by — the four AI stages by
+    # README §52 difficulty, the five README §51 play styles, and the human.
+    # Adding a controller to the game means adding one entry to
+    # ``_build_player_roster()`` and nothing else.
+    _ROSTER: list[_PlayerChoice] = _PLAYER_ROSTER
 
     # AI Stage 2 budget for interactive play. The UI asks its bot for a move
     # on the frame the think-delay expires, so the search has to come back
@@ -2325,20 +2469,49 @@ class AppController:
         max_depth=3, max_nodes=2500, max_seconds=0.6
     )
 
+    # AI Stage 4 budget for interactive play, held to the same patience.
+    # Stage 4 pays for its worlds with depth: a sampled CHESS decision runs
+    # two plies here rather than three, which is what the Stage 2 bot
+    # actually completes inside 0.6 s in a crowded midgame anyway (README
+    # §47's measured baseline). A headless run (python -m game.sim --white
+    # montecarlo) gets the full-depth default.
+    _UI_MC_LIMITS: MonteCarloLimits = MonteCarloLimits(
+        samples=12, depth=2,
+        chess_samples=8, chess_depth=2,
+        max_candidates=8, max_nodes=8000, max_seconds=0.9,
+    )
+
     def _make_bot(self, player_id: str) -> PlayerController:
         """
         Build the controller currently selected for ``player_id``.
 
-        HeuristicBot and SearchBot are given the card registry — the
-        *public* card definitions, the same rulebook a human reads off the
-        cards. It is not game state, so this is not an information leak
-        (README §44); every bot still receives only an Observation at
-        decision time.
+        Every bot but RandomBot is given the card registry — the *public*
+        card definitions, the same rulebook a human reads off the cards. It
+        is not game state, so this is not an information leak (README §44);
+        every bot still receives only an Observation at decision time.
+        MonteCarloBot needs it most: the registry is the pool its sampled
+        opponent hands are drawn from.
         """
         kind = self._ai_kinds.get(player_id, "random")
         seed = self._bot_seeds.get(player_id, 0)
         bot: PlayerController
-        if kind == "search":
+        if kind == "personality":
+            bot = PersonalityBot(
+                seed=seed,
+                personality=self._ai_personalities.get(
+                    player_id, DEFAULT_PERSONALITY
+                ),
+                registry=self._registry,
+                limits=self._UI_SEARCH_LIMITS,
+            )
+        elif kind == "montecarlo":
+            bot = MonteCarloBot(
+                seed=seed,
+                registry=self._registry,
+                limits=self._UI_SEARCH_LIMITS,
+                mc_limits=self._UI_MC_LIMITS,
+            )
+        elif kind == "search":
             bot = SearchBot(
                 seed=seed,
                 registry=self._registry,
@@ -2351,31 +2524,41 @@ class AppController:
         bot.player_id = player_id
         return bot
 
-    def mode_label(self, player_id: str) -> str:
-        """Human-readable name of the controller driving ``player_id``."""
+    def current_choice(self, player_id: str) -> _PlayerChoice:
+        """The roster entry currently driving ``player_id``."""
         mode = self._player_modes.get(player_id, "human")
-        if mode != "ai":
-            return "HUMAN"
         kind = self._ai_kinds.get(player_id, "random")
+        style = self._ai_personalities.get(player_id, DEFAULT_PERSONALITY)
         return next(
-            (label for m, k, label in self._MODE_CYCLE if m == "ai" and k == kind),
-            "RANDOM AI",
+            (c for c in self._ROSTER if c.matches(mode, kind, style)),
+            self._ROSTER[-1],           # the human row — the safe fallback
         )
 
-    def _toggle_mode(self, player_id: str) -> None:
-        """Cycle: HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI → …"""
-        mode_now = self._player_modes.get(player_id, "human")
-        kind_now = self._ai_kinds.get(player_id, "random")
-        if mode_now != "ai":
-            index = 0
-        else:
-            index = next(
-                (i for i, (m, k, _) in enumerate(self._MODE_CYCLE)
-                 if m == "ai" and k == kind_now),
-                0,
-            )
-        mode, kind, label = self._MODE_CYCLE[(index + 1) % len(self._MODE_CYCLE)]
+    def mode_label(self, player_id: str) -> str:
+        """
+        Human-readable name of the controller driving ``player_id``.
 
+        A play style names itself — "RITUALIST AI" says far more about what
+        the player is up against than "PERSONALITY AI" would.
+        """
+        return self.current_choice(player_id).label
+
+    def _toggle_mode(self, player_id: str) -> None:
+        """
+        Sidebar selector: open the player picker for ``player_id``.
+
+        This used to cycle one step per click, which meant five clicks to
+        reach the far end of the roster and no way to see what the options
+        were before landing on one.  The roster is now long enough — four
+        difficulty tiers, five play styles and the human — that a list you
+        can read beats a cycle you have to walk.
+        """
+        self._open_player_picker(player_id)
+
+    def _set_mode(
+        self, player_id: str, mode: str, kind: str, label: str
+    ) -> None:
+        """Commit a controller choice for ``player_id`` and rebuild its bot."""
         self._player_modes[player_id] = mode
         self._ai_kinds[player_id] = kind
         # Rebuild so a switched-to bot starts from a clean, seeded state
@@ -2388,6 +2571,48 @@ class AppController:
             obs = self._current_obs()
             if obs.active_player == player_id and not self._game.is_over():
                 self._ai_think_countdown = _AI_THINK_FRAMES
+
+    # ── Player picker ─────────────────────────────────────────────────────
+
+    def _open_player_picker(self, player_id: str) -> None:
+        """
+        Open the "who plays this side" popup for ``player_id``.
+
+        Lists the whole roster — the AI stages by difficulty, the README
+        §51 play styles, and the human — with the current choice marked.
+        Nothing is committed until a row is clicked.
+        """
+        self._player_picker_side = player_id
+        self._player_picker = _PlayerPicker(
+            surface=self._screen,
+            font=self._font_small,
+            side=player_id,
+            roster=self._ROSTER,
+            current=self.current_choice(player_id),
+        )
+        self._player_picker._mouse_pos = self._mouse_pos
+
+    def _on_player_choice(self, choice: _PlayerChoice) -> None:
+        """A roster row was clicked: commit it and switch the side over."""
+        player_id = self._player_picker_side
+        self._close_player_picker()
+        if player_id is None:
+            return
+        if choice.personality is not None:
+            self._ai_personalities[player_id] = choice.personality
+        self._set_mode(player_id, choice.mode, choice.kind, choice.label)
+        if choice.subtitle:
+            self._show_toast(f"{choice.name}: {choice.subtitle}")
+
+    def _close_player_picker(self) -> None:
+        """
+        Close the popup.
+
+        Cancel needs no undo: opening the picker changes nothing, so the
+        side is still exactly as the player left it.
+        """
+        self._player_picker = None
+        self._player_picker_side = None
 
     def _toggle_black_hand(self) -> None:
         """Toggle the debug black-hand view and resize the window accordingly."""
@@ -2973,6 +3198,11 @@ class AppController:
             self._duel_picker._mouse_pos = self._mouse_pos
             self._duel_picker.draw()
 
+        # The player picker sits on top of everything — it is a setup
+        # dialog, not part of the match.
+        if self._player_picker is not None:
+            self._player_picker.draw()
+
         # Game-over banner
         if self._game.is_over():
             self._draw_game_over_banner()
@@ -3355,6 +3585,215 @@ class _BuildPicker:
             cancel_rect.x + (cancel_rect.width - cs.get_width()) // 2,
             cancel_rect.y + (cancel_rect.height - cs.get_height()) // 2,
         ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _PlayerPicker — "who plays this side" chooser
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _PlayerPicker:
+    """
+    Modal popup listing every controller a side can be driven by.
+
+    Deliberately NOT a ``_KingDialog``.  This is a setup choice the player
+    makes once and then plays against for a whole match, and a bare name
+    says nothing about what that match will feel like — "Monte Carlo" does
+    not read as *hard*, and "Assassin" does not read as *goes for your King
+    while losing*.  So every row carries a difficulty word or a play-style
+    description, and the hovered row's behaviour is spelled out underneath.
+
+    The roster comes in already ordered (difficulty tiers, then README §51
+    play styles, then the human); the only thing this class adds is the
+    "Personalities" heading above the first play style, so the two kinds of
+    choice do not read as one flat list.
+
+    ``handle_click(mx, my)`` returns the chosen ``_PlayerChoice``, "cancel",
+    or None (a click that missed everything inside the dialog).
+    """
+
+    _W = 470
+    _ROW_H = 40
+    _HEAD_H = 22
+    _PADDING = 14
+    _CANCEL_H = 28
+    _GAP = 3
+
+    _BG = (26, 22, 32)
+    _ACCENT = (206, 162, 230)
+    _TIER = (150, 200, 190)
+    _BORDER = (150, 110, 180)
+    _DIM = (150, 140, 160)
+    _ROW_BG = (40, 32, 48)
+    _ROW_BG_HOVER = (58, 44, 70)
+    _ROW_BG_CURRENT = (50, 40, 64)
+
+    def __init__(
+        self,
+        surface: "pygame.Surface",
+        font: "Any",
+        side: str,
+        roster: "list[_PlayerChoice]",
+        current: "_PlayerChoice",
+    ) -> None:
+        self._surface = surface
+        self._font = font
+        self._side = side
+        self._roster = roster
+        self._current = current
+        self._mouse_pos: tuple[int, int] = (0, 0)
+        # The row the detail panel is describing: whatever the mouse is
+        # over, falling back to the current choice so it is never blank.
+        self._detail: "_PlayerChoice" = current
+
+        # A heading is drawn above the first play style, so the difficulty
+        # tiers and the §51 styles do not read as one flat list.
+        self._heading_before = next(
+            (c for c in roster if c.kind == "personality"), None
+        )
+        self._detail_lines = max((len(c.detail) for c in roster), default=0)
+
+        line_h = font.render("Ag", True, (0, 0, 0)).get_height()
+        self._line_h = line_h
+        self._detail_h = self._PADDING + (self._detail_lines + 1) * (line_h + 2)
+        h = (self._PADDING
+             + line_h + 10                                    # title
+             + len(roster) * (self._ROW_H + self._GAP)
+             + (self._HEAD_H + self._GAP if self._heading_before else 0)
+             + 6 + self._detail_h
+             + 8 + self._CANCEL_H
+             + self._PADDING)
+        sw, sh = surface.get_width(), surface.get_height()
+        self._rect = pygame.Rect((sw - self._W) // 2, max((sh - h) // 2, 4),
+                                 self._W, h)
+        self._row_rects: list[pygame.Rect] = []
+        self._cancel_rect: "pygame.Rect | None" = None
+
+    # ── Input ────────────────────────────────────────────────────────────
+
+    def handle_click(self, mx: int, my: int) -> "_PlayerChoice | str | None":
+        for rect, choice in zip(self._row_rects, self._roster):
+            if rect.collidepoint(mx, my):
+                return choice
+        if self._cancel_rect and self._cancel_rect.collidepoint(mx, my):
+            return "cancel"
+        if not self._rect.collidepoint(mx, my):
+            return "cancel"          # click-away closes, like every picker
+        return None
+
+    # ── Render ───────────────────────────────────────────────────────────
+
+    def draw(self) -> None:
+        overlay = pygame.Surface(
+            (self._surface.get_width(), self._surface.get_height()), pygame.SRCALPHA
+        )
+        overlay.fill((0, 0, 0, 150))
+        self._surface.blit(overlay, (0, 0))
+
+        pygame.draw.rect(self._surface, self._BG, self._rect, border_radius=6)
+        pygame.draw.rect(self._surface, self._BORDER, self._rect, 2, border_radius=6)
+
+        x = self._rect.x + self._PADDING
+        inner_w = self._W - self._PADDING * 2
+        y = self._rect.y + self._PADDING
+
+        title = self._font.render(
+            f"{self._side.capitalize()} — who plays this side?", True, self._ACCENT
+        )
+        self._surface.blit(title, (x, y))
+        y += title.get_height() + 10
+
+        hovered: "_PlayerChoice | None" = None
+        self._row_rects = []
+        for choice in self._roster:
+            if choice is self._heading_before:
+                head = self._font.render("Personalities", True, self._DIM)
+                self._surface.blit(head, (x + 2, y + 2))
+                line_y = y + 2 + head.get_height() // 2
+                pygame.draw.line(
+                    self._surface, (70, 58, 88),
+                    (x + head.get_width() + 10, line_y), (x + inner_w, line_y),
+                )
+                y += self._HEAD_H + self._GAP
+
+            row = pygame.Rect(x, y, inner_w, self._ROW_H)
+            self._row_rects.append(row)
+            is_current = choice is self._current
+            is_hover = row.collidepoint(self._mouse_pos)
+            if is_hover:
+                hovered = choice
+
+            bg = (self._ROW_BG_HOVER if is_hover
+                  else self._ROW_BG_CURRENT if is_current else self._ROW_BG)
+            pygame.draw.rect(self._surface, bg, row, border_radius=4)
+            pygame.draw.rect(
+                self._surface,
+                self._ACCENT if (is_hover or is_current) else self._BORDER,
+                row, 2 if is_current else 1, border_radius=4,
+            )
+
+            marker = "●" if is_current else "○"
+            ms = self._font.render(marker, True, self._ACCENT)
+            self._surface.blit(ms, (row.x + 8, row.y + 4))
+
+            name = self._font.render(choice.name, True, self._ACCENT)
+            self._surface.blit(name, (row.x + 26, row.y + 4))
+            if choice.tier:
+                tier = self._font.render(f"({choice.tier})", True, self._TIER)
+                self._surface.blit(
+                    tier, (row.x + 26 + name.get_width() + 6, row.y + 4)
+                )
+            sub = self._font.render(
+                _fit_text(self._font, choice.subtitle, inner_w - 34),
+                True, self._DIM,
+            )
+            self._surface.blit(sub, (row.x + 26, row.y + 4 + name.get_height() + 1))
+
+            y += self._ROW_H + self._GAP
+
+        # ── Detail panel: what the hovered controller actually does ──────
+        if hovered is not None:
+            self._detail = hovered
+        y += 6
+        panel = pygame.Rect(x, y, inner_w, self._detail_h)
+        pygame.draw.rect(self._surface, (18, 15, 24), panel, border_radius=4)
+        pygame.draw.rect(self._surface, (70, 58, 88), panel, 1, border_radius=4)
+
+        ty = panel.y + 7
+        heading = ("Priorities" if self._detail.kind == "personality"
+                   else "How it plays")
+        hs = self._font.render(heading, True, self._DIM)
+        self._surface.blit(hs, (panel.x + 8, ty))
+        ty += hs.get_height() + 3
+        for line in self._detail.detail:
+            if ty + self._line_h > panel.bottom - 4:
+                break
+            ls = self._font.render(line, True, self._ACCENT)
+            self._surface.blit(ls, (panel.x + 8, ty))
+            ty += ls.get_height() + 2
+        y += self._detail_h + 8
+
+        cancel = pygame.Rect(x, y, inner_w, self._CANCEL_H)
+        self._cancel_rect = cancel
+        hover_c = cancel.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, (50, 30, 30) if hover_c else (30, 20, 20),
+                         cancel, border_radius=4)
+        pygame.draw.rect(self._surface, (160, 80, 80), cancel, 1, border_radius=4)
+        cs = self._font.render("Cancel", True, (180, 100, 100))
+        self._surface.blit(cs, (
+            cancel.x + (cancel.width - cs.get_width()) // 2,
+            cancel.y + (cancel.height - cs.get_height()) // 2,
+        ))
+
+
+def _fit_text(font: "Any", text: str, max_width: int) -> str:
+    """Truncate ``text`` with an ellipsis until it fits ``max_width``."""
+    if font.render(text, True, (0, 0, 0)).get_width() <= max_width:
+        return text
+    for cut in range(len(text) - 1, 0, -1):
+        candidate = text[:cut].rstrip() + "…"
+        if font.render(candidate, True, (0, 0, 0)).get_width() <= max_width:
+            return candidate
+    return "…"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -159,14 +159,25 @@ class SidebarOverlay:
 
         The long form is "♔ White: HEURISTIC AI"; when that overflows, the
         side word is dropped ("♔ HEURISTIC AI") — the King glyph already
-        says which side the button belongs to.
+        says which side the button belongs to.  A README §51 play style can
+        be longer still ("♔ White: OPPORTUNIST AI"), so the last resort
+        drops the " AI" suffix too: every entry but HUMAN is an AI, and the
+        colour already distinguishes them.
         """
-        long_form = f"{glyph} {side}: {mode}"
         padding = 8
-        if self._font_small.render(long_form, True, HUD_LABEL).get_width() \
-                <= max_width - padding:
-            return long_form
-        return f"{glyph} {mode}"
+
+        def fits(text: str) -> bool:
+            return self._font_small.render(text, True, HUD_LABEL).get_width() \
+                <= max_width - padding
+
+        for candidate in (
+            f"{glyph} {side}: {mode}",
+            f"{glyph} {mode}",
+            f"{glyph} {mode.removesuffix(' AI')}",
+        ):
+            if fits(candidate):
+                return candidate
+        return f"{glyph} {mode.removesuffix(' AI')}"
 
     def draw(
         self,
@@ -189,7 +200,8 @@ class SidebarOverlay:
         ``mode_labels``        — optional dict mapping player_id → the exact
                                  controller name to print on that side's
                                  selector button ("HUMAN" / "RANDOM AI" /
-                                 "HEURISTIC AI"). Falls back to the coarse
+                                 "HEURISTIC AI" / "SEARCH AI" /
+                                 "MONTE CARLO AI"). Falls back to the coarse
                                  ``player_modes`` value when omitted.
         ``show_black_hand``    — when True, the black-hand toggle button is shown active.
         ``show_recompose_btn``  — when True, the Recompose button is drawn and clickable.
@@ -250,7 +262,9 @@ class SidebarOverlay:
         y += 8
 
         # ── Player controller selectors ───────────────────────────────────
-        # One button per side, cycling HUMAN → RANDOM AI → HEURISTIC AI.
+        # One button per side. Clicking it opens the player picker, which
+        # lists every controller: the AI stages by difficulty, the README
+        # §51 play styles, and the human.
         y = self._draw_line("Players", self._font_small, HUD_LABEL, y, center=False)
         y += 4
         btn_w = self.SIDEBAR_WIDTH - self.PADDING * 2

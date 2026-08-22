@@ -113,8 +113,11 @@ class SearchBot(HeuristicBot):
         weights: EvalWeights = DEFAULT_WEIGHTS,
         registry: "CardRegistry | None" = None,
         limits: SearchLimits = SearchLimits(),
+        biases: "type[ActionBias] | ActionBias" = ActionBias,
     ) -> None:
-        super().__init__(seed=seed, weights=weights, registry=registry)
+        super().__init__(
+            seed=seed, weights=weights, registry=registry, biases=biases
+        )
         self._limits = limits
         self._last_search = SearchStats()
 
@@ -282,14 +285,14 @@ class SearchBot(HeuristicBot):
         if isinstance(action, MovePiece):
             if (action.source, action.target) in self._recent_moves or \
                     (action.target, action.source) in self._recent_moves:
-                return ActionBias.REPETITION
+                return self._bias.REPETITION
             return 0.0
         if isinstance(action, Castle):
-            return ActionBias.CASTLE
+            return self._bias.CASTLE
         if isinstance(action, AttackBuilding):
             return self._score_siege(action, ctx)
         if isinstance(action, EndTurn):
-            return ActionBias.END_TURN
+            return self._bias.END_TURN
         return self.score_action(action, ctx)
 
     # ── Instrumentation ───────────────────────────────────────────────────

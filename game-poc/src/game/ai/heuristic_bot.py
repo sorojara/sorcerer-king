@@ -165,6 +165,10 @@ class HeuristicBot(PlayerController):
                    ``EvalWeights`` to build an AI personality (README §51).
     ``registry`` — optional public card definitions.  Improves Monster and
                    hand-quality scoring; never required.
+    ``biases``   — the ``ActionBias`` table.  Swapping one in is the other
+                   half of an AI Personality (README §51): ``weights`` tunes
+                   how the *position* is judged, ``biases`` tunes which
+                   *systems* the bot reaches for.
     """
 
     _HISTORY_LEN = 6
@@ -174,11 +178,13 @@ class HeuristicBot(PlayerController):
         seed: int = 0,
         weights: EvalWeights = DEFAULT_WEIGHTS,
         registry: "CardRegistry | None" = None,
+        biases: "type[ActionBias] | ActionBias" = ActionBias,
     ) -> None:
         self._player_id: str = "?"
         self._rng = random.Random(seed)
         self._weights = weights
         self._registry = registry
+        self._bias = biases
         # The bot's own memory of the moves IT made — not game state.
         self._recent_moves: list[tuple[object, object]] = []
         # Monster abilities already fired this turn, same idea.  Activating
@@ -244,7 +250,7 @@ class HeuristicBot(PlayerController):
         tooling; ``ctx`` is the per-decision cache from ``EvalContext``.
         """
         w = ctx.weights
-        b = ActionBias
+        b = self._bias
 
         if isinstance(action, MovePiece):
             return self._score_move(action, ctx)
@@ -372,7 +378,7 @@ class HeuristicBot(PlayerController):
 
         if (action.source, action.target) in self._recent_moves or \
                 (action.target, action.source) in self._recent_moves:
-            score += ActionBias.REPETITION
+            score += self._bias.REPETITION
 
         return score
 
@@ -427,7 +433,7 @@ class HeuristicBot(PlayerController):
     # ── Preparation ───────────────────────────────────────────────────────
 
     def _score_summon(self, action: SummonMonster, ctx: EvalContext) -> float:
-        score = ActionBias.SUMMON
+        score = self._bias.SUMMON
         w = ctx.weights
 
         if self._registry is not None:
@@ -448,7 +454,7 @@ class HeuristicBot(PlayerController):
 
         if ctx.enemy_king is not None:
             if chebyshev(action.vessel_position, ctx.enemy_king) <= w.enemy_king_radius:
-                score += ActionBias.SUMMON_KING_ADJACENT
+                score += self._bias.SUMMON_KING_ADJACENT
 
         return score
 
@@ -489,13 +495,13 @@ class HeuristicBot(PlayerController):
         """
         obs = ctx.obs
         if not obs.own_hand:
-            return ActionBias.RECOMPOSE_EMPTY_HAND
+            return self._bias.RECOMPOSE_EMPTY_HAND
         from game.ai.evaluation import hand_quality
 
         quality = hand_quality(obs, ctx, ctx.weights, self._registry)
         if quality <= ctx.weights.hand_playable:
-            return ActionBias.RECOMPOSE_EMPTY_HAND
-        return ActionBias.RECOMPOSE
+            return self._bias.RECOMPOSE_EMPTY_HAND
+        return self._bias.RECOMPOSE
 
     def _score_discard(self, action: DiscardCard, ctx: EvalContext) -> float:
         """Forced discard (README §5): shed the least useful card."""
@@ -522,11 +528,11 @@ class HeuristicBot(PlayerController):
     def _score_duel(self, action: FinalDuelAction) -> float:
         kind = getattr(action, "duel_action_type", "")
         return {
-            "strike": ActionBias.DUEL_STRIKE,
-            "support": ActionBias.DUEL_SUPPORT,
-            "building": ActionBias.DUEL_BUILDING,
-            "king_policy": ActionBias.DUEL_KING_POLICY,
-            "advance": ActionBias.DUEL_ADVANCE,
+            "strike": self._bias.DUEL_STRIKE,
+            "support": self._bias.DUEL_SUPPORT,
+            "building": self._bias.DUEL_BUILDING,
+            "king_policy": self._bias.DUEL_KING_POLICY,
+            "advance": self._bias.DUEL_ADVANCE,
         }.get(kind, 0.0)
 
     # ── Memory ────────────────────────────────────────────────────────────

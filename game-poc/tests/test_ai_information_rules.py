@@ -27,6 +27,7 @@ import pytest
 
 from game.ai.controller import PlayerController
 from game.ai.heuristic_bot import HeuristicBot
+from game.ai.monte_carlo import MonteCarloBot, MonteCarloLimits
 from game.ai.random_bot import RandomBot
 from game.ai.search import SearchLimits
 from game.ai.search_bot import SearchBot
@@ -52,7 +53,29 @@ class _BudgetedSearchBot(SearchBot):
         super().__init__(seed=seed, **kwargs)
 
 
-ALL_BOTS = [RandomBot, HeuristicBot, _BudgetedSearchBot]
+class _BudgetedMonteCarloBot(MonteCarloBot):
+    """
+    AI Stage 4 on a test-sized sampling budget.
+
+    Same reasoning as ``_BudgetedSearchBot``: what is under test is the §44
+    boundary, and a Stage 4 decision draws a whole world per sample.
+    """
+
+    def __init__(self, seed: int = 0, **kwargs) -> None:
+        kwargs.setdefault(
+            "limits", SearchLimits(max_depth=2, max_nodes=200, max_seconds=0.25)
+        )
+        kwargs.setdefault(
+            "mc_limits",
+            MonteCarloLimits(
+                samples=2, depth=2, chess_samples=2, chess_depth=2,
+                max_candidates=4, max_nodes=400, max_seconds=0.5,
+            ),
+        )
+        super().__init__(seed=seed, **kwargs)
+
+
+ALL_BOTS = [RandomBot, HeuristicBot, _BudgetedSearchBot, _BudgetedMonteCarloBot]
 
 
 @pytest.fixture

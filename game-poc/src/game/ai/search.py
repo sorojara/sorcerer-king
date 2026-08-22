@@ -251,6 +251,7 @@ class Searcher:
         weights: EvalWeights = DEFAULT_WEIGHTS,
         limits: SearchLimits = SearchLimits(),
         hazards: "Hazards | None" = None,
+        monsters_expected: bool = False,
     ) -> None:
         self.board = board
         self.me = me
@@ -289,11 +290,17 @@ class Searcher:
         # can do anything on a board with no Monsters on it, so a
         # Monster-free position (the common case) searches registry-free and
         # several times deeper for the same budget.  Monsters can leave the
-        # board mid-search but never arrive, so this is decided once.
+        # board mid-search but never arrive *by themselves*, so this is
+        # decided once — but AI Stage 4 puts them there deliberately (it
+        # searches its own candidate Summons and Rituals), and a caller that
+        # intends to do that says so with ``monsters_expected``.
         self._move_registry = (
             registry
             if registry is not None
-            and any(u.monster_id is not None for u in self._units.values())
+            and (
+                monsters_expected
+                or any(u.monster_id is not None for u in self._units.values())
+            )
             else None
         )
 
@@ -522,6 +529,49 @@ class Searcher:
             units.pop(dst, None)
         else:
             units[dst] = captured
+
+    # ── Board edits (AI Stage 4, README §49) ──────────────────────────────
+    #
+    # A Summon or a Ritual changes the board without anybody moving, so the
+    # make/unmake pair above cannot express it.  These three do, and they
+    # keep the occupancy map in step exactly as make/unmake does, so a
+    # sampled world can be set up, searched, and taken apart again on one
+    # shared board.  Every one of them returns the token its own undo needs.
+
+    def set_monster(self, pos: Position, monster_id: "str | None") -> "str | None":
+        """
+        Put a Monster on the unit at ``pos`` (or clear it); returns the
+        previous ``monster_id`` so the caller can put it back.
+
+        The unit object is shared with the occupancy map, so nothing else
+        has to be touched.  A Searcher built without ``monsters_expected``
+        will keep generating the *base* piece's moves for the unit — see
+        ``__init__``.
+        """
+        unit = self._units.get(pos)
+        if unit is None:
+            return None
+        previous = unit.monster_id
+        unit.monster_id = monster_id
+        return previous
+
+    def lift(self, pos: Position) -> "UnitInstance | None":
+        """Take the unit at ``pos`` off the board; returns it for ``restore``."""
+        unit = self._units.pop(pos, None)
+        square = self.board.squares.get(pos)
+        if square is not None:
+            square.unit = None
+        return unit
+
+    def restore(self, pos: Position, unit: "UnitInstance | None") -> None:
+        """Undo a ``lift``: put ``unit`` back on ``pos`` (None empties it)."""
+        square = self.board.squares.get(pos)
+        if square is not None:
+            square.unit = unit
+        if unit is None:
+            self._units.pop(pos, None)
+        else:
+            self._units[pos] = unit
 
     def make_castle(self, player: str, side: str):
         """Castling as a compound move; returns an undo token for ``unmake_castle``."""
