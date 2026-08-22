@@ -53,6 +53,7 @@ from game.core.state import (
     KingCardState,
     PlayerState,
 )
+from game.telemetry import MatchStats, MatchTelemetry
 
 if TYPE_CHECKING:
     from game.cards.card import CardRegistry
@@ -165,11 +166,19 @@ class Game:
         state: GameState,
         rng: DeterministicRNG,
         registry: "CardRegistry | None" = None,
+        telemetry: bool = True,
     ) -> None:
         self._state = state
         self._rng = rng
         self._engine = RulesEngine(registry=registry)
         self._registry = registry
+        # README §42 — every match is instrumented by default. The recorder
+        # only reads; it can never influence the game. Pass telemetry=False
+        # to switch recording off (the object still exists, so callers never
+        # have to None-check game.telemetry).
+        self._telemetry = MatchTelemetry(
+            game_id=state.game_id, seed=state.rng_seed, enabled=telemetry
+        )
 
     # ── Factory ──────────────────────────────────────────────────────────
 
@@ -183,6 +192,7 @@ class Game:
         game_id: str | None = None,
         white_building_pool: "list[BuildingPoolEntry] | None" = None,
         black_building_pool: "list[BuildingPoolEntry] | None" = None,
+        telemetry: bool = True,
     ) -> "Game":
         """
         Create a new game in the standard starting position.
@@ -195,6 +205,7 @@ class Game:
         ``white_building_pool`` / ``black_building_pool`` — Stage 8: each
             player's public pre-match Building Pool (README §12). Defaults
             to ``_default_building_pool()`` when omitted.
+        ``telemetry``  — README §42 match instrumentation; on by default.
 
         Initial state:
             • Standard chess starting position.
@@ -286,7 +297,7 @@ class Game:
             rng_seed=seed,
         )
 
-        return cls(state=state, rng=rng, registry=registry)
+        return cls(state=state, rng=rng, registry=registry, telemetry=telemetry)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -297,6 +308,23 @@ class Game:
         For engine/test use only.  Never hand to AI; use get_observation() instead.
         """
         return self._state
+
+    @property
+    def telemetry(self) -> MatchTelemetry:
+        """
+        README §42 match instrumentation.
+
+        Engine-side only: the recorder reads the full GameState and must
+        never be handed to a controller (README §44 — controllers see an
+        Observation and nothing else).
+        """
+        return self._telemetry
+
+    def match_stats(self) -> MatchStats:
+        """Snapshot the current telemetry (safe to call mid-match)."""
+        if self._state.is_game_over():
+            self._telemetry.finish()
+        return self._telemetry.snapshot(self._state)
 
     def execute(self, action: Action) -> ExecutionResult:
         """
@@ -319,14 +347,22 @@ class Game:
         if self._state.phase == Phase.START:
             events.extend(self._auto_start_turn(self._state.active_player))
 
+        # Captured BEFORE execution: EndTurn advances the turn counter, and a
+        # check delivered by this action belongs to the turn it was played on.
+        turn_at_action = self._state.turn_number
+
         try:
             new_events = self._engine.execute(self._state, action, self._rng)
         except Exception as exc:
             _log.warning("EXECUTE  FAILED  action=%s  error=%s", type(action).__name__, exc)
+            self._telemetry.record_illegal(action, turn_at_action)
             raise
 
         events.extend(new_events)
         self._state.event_log.extend(new_events)  # engine already adds, avoid dup
+        self._telemetry.record(action, new_events, self._state, turn_at_action)
+        if self._state.is_game_over():
+            self._telemetry.finish()
 
         _log.debug(
             "EXECUTE  OK       phase=%-14s events=[%s]",
@@ -421,6 +457,11 @@ class Game:
         # (formation_support, graveyard_threshold_bonus, spell_radius_bonus).
         from game.mechanics.kings import apply_king_policy_auras
         apply_king_policy_auras(self._state, player_id, self._registry)
+        # Stage 13: the same refresh for the policy-shaped effects carried
+        # by Ritual Monsters themselves (bannerlord_eternal's
+        # formation_support, ossuary_king's graveyard_threshold_bonus).
+        from game.mechanics.monsters import apply_monster_auras
+        apply_monster_auras(self._state, player_id, self._registry)
         # START → DRAW
         self._state.phase = Phase.DRAW
         events.append(PhaseAdvanced(
@@ -448,4 +489,8 @@ class Game:
             to_phase=Phase.PREPARATION,
         ))
         self._state.event_log.extend(events)
+        # README §42: draws and turn starts are match statistics too, and
+        # this path also runs from advance_to_preparation() (the UI loop),
+        # so record here rather than in execute().
+        self._telemetry.record(None, events, self._state, self._state.turn_number)
         return events

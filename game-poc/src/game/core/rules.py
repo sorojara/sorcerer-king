@@ -87,6 +87,7 @@ from game.core.actions import (
     ActivateRitual,
     ActivateSpell,
     ActivateTrap,
+    AttackBuilding,
     Castle,
     ChangeKing,
     CoronateKing,
@@ -242,6 +243,8 @@ class RulesEngine:
         try:
             if isinstance(action, MovePiece):
                 events = self._execute_move_piece(state, action, rng)
+            elif isinstance(action, AttackBuilding):
+                events = self._execute_attack_building(state, action)
             elif isinstance(action, Castle):
                 events = self._execute_castle(state, action)
             elif isinstance(action, SummonMonster):
@@ -313,6 +316,12 @@ class RulesEngine:
         for event in events:
             if isinstance(event, MonsterDestroyed):
                 state.get_player(event.player_id).monsters_lost_count += 1
+                # bone_marauder's spawn_piece: the card reacts to its OWN
+                # death, so it cannot come from the surviving-Monsters scan
+                # below — by then the unit is already off the board. The
+                # event carries everything the effect needs (whose it was,
+                # which card, where it fell).
+                self._apply_on_destroyed_effects(state, event, extra_events, rng)
                 # Stage: bone_collector's graveyard_counter /
                 # capture_protection_from_counter and mourning_queen's
                 # death_trigger_draw — every surviving allied Monster of
@@ -322,6 +331,87 @@ class RulesEngine:
 
         state.event_log.extend(events)
         return events
+
+    def _resolve_intercept(
+        self,
+        state: GameState,
+        interceptor: "tuple[Position, UnitInstance]",
+        attacker: UnitInstance,
+        events: list[Event],
+    ) -> None:
+        """
+        royal_guard's ``intercept`` — spend the escort's charge and destroy
+        it in the King's place. The assault itself has already been undone
+        by the shared restore-and-report branch in _execute_move_piece, so
+        all that is left is removing the escort and reporting it.
+        """
+        from game.core.events import AttackIntercepted
+        from game.mechanics.kings import maybe_recycle_destroyed_monster
+        from game.mechanics.monsters import consume_intercept
+
+        escort_pos, escort = interceptor
+        consume_intercept(escort)
+        removed = state.board.remove_unit(escort_pos)
+        if removed is None:
+            return
+        state.get_player(state.opponent_of(escort.owner)).captured_pieces.append(
+            removed.piece.id
+        )
+        events.append(AttackIntercepted(
+            interceptor_piece_id=removed.piece.id,
+            attacker_piece_id=attacker.piece.id,
+            position=escort_pos,
+        ))
+        if removed.monster_id is not None:
+            events.append(MonsterDestroyed(
+                player_id=removed.owner,
+                card_id=removed.monster_id,
+                vessel_piece_id=removed.piece.id,
+                position=escort_pos,
+                destroyed_by_piece_id=attacker.piece.id,
+            ))
+            maybe_recycle_destroyed_monster(
+                state, removed.owner, removed.monster_id, events, self._registry,
+            )
+
+    def _apply_on_destroyed_effects(
+        self,
+        state: GameState,
+        event: MonsterDestroyed,
+        new_events: list[Event],
+        rng: DeterministicRNG,
+    ) -> None:
+        """
+        Fire ``trigger: on_destroyed`` effects belonging to the Monster that
+        just died (bone_marauder's Skeleton Pawn).
+
+        Distinct from _apply_death_triggered_effects below, which reacts on
+        behalf of the SURVIVORS. This one is the dying card's own last word,
+        so it is driven entirely from the MonsterDestroyed event rather than
+        from a board scan — the unit is gone by now.
+        """
+        if self._registry is None:
+            return
+        from game.cards.card import MonsterCard
+        from game.mechanics.effects.registry import EffectContext, resolve_effect
+
+        try:
+            card = self._registry.get(event.card_id)
+        except KeyError:
+            return
+        if not isinstance(card, MonsterCard):
+            return
+
+        for effect in card.effects:
+            if effect.params.get("trigger") != "on_destroyed":
+                continue
+            ctx = EffectContext(
+                state=state, effect=effect, events=new_events,
+                unit=None, position=event.position, card=card,
+                rng=rng, registry=self._registry, trigger="on_destroyed",
+                extra={"caster_owner": event.player_id},
+            )
+            resolve_effect(ctx)
 
     def _apply_death_triggered_effects(
         self,
@@ -354,7 +444,15 @@ class RulesEngine:
             effect_types = {e.type for e in card.effects}
 
             # ── bone_collector: graveyard_counter + capture_protection_from_counter ──
-            if "graveyard_counter" in effect_types:
+            # revenant_of_the_empty_throne carries the payoff half
+            # (capture_protection_from_counter) WITHOUT the bookkeeping half,
+            # so keying this solely on "graveyard_counter" left its counter
+            # frozen at zero and the shield it promises unreachable. Either
+            # effect opens the tally; the counter status is created on demand
+            # for the card that never declared one.
+            if "graveyard_counter" in effect_types or "capture_protection_from_counter" in effect_types:
+                if not any(st.startswith("graveyard_counter:") for st in unit.statuses):
+                    unit.add_status("graveyard_counter:0")
                 for idx, status in enumerate(unit.statuses):
                     if not status.startswith("graveyard_counter:"):
                         continue
@@ -728,6 +826,15 @@ class RulesEngine:
                         except KeyError:
                             continue
                         if isinstance(tcard, TrapCard) and tcard.trigger == TrapTrigger.MANUAL:
+                            # Stage 13: time_anchor's cancel_move raises when
+                            # there is no opponent move to undo (or when that
+                            # move triggered a Duel). Offering the activation
+                            # anyway hands out a "legal" action that errors,
+                            # so the precondition is checked here too.
+                            if any(e.type == "cancel_move" for e in tcard.effects):
+                                snap = state.move_history.get(state.opponent_of(player_id))
+                                if snap is None or snap.triggered_duel:
+                                    continue
                             actions.append(ActivateTrap(
                                 player_id=player_id, trap_instance_id=trap.id,
                             ))
@@ -771,7 +878,11 @@ class RulesEngine:
                 return actions
 
             if not ps.chess_move_used:
-                from game.mechanics.buildings import is_committed_builder
+                from game.mechanics.buildings import (
+                    can_attack_building,
+                    find_building_at,
+                    is_committed_builder,
+                )
                 ep = state.en_passant_target
                 cr = ps.castling_rights
                 for pos, unit in state.board.all_units_for(player_id):
@@ -790,6 +901,23 @@ class RulesEngine:
                     ):
                         actions.append(
                             MovePiece(
+                                player_id=player_id,
+                                source=pos,
+                                target=target,
+                            )
+                        )
+                    # Stage 13: besieging a COMPLETE enemy Building is its
+                    # own action — the attacker never relocates, so these
+                    # squares are deliberately absent from the MovePiece
+                    # list above (chess/movement.py treats them as walls).
+                    for target in self._siege_targets(state, pos, unit, ps):
+                        building = find_building_at(state, target)
+                        if building is None:
+                            continue
+                        if not can_attack_building(state, unit, building, registry):
+                            continue
+                        actions.append(
+                            AttackBuilding(
                                 player_id=player_id,
                                 source=pos,
                                 target=target,
@@ -833,6 +961,16 @@ class RulesEngine:
                         if eff.type not in ACTIVATED_EFFECT_TYPES:
                             continue
                         if eff.type not in _TARGETED_ABILITIES:
+                            # Stage 13: a couple of untargeted abilities
+                            # still have a precondition their handler
+                            # enforces by raising. Enumerating them anyway
+                            # hands a bot (or the UI) an "legal" action that
+                            # then errors out — so check the same
+                            # preconditions here.
+                            if not self._untargeted_ability_available(
+                                state, pos, unit, eff, registry
+                            ):
+                                continue
                             actions.append(ActivateMonsterAbility(
                                 player_id=player_id, unit_position=pos, ability_id=eff.type,
                             ))
@@ -914,6 +1052,71 @@ class RulesEngine:
             return [EndTurn(player_id=player_id)]
 
         return []
+
+    def _untargeted_ability_available(
+        self,
+        state: GameState,
+        pos: Position,
+        unit: "UnitInstance",
+        effect,
+        registry: "object | None",
+    ) -> bool:
+        """
+        Precondition check for the activated abilities that take no explicit
+        target but can still have nothing to act on.
+
+        Everything else in ACTIVATED_EFFECT_TYPES either always resolves or
+        is enumerated per-target above, so it returns True by default rather
+        than growing a per-ability allowlist that would silently drop new
+        abilities from the legal-action list.
+        """
+        if effect.type == "burrow":
+            # On cooldown, or hemmed in with no empty square in range.
+            for status in unit.statuses:
+                if status.startswith("burrow_cooldown:") and int(status.split(":")[1]) > 0:
+                    return False
+            max_dist = effect.params.get("max_distance", 2)
+            for df in range(-max_dist, max_dist + 1):
+                for dr in range(-max_dist, max_dist + 1):
+                    if df == 0 and dr == 0:
+                        continue
+                    nf, nr = pos.file + df, pos.rank + dr
+                    if 0 <= nf <= 7 and 0 <= nr <= 7:
+                        if state.board.get_unit(Position(nf, nr)) is None:
+                            return True
+            return False
+
+        if effect.type == "copy_effect":
+            # Needs an adjacent allied Monster carrying a copyable passive.
+            if registry is None:
+                return False
+            from game.cards.card import MonsterCard as _MC
+            from game.mechanics.effects._meta import _COPYABLE_PASSIVE_TYPES
+            for df in (-1, 0, 1):
+                for dr in (-1, 0, 1):
+                    if df == 0 and dr == 0:
+                        continue
+                    nf, nr = pos.file + df, pos.rank + dr
+                    if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                        continue
+                    neighbour = state.board.get_unit(Position(nf, nr))
+                    if (
+                        neighbour is None
+                        or neighbour.owner != unit.owner
+                        or neighbour.monster_id is None
+                    ):
+                        continue
+                    try:
+                        ncard = registry.get(neighbour.monster_id)
+                    except KeyError:
+                        continue
+                    if not isinstance(ncard, _MC):
+                        continue
+                    if any(e.type in _COPYABLE_PASSIVE_TYPES for e in ncard.effects):
+                        return True
+            return False
+
+        return True
 
     def _legal_spell_targets(
         self,
@@ -1000,7 +1203,13 @@ class RulesEngine:
                             nf, nr = pos.file + df, pos.rank + dr
                             if not (0 <= nf <= 7 and 0 <= nr <= 7):
                                 continue
-                            if state.board.get_unit(Position(nf, nr)) is not None:
+                            dest = Position(nf, nr)
+                            if state.board.get_unit(dest) is not None:
+                                continue
+                            # Stage 13: a COMPLETE enemy Building is terrain
+                            # the relocated unit can't stand on either.
+                            from game.chess.movement import blocks_movement
+                            if blocks_movement(state.board, dest, unit.owner):
                                 continue
                             actions.append(ActivateSpell(
                                 player_id=player_id, card_id=card_id,
@@ -1075,6 +1284,36 @@ class RulesEngine:
                             player_id=player_id, card_id=card_id,
                             target={"position": (pos.file, pos.rank)},
                         ))
+
+            else:
+                # Generic single-piece Spell: everything whose payload is
+                # just "which piece", with no destination to pair it with —
+                # immobilize_piece (binding_chains), capture_protection
+                # (arcane_fortitude), dismiss_monster (sever_the_bond,
+                # return_to_hand), remove_negative_effects (purify),
+                # damage_unit (siphon_of_power), spawn_piece
+                # (illusory_doubles).
+                #
+                # Without this branch such a card is executable but never
+                # OFFERED — get_legal_actions simply omits it, so neither the
+                # UI nor a bot can ever reach it. ``target_owner`` picks the
+                # side, mirroring _resolve_spell_on_piece's own ownership
+                # check so an enumerated action can never be refused on
+                # ownership grounds.
+                target_owner = effect.params.get("target_owner", "self")
+                owner = state.opponent_of(player_id) if target_owner == "opponent" else player_id
+                for pos, unit in state.board.all_units_for(owner):
+                    if unit.piece.piece_type == PieceType.KING:
+                        continue
+                    if target_owner != "opponent" and is_committed_builder(state, unit.piece.id):
+                        continue
+                    # dismiss_monster has nothing to dismiss off a bare Vessel.
+                    if effect.type == "dismiss_monster" and unit.monster_id is None:
+                        continue
+                    actions.append(ActivateSpell(
+                        player_id=player_id, card_id=card_id,
+                        target={"position": (pos.file, pos.rank)},
+                    ))
 
         return actions
 
@@ -1362,6 +1601,23 @@ class RulesEngine:
                 if cancel_trap is not None:
                     shield_absorbed = True  # reuse the same restore-and-report branch below
 
+            # royal_guard's intercept: an escort standing next to the King
+            # throws itself in front of an assault on it. Last layer before
+            # the board moves, and only for the King — every other piece is
+            # defended by shields/guardian_sigils above. Reuses the same
+            # restore-and-report branch (the assault is repelled), with the
+            # escort destroyed as the price.
+            interceptor = None
+            if (
+                not shield_absorbed
+                and target_unit is not None
+                and target_unit.piece.piece_type == PieceType.KING
+            ):
+                from game.mechanics.monsters import find_interceptor
+                interceptor = find_interceptor(state, action.target, target_unit.owner)
+                if interceptor is not None:
+                    shield_absorbed = True
+
             captured = state.board.move_unit(action.source, action.target)
 
             if shield_absorbed and captured is not None:
@@ -1392,6 +1648,8 @@ class RulesEngine:
                         cancel_trap.charges -= 1
                         if cancel_trap.charges <= 0:
                             state.traps = [t for t in state.traps if t.id != cancel_trap.id]
+                if interceptor is not None:
+                    self._resolve_intercept(state, interceptor, unit, events)
             else:
                 events.append(PieceMoved(
                     piece_id=unit.piece.id,
@@ -1545,7 +1803,15 @@ class RulesEngine:
         )
 
         # ── Promotion ─────────────────────────────────────────────────────
-        if is_promotion_rank(action.target, action.player_id):
+        # Only if the Pawn actually ENDED UP on the promotion square. A
+        # capture blocked by a shield (or guardian_sigils' cancel_capture)
+        # restores both pieces, leaving the enemy unit standing there and
+        # the Pawn back on its source square — opening a promotion decision
+        # for that square would then try to promote the DEFENDER.
+        if (
+            is_promotion_rank(action.target, action.player_id)
+            and state.board.get_unit(action.target) is unit
+        ):
             if unit.piece.piece_type == PieceType.PAWN:
                 state.pending_decision = PendingDecision(
                     player_id=action.player_id,
@@ -1593,6 +1859,161 @@ class RulesEngine:
                     to_phase=Phase.REACTION,
                 ))
         return events
+
+    def _execute_attack_building(
+        self,
+        state: GameState,
+        action: AttackBuilding,
+    ) -> list[Event]:
+        """
+        Stage 13 — besiege a COMPLETE enemy Building (README §11).
+
+        Consumes the chess move but never moves the attacker: the
+        Building's square stays impassable until the structure falls, so
+        there is nothing to move onto. Reachability is "the attacker could
+        land there if the Building weren't in the way", which is exactly
+        what get_legal_moves reports once the wall is lifted for this one
+        probe (see _siege_targets).
+        """
+        from game.core.phases import ConstructionStatus
+        from game.mechanics.buildings import (
+            attack_damage,
+            can_attack_building,
+            damage_building,
+            find_building_at,
+        )
+
+        self._require_phase(state, Phase.CHESS)
+        ps = state.get_player(action.player_id)
+        if ps.chess_move_used:
+            raise IllegalActionError("Chess move already used this turn.")
+
+        unit = state.board.get_unit(action.source)
+        if unit is None:
+            raise IllegalActionError(f"No piece at {action.source}.")
+        if unit.owner != action.player_id:
+            raise IllegalActionError("Cannot attack with an opponent's piece.")
+
+        from game.mechanics.buildings import is_committed_builder
+        if is_committed_builder(state, unit.piece.id):
+            raise IllegalActionError(
+                "This Pawn is committed to a Building under construction and cannot attack."
+            )
+
+        building = find_building_at(state, action.target)
+        if building is None or building.status != ConstructionStatus.COMPLETE:
+            raise IllegalActionError(f"No completed Building at {action.target}.")
+        if building.owner == action.player_id:
+            raise IllegalActionError("Cannot attack your own Building.")
+        if state.board.get_unit(action.target) is not None:
+            raise IllegalActionError(
+                "A unit is garrisoning that Building — capture it first."
+            )
+        if not can_attack_building(state, unit, building, self._registry):
+            raise IllegalActionError(
+                "Only Ritual Monsters, Monsters with a building_damage_bonus, "
+                "or any unit against a Building marked by siege_order may "
+                "attack a Building."
+            )
+        if action.target not in self._siege_targets(state, action.source, unit, ps):
+            raise IllegalActionError(
+                f"Building at {action.target} is out of reach from {action.source}."
+            )
+
+        events: list[Event] = []
+        damage_building(
+            state, building, attack_damage(unit, building, self._registry),
+            events, self._registry, attacker_piece_id=unit.piece.id,
+        )
+
+        ps.chess_move_used = True
+        events.append(ChessMoveUsed(player_id=action.player_id))
+        state.en_passant_target = None
+
+        # Razing a Building opens every line it was blocking. The attacker
+        # can't expose their OWN King doing it — an enemy Building never
+        # blocked the enemy's own attacks in the first place (see
+        # chess.movement.blocks_movement) — but it CAN uncover a discovered
+        # check, and a demolition is as good a way to deliver mate as a
+        # move. So the same check → checkmate → stalemate cascade as
+        # _execute_move_piece runs here.
+        self._update_check_status(state, events)
+
+        opp_id = state.opponent_of(action.player_id)
+        opp_cr = state.get_player(opp_id).castling_rights
+        if is_checkmate(state.board, opp_id, None, opp_cr):
+            self._trigger_final_duel(state, FinalDuelType.SIEGE, action.player_id, opp_id, events)
+            return events
+        if is_stalemate(state.board, opp_id, None, opp_cr):
+            events.append(StalemateDetected(player_id=opp_id))
+            self._trigger_final_duel(state, FinalDuelType.LAST_STAND, action.player_id, opp_id, events)
+            return events
+
+        if state.phase == Phase.CHESS:
+            old = state.phase
+            state.phase = Phase.REACTION
+            events.append(PhaseAdvanced(
+                player_id=action.player_id,
+                from_phase=old,
+                to_phase=Phase.REACTION,
+            ))
+        return events
+
+    def _siege_targets(
+        self,
+        state: GameState,
+        source: Position,
+        unit: "UnitInstance",
+        ps: "PlayerState",
+    ) -> set[Position]:
+        """
+        Squares holding a COMPLETE enemy Building that ``unit`` at
+        ``source`` could reach if that Building weren't blocking.
+
+        Implemented by lifting the wall marker
+        (SquareState.complete_building_owner) for ONE Building at a time,
+        re-running the normal legal-move generator, and keeping the hit if
+        it lands on that Building's square. Reusing get_legal_moves is the
+        whole point: a siege inherits every other movement rule for free —
+        pins, immobilized/frozen/blocked squares, movement caps, challenge
+        restrictions — instead of growing a parallel reachability model
+        that would drift from it.
+
+        One at a time, specifically: lifting every wall at once would let a
+        Rook "see" a second Building through the first, when in reality the
+        near one still blocks the ray. A siege has to be reachable given the
+        board as it actually stands.
+        """
+        from game.core.phases import ConstructionStatus
+
+        opponent = state.opponent_of(unit.owner)
+        wall_squares = [
+            b.position for b in state.buildings
+            if b.owner == opponent
+            and b.status == ConstructionStatus.COMPLETE
+            and state.board.get_unit(b.position) is None
+        ]
+        if not wall_squares:
+            return set()
+
+        targets: set[Position] = set()
+        for wall in wall_squares:
+            square = state.board.get_square(wall)
+            square.complete_building_owner = None
+            try:
+                reachable = get_legal_moves(
+                    state.board, source, unit,
+                    en_passant_target=state.en_passant_target,
+                    castling_rights=ps.castling_rights,
+                    player_id=unit.owner,
+                    registry=self._registry,
+                    state=state,
+                )
+            finally:
+                square.complete_building_owner = opponent
+            if wall in reachable:
+                targets.add(wall)
+        return targets
 
     def _execute_castle(
         self,
@@ -1815,8 +2236,9 @@ class RulesEngine:
             )
 
         # transformation_alarm / nullification_glyph — SUMMON-trigger Traps.
-        from game.mechanics.monsters import check_summon_traps
+        from game.mechanics.monsters import check_summon_reactions, check_summon_traps
         check_summon_traps(state, unit, action.vessel_position, events, registry, rng=rng)
+        check_summon_reactions(state, unit, action.vessel_position, events, registry, rng=rng)
 
         return events
 
@@ -2153,7 +2575,7 @@ class RulesEngine:
         if card.target_type == "piece":
             self._resolve_spell_on_piece(state, action, card, events, registry)
         elif card.target_type in ("position", "zone"):
-            self._resolve_spell_on_area(state, action, card, events, registry)
+            self._resolve_spell_on_area(state, action, card, events, registry, rng)
         elif card.target_type == "trap":
             self._resolve_spell_on_trap(state, action, card, events)
         elif card.target_type == "building":
@@ -2234,6 +2656,16 @@ class RulesEngine:
         elif unit.owner != action.player_id:
             raise IllegalActionError("Cannot target an opponent's piece with this Spell.")
 
+        # seal_of_lockdown: "cannot be targeted by effects".
+        if unit.owner != action.player_id:
+            for eff in state.board.get_square(pos).temporary_effects:
+                if eff.startswith("sealed:"):
+                    parts = eff.split(":")
+                    if len(parts) > 2 and parts[2] == action.player_id:
+                        raise IllegalActionError(
+                            "That unit is sealed and cannot be targeted by effects."
+                        )
+
         destination = action.target.get("destination")
         caster_owner = action.player_id
         for effect in card.effects:
@@ -2254,6 +2686,7 @@ class RulesEngine:
         card,   # SpellCard
         events: list[Event],
         registry: "object | None",
+        rng: "DeterministicRNG | None" = None,
     ) -> None:
         from game.mechanics.area import expand_area
         from game.mechanics.effects.registry import EffectContext, resolve_effect
@@ -2263,12 +2696,25 @@ class RulesEngine:
         center = Position(*action.target)
         area = expand_area(center, card.radius, card.shape)
 
+        # ONE extra dict for the whole sweep, not one per square. Two
+        # reasons: ``area_center`` lets an effect reason about the anchor it
+        # was cast on rather than the square it happens to be resolving
+        # (dread_tide pushes "away from the center"), and a shared dict lets
+        # an effect that MOVES units remember which ones it already handled
+        # — otherwise a unit shoved from one square in the area into another
+        # gets resolved a second time when the sweep reaches its new home.
+        area_extra = {
+            "caster_owner": action.player_id,
+            "area_center": (center.file, center.rank),
+        }
+
         for square in area:
             for effect in card.effects:
                 ctx = EffectContext(
                     state=state, unit=None, position=square, card=card, effect=effect,
-                    events=events, registry=registry, trigger="instant_spell",
-                    extra={"caster_owner": action.player_id},
+                    events=events, rng=rng, registry=registry,
+                    trigger="instant_spell",
+                    extra=area_extra,
                 )
                 try:
                     resolve_effect(ctx)
@@ -2401,7 +2847,8 @@ class RulesEngine:
 
         ps.hand.remove(action.card_id)
 
-        trap_id = f"trap-{action.player_id}-{len(state.traps)+1:03d}"
+        state.trap_seq += 1
+        trap_id = f"trap-{action.player_id}-{state.trap_seq:03d}"
         trap = TrapInstance(
             id=trap_id,
             owner=action.player_id,
@@ -2565,6 +3012,13 @@ class RulesEngine:
             construction_turns, self._registry,
         )
 
+        # Stage 13: the durability pool a siege will chip away at once this
+        # Building completes (mechanics/buildings.py damage_building). Fixed
+        # at construction start so a later registry swap can't retune a
+        # Building already on the board.
+        from game.mechanics.buildings import building_max_integrity
+        max_integrity = building_max_integrity(action.building_card_id, self._registry)
+
         building_id = f"bld-{action.player_id}-{len(state.buildings)+1:03d}"
         building = BuildingInstance(
             id=building_id,
@@ -2574,6 +3028,8 @@ class RulesEngine:
             status=ConstructionStatus.UNDER_CONSTRUCTION,
             builder_piece_id=unit.piece.id,
             remaining_turns=construction_turns,
+            max_integrity=max_integrity,
+            integrity=max_integrity,
         )
         state.buildings.append(building)
         sq.building_id = building_id  # visible on the board immediately (under construction)
@@ -2675,8 +3131,9 @@ class RulesEngine:
 
         # transformation_alarm / nullification_glyph — SUMMON-trigger Traps
         # (a Ritual summon is a summon too).
-        from game.mechanics.monsters import check_summon_traps
+        from game.mechanics.monsters import check_summon_reactions, check_summon_traps
         check_summon_traps(state, vessel_unit, _vessel_pos, events, registry, rng=rng)
+        check_summon_reactions(state, vessel_unit, _vessel_pos, events, registry, rng=rng)
 
         return events
 
@@ -2788,6 +3245,8 @@ class RulesEngine:
             sq = state.board.get_square(building.position)
             if sq.building_id == building.id:
                 sq.building_id = None
+            from game.mechanics.buildings import refresh_building_blocks
+            refresh_building_blocks(state)
             destroyed_building_id = building.id
             events.append(BuildingDestroyed(
                 building_instance_id=building.id,
@@ -3234,6 +3693,14 @@ class RulesEngine:
                     n = int(n_s) - 1
                     if n > 0:
                         remaining_statuses.append(f"vessel_class_override:{n}:{classes}")
+                elif prefix == "movement_limit":
+                    # labyrinth_rune — "movement_limit:<max_dist>:<N>",
+                    # "limited to 1 square on ITS next turn", so it counts
+                    # the victim's own turns like immobilized/exposed.
+                    _, max_dist, n_s = status.split(":")
+                    n = int(n_s) - 1
+                    if n > 0:
+                        remaining_statuses.append(f"movement_limit:{max_dist}:{n}")
                 elif prefix == "challenged_by":
                     # duelist's challenge_unit — "challenged_by:<piece_id>:<N>"
                     # decays on the CHALLENGED unit's own EndTurn, same
@@ -3246,6 +3713,26 @@ class RulesEngine:
                     remaining_statuses.append(status)
             u.statuses = remaining_statuses
 
+        # ── spawn_piece tokens: illusory_doubles' "Lasts 2 turns" ────────
+        # Ticked on the token OWNER's own EndTurn (same convention as
+        # immobilized/burrow_cooldown above); a token whose counter runs
+        # out simply leaves the board.
+        from game.core.events import PieceExpired
+
+        for pos, u in list(state.board.all_units_for(ending_player)):
+            expiry = next((st for st in u.statuses if st.startswith("expires:")), None)
+            if expiry is None:
+                continue
+            n = int(expiry.split(":")[1]) - 1
+            u.statuses = [st for st in u.statuses if not st.startswith("expires:")]
+            if n > 0:
+                u.add_status(f"expires:{n}")
+            else:
+                state.board.remove_unit(pos)
+                events.append(PieceExpired(
+                    player_id=ending_player, piece_id=u.piece.id, position=pos,
+                ))
+
         # ── Stage 5: restore_effect_charge (battlefield_medic) ───────────
         # At the end of the owner's own turn, restore one spent shield
         # charge to a single adjacent allied monster.
@@ -3256,12 +3743,24 @@ class RulesEngine:
         # end of turn (same "counts the owner's own turns" convention as
         # burrow_cooldown/immobilized/exposed above) — completing when it
         # reaches 0 (README §12.2).
-        from game.mechanics.buildings import tick_construction, tick_disabled_buildings
+        from game.mechanics.buildings import (
+            repair_buildings,
+            tick_building_timers,
+            tick_construction,
+            tick_disabled_buildings,
+        )
         tick_construction(state, ending_player, events)
         # Stage 8: saboteur's disable_building decays on the disabled
         # Building's OWNER's own EndTurn ("until the start of the next
         # owner turn" — mirrors burrow_cooldown/immobilized).
         tick_disabled_buildings(state, ending_player)
+        # Stage 13: royal_engineer / worldforge_colossus repair the owner's
+        # own damaged Buildings, then emergency_fortifications' protection
+        # and siege_order's vulnerability mark decay — repair first, so a
+        # Building healed this turn isn't also charged a turn of protection
+        # it never got to use.
+        repair_buildings(state, ending_player, events, self._registry)
+        tick_building_timers(state, ending_player)
 
         # ── Stage 11: ritual_progress_boost (ritual_acolyte) — advances
         # the ending player's Ritual revelation progress (README §15.1).
@@ -3270,6 +3769,15 @@ class RulesEngine:
         # Stage 11: ritual_reveal_tradeoff's "once_per_turn" variant
         # (oracle_of_the_last_star) — the on_summon path only fires once.
         advance_ritual_reveal_tradeoff(state, ending_player, events, self._registry, rng=None)
+
+        # rally_the_kingdom's royal_support_bonus — a persistent Spell on
+        # the CASTER's own kingdom, so it decays on their own EndTurn
+        # (same convention as the per-unit timers above, not the
+        # opponent-facing square effects).
+        if ps.royal_support_bonus_turns > 0:
+            ps.royal_support_bonus_turns -= 1
+            if ps.royal_support_bonus_turns == 0:
+                ps.royal_support_bonus_amount = 0
 
         # false_prophecy's ritual_bluff — the flag lives on the CASTER's
         # own RitualState (it names one of THEIR SEALED Rituals), but

@@ -4,16 +4,30 @@ mechanics/effects/king_duel.py — KING / DUEL category
 
 Effect types in this category
 ------------------------------
-king_support_bonus          on_summon passive tag; READ by mechanics/duel.py
-                             initialize_duel() at Final Duel start (Stage 12).
-royal_support_suppression   on_summon passive tag; READ by mechanics/duel.py
-                             initialize_duel() at Final Duel start (Stage 12).
+king_support_bonus          IMPLEMENTED — the EFFECT ENTRY is read off the
+                             card by mechanics/duel.py at Final Duel start;
+                             the on_summon status is a display marker only.
+royal_support_suppression   IMPLEMENTED — same shape as king_support_bonus:
+                             resolved from the card at Duel start, status is
+                             a display marker only.
 duel_debuff                 not fired on_summon (trigger=final_duel_start);
                              mechanics/duel.py reads the effect straight off
                              the card at Duel start instead (Stage 12).
 royal_support_mark          IMPLEMENTED — enter_radius Trap effect
                              (kingslayer_alarm); tags the triggering piece,
                              read by mechanics/duel.py at Duel start.
+royal_support_bonus         IMPLEMENTED (Stage 13) — rally_the_kingdom
+                             (Spell, target_type "none"). Stores a timed,
+                             kingdom-wide bonus on the caster's PlayerState;
+                             mechanics/duel.py._gather_piece_support() adds it
+                             to every qualifying piece's support amount.
+royal_support_range_bonus   Not dispatched through this registry —
+                             muster_bell is a ``final_duel_start`` Trap, read
+                             straight off the card by mechanics/duel.py.
+                             _apply_final_duel_traps(). Registered below as an
+                             inert entry so a stray dispatch logs nothing.
+duel_escape_bonus           Same as royal_support_range_bonus
+                             (royal_escape_route).
 """
 
 from __future__ import annotations
@@ -30,21 +44,21 @@ if TYPE_CHECKING:
 
 def _king_support_bonus(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 9+
+    IMPLEMENTED — royal_guard / bannerlord_eternal (and marshal_king as a
+    King policy). Within ``radius`` squares of the allied King, this
+    monster grants ``bonus`` additional defender Guards.
 
-    Within ``radius`` squares of the allied King, this monster grants
-    ``bonus`` additional Royal Support value.
-
-    When implemented this will participate in the Royal-Support tallying
-    algorithm called at FINAL_DUEL start.
+    The resolution reads the EFFECT ENTRY straight off the card in
+    mechanics/duel.py._apply_passive_king_duel_flags() at Final Duel start
+    — it needs the live distance to the arena centre, which summon time
+    cannot know. The status armed here is therefore a marker for display,
+    not the load-bearing path.
     """
     if ctx.unit is None:
         return
-    # Passive flag — Royal Support tallying reads this at duel resolution.
     radius = ctx.effect.params.get("radius", 2)
     bonus  = ctx.effect.params.get("bonus", 1)
     ctx.unit.add_status(f"king_support_bonus:{radius}:{bonus}")
-    # NOTE: active resolution deferred to Stage 9+.
 
 
 # ---------------------------------------------------------------------------
@@ -53,20 +67,21 @@ def _king_support_bonus(ctx: "EffectContext") -> None:
 
 def _royal_support_suppression(ctx: "EffectContext") -> None:
     """
-    STUB — Stage 9+
+    IMPLEMENTED — kingsbane / eclipse_executioner / revenant_of_the_empty_throne
+    (and shadow_regent as a King policy). An attacker-owned monster near the
+    defending King strips ``amount`` Guards from the defender when a Final
+    Duel begins.
 
-    Enemy units within ``radius`` squares contribute ``amount`` fewer points
-    of Royal Support if a Final Duel begins while this monster is nearby.
-
-    When implemented this will subtract from enemy Royal Support at FINAL_DUEL
-    start (only units within radius at that moment are affected).
+    Like king_support_bonus above, the resolution reads the EFFECT ENTRY off
+    the card in mechanics/duel.py._apply_passive_king_duel_flags(); the
+    ``royal_suppression`` status armed here is a display marker with no
+    reader in the engine.
     """
     if ctx.unit is None:
         return
     radius = ctx.effect.params.get("radius", 2)
     amount = ctx.effect.params.get("amount", 1)
     ctx.unit.add_status(f"royal_suppression:{radius}:{amount}")
-    # NOTE: active resolution deferred to Stage 9+.
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +134,67 @@ def _royal_support_mark(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# royal_support_bonus
+# ---------------------------------------------------------------------------
+
+def _royal_support_bonus(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED (Stage 13) — rally_the_kingdom: "For 2 turns, allied units
+    that already qualify as Royal Support count as one additional level of
+    support. Does not expand support range."
+
+    A kingdom-wide, timed modifier with no board anchor — there is no unit
+    or square to hang it on — so it lives on PlayerState
+    (``royal_support_bonus_amount`` / ``royal_support_bonus_turns``),
+    alongside the other per-player latches. Two consequences follow
+    directly from the card text:
+
+      • Only the per-item AMOUNT moves. The support RADIUS is untouched,
+        so a piece outside range still contributes nothing — "does not
+        expand support range".
+      • It is applied in mechanics/duel.py._gather_piece_support(), which
+        already skips pieces whose amount falls to 0, so a Rally can never
+        conjure support out of a piece that had none.
+
+    The timer decays on the CASTER's own EndTurn (core/rules.py
+    _execute_end_turn) — a persistent Spell on your own kingdom, not an
+    opponent-facing zone.
+    """
+    if ctx.state is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    if owner is None:
+        return
+    params = ctx.effect.params
+    ps = ctx.state.get_player(owner)
+    ps.royal_support_bonus_amount = max(
+        ps.royal_support_bonus_amount, params.get("amount", 1)
+    )
+    ps.royal_support_bonus_turns = max(
+        ps.royal_support_bonus_turns, params.get("duration_turns", 2)
+    )
+
+
+# ---------------------------------------------------------------------------
+# royal_support_range_bonus / duel_escape_bonus — inert registry entries
+# ---------------------------------------------------------------------------
+
+def _final_duel_trap_marker(ctx: "EffectContext") -> None:
+    """
+    INERT — muster_bell's ``royal_support_range_bonus`` and
+    royal_escape_route's ``duel_escape_bonus``.
+
+    Both live on ``final_duel_start`` Traps, which no trigger-detection
+    pathway ever fires: mechanics/duel.py._apply_final_duel_traps() scans
+    state.traps directly when the Duel begins, because the bonus depends on
+    the arena centre — a position that doesn't exist until that moment.
+    Registered here purely so the effect types are recognised and never
+    logged as UNRESOLVED if a future generic sweep dispatches them.
+    """
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -127,4 +203,7 @@ KING_DUEL_HANDLERS: dict[str, object] = {
     "royal_support_suppression": _royal_support_suppression,
     "duel_debuff":               _duel_debuff,
     "royal_support_mark":        _royal_support_mark,
+    "royal_support_bonus":       _royal_support_bonus,
+    "royal_support_range_bonus": _final_duel_trap_marker,
+    "duel_escape_bonus":         _final_duel_trap_marker,
 }

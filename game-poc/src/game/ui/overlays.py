@@ -151,10 +151,28 @@ class SidebarOverlay:
                 return token
         return None
 
+    def _selector_label(
+        self, glyph: str, side: str, mode: str, max_width: int
+    ) -> str:
+        """
+        Fit a controller-selector label inside its button.
+
+        The long form is "♔ White: HEURISTIC AI"; when that overflows, the
+        side word is dropped ("♔ HEURISTIC AI") — the King glyph already
+        says which side the button belongs to.
+        """
+        long_form = f"{glyph} {side}: {mode}"
+        padding = 8
+        if self._font_small.render(long_form, True, HUD_LABEL).get_width() \
+                <= max_width - padding:
+            return long_form
+        return f"{glyph} {mode}"
+
     def draw(
         self,
         obs: "Observation",
         player_modes: dict | None = None,
+        mode_labels: dict | None = None,
         show_black_hand: bool = False,
         show_recompose_btn: bool = False,
         show_mercenary_btn: "bool | None" = None,
@@ -168,6 +186,11 @@ class SidebarOverlay:
         Render the sidebar based on the current observation.
 
         ``player_modes``       — optional dict mapping player_id → "human" | "ai".
+        ``mode_labels``        — optional dict mapping player_id → the exact
+                                 controller name to print on that side's
+                                 selector button ("HUMAN" / "RANDOM AI" /
+                                 "HEURISTIC AI"). Falls back to the coarse
+                                 ``player_modes`` value when omitted.
         ``show_black_hand``    — when True, the black-hand toggle button is shown active.
         ``show_recompose_btn``  — when True, the Recompose button is drawn and clickable.
         ``show_mercenary_btn``  — None = don't draw (non-PREPARATION phases).
@@ -197,6 +220,7 @@ class SidebarOverlay:
                                  lives in the left CardViewer, not here.)
         """
         modes = player_modes or {}
+        labels = mode_labels or {}
 
         # Background
         rect = pygame.Rect(self._x, 0, self.SIDEBAR_WIDTH, self._surface.get_height())
@@ -225,14 +249,17 @@ class SidebarOverlay:
         y = self._draw_divider(y)
         y += 8
 
-        # ── Player mode toggles ───────────────────────────────────────────
+        # ── Player controller selectors ───────────────────────────────────
+        # One button per side, cycling HUMAN → RANDOM AI → HEURISTIC AI.
         y = self._draw_line("Players", self._font_small, HUD_LABEL, y, center=False)
         y += 4
         btn_w = self.SIDEBAR_WIDTH - self.PADDING * 2
         btn_x = self._x + self.PADDING
-        # White toggle
+        # White selector
         w_mode = modes.get("white", "human")
-        w_label = f"♔ White: {w_mode.upper()}"
+        w_label = self._selector_label(
+            "♔", "White", labels.get("white", w_mode.upper()), btn_w
+        )
         w_color = HUD_ACCENT if w_mode == "human" else HUD_DUEL
         self._btn_white_mode = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
         hover_w = self._btn_white_mode.collidepoint(self._mouse_pos)
@@ -243,9 +270,11 @@ class SidebarOverlay:
         self._surface.blit(ws, (self._btn_white_mode.x + (btn_w - ws.get_width()) // 2,
                                 self._btn_white_mode.y + (self.BTN_H - ws.get_height()) // 2))
         y += self.BTN_H + 4
-        # Black toggle
+        # Black selector
         b_mode = modes.get("black", "human")
-        b_label = f"♚ Black: {b_mode.upper()}"
+        b_label = self._selector_label(
+            "♚", "Black", labels.get("black", b_mode.upper()), btn_w
+        )
         b_color = HUD_ACCENT if b_mode == "human" else HUD_DUEL
         self._btn_black_mode = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
         hover_b = self._btn_black_mode.collidepoint(self._mouse_pos)

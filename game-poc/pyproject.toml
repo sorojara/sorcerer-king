@@ -19,6 +19,7 @@ dev = [
 ui = [
     "pygame>=2.5",
     "numpy>=1.24",
+    "Pillow>=10.0",
 ]
 
 [tool.setuptools.packages.find]

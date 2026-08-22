@@ -76,6 +76,7 @@ from game.mechanics.effects.ritual        import RITUAL_HANDLERS         # noqa:
 from game.mechanics.effects.king_duel     import KING_DUEL_HANDLERS      # noqa: E402
 from game.mechanics.effects.information   import INFORMATION_HANDLERS    # noqa: E402
 from game.mechanics.effects.spells        import SPELLS_HANDLERS         # noqa: E402
+from game.mechanics.effects.combat       import COMBAT_HANDLERS          # noqa: E402
 from game.mechanics.effects._meta        import META_HANDLERS            # noqa: E402
 
 
@@ -105,6 +106,7 @@ EFFECT_REGISTRY: dict[str, _Handler] = {
     **KING_DUEL_HANDLERS,
     **INFORMATION_HANDLERS,
     **SPELLS_HANDLERS,
+    **COMBAT_HANDLERS,
     **META_HANDLERS,
 }
 
@@ -178,6 +180,8 @@ ACTIVATED_EFFECT_TYPES: frozenset[str] = frozenset({
     # META
     "dismiss_monster",
     "copy_effect",
+    # CARDS — celestial_oracle's once-per-turn peek
+    "inspect_top_deck",
     "challenge_unit",
     "capture_then_retreat",
 })

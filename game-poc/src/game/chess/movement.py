@@ -33,6 +33,7 @@ Architecture (from phase0.md §7):
     Monster modifier layer (Stage 5) will sit on top of this.
 
 Public API:
+    blocks_movement(board, pos, owner) → bool   (Stage 13: enemy Building wall)
     get_pseudo_legal_moves(board, pos, unit, en_passant_target=None) → list[Position]
     get_legal_moves(board, pos, unit, en_passant_target=None,
                     castling_rights=None, player_id="") → list[Position]
@@ -60,12 +61,34 @@ if TYPE_CHECKING:
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def blocks_movement(board: BoardState, pos: Position, owner: str) -> bool:
+    """
+    Stage 13 — True if a COMPLETE Building belonging to ``owner``'s
+    OPPONENT stands on ``pos``.
+
+    A finished enemy Building is a wall: a piece can neither pass through
+    it nor land on it (README §11 — Buildings "permanently alter the
+    strategic value of parts of the board"; making them physically
+    impassable is what gives the siege rules something to be about).
+    The owner's own Buildings never block them — the Builder Pawn is
+    standing on one the instant it completes.
+
+    Reads the denormalised ``SquareState.complete_building_owner``, kept
+    in sync by mechanics.buildings.refresh_building_blocks(), so this
+    holds in check detection and castling-safety probes too — neither of
+    which is handed a GameState.
+    """
+    bo = board.get_square(pos).complete_building_owner
+    return bo is not None and bo != owner
+
+
 def _ray_moves(
     board: BoardState,
     pos: Position,
     owner: str,
     deltas: list[tuple[int, int]],
     sliding: bool,
+    phase_buildings: bool = False,
 ) -> list[Position]:
     """
     Enumerate squares reachable by moving in the given direction vectors.
@@ -78,6 +101,12 @@ def _ray_moves(
     so they never even reach this check, matching "Knights and effects
     that leap may cross it". Blocks both sides equally, same convention
     as frozen/blocked squares.
+
+    Stage 13: a COMPLETE enemy Building stops a ray the same way
+    ``walled:`` does, and is never a landable square. ``phase_buildings``
+    (sky_serpent's ``ignore_terrain``) lets the ray CONTINUE through such
+    a square without stopping — it still can't be landed on, since the
+    square is physically occupied by the structure.
     """
     targets: list[Position] = []
     for df, dr in deltas:
@@ -88,6 +117,15 @@ def _ray_moves(
                 eff.startswith("walled:") for eff in board.get_square(candidate).temporary_effects
             ):
                 break
+            if blocks_movement(board, candidate, owner):
+                if not phase_buildings:
+                    break
+                # ignore_terrain: slide onward, but never stop here.
+                if not sliding:
+                    break
+                f += df
+                r += dr
+                continue
             occupant = board.get_unit(candidate)
             if occupant is None:
                 targets.append(candidate)
@@ -144,6 +182,16 @@ def get_pseudo_legal_moves(
     if any(s.startswith("immobilized:") for s in unit.statuses):
         return []
 
+    # seal_of_lockdown's seal_zone — an enemy of the sealing player standing
+    # inside the zone can neither move nor capture, which is the same thing
+    # as having no legal destinations at all.
+    for eff in board.get_square(pos).temporary_effects:
+        if eff.startswith("sealed:"):
+            parts = eff.split(":")
+            caster = parts[2] if len(parts) > 2 else None
+            if caster is not None and caster != unit.owner:
+                return []
+
     owner = unit.owner
     pt = unit.piece.piece_type
     moves: list[Position] = []
@@ -165,6 +213,11 @@ def get_pseudo_legal_moves(
             if effect.type == "pass_through_units":
                 pass_through = max(pass_through, effect.params.get("max_units", 1))
 
+    # Stage 13: sky_serpent's ignore_terrain — slide THROUGH a COMPLETE
+    # enemy Building's square instead of being stopped by it. Read off the
+    # status so this works in the registry-less paths too.
+    phase_buildings = "ignore_building_terrain" in unit.statuses
+
     # ── Sliding / step pieces ─────────────────────────────────────────────
 
     if pt == PieceType.KING:
@@ -172,29 +225,29 @@ def get_pseudo_legal_moves(
             (-1, -1), (-1, 0), (-1, 1),
             (0, -1),           (0, 1),
             (1, -1),  (1, 0),  (1, 1),
-        ], sliding=False)
+        ], sliding=False, phase_buildings=phase_buildings)
 
     elif pt == PieceType.QUEEN:
         moves = _ray_moves(board, pos, owner, [
             (0, 1), (0, -1), (1, 0), (-1, 0),
             (1, 1), (1, -1), (-1, 1), (-1, -1),
-        ], sliding=True)
+        ], sliding=True, phase_buildings=phase_buildings)
 
     elif pt == PieceType.ROOK:
         moves = _ray_moves(board, pos, owner, [
             (0, 1), (0, -1), (1, 0), (-1, 0),
-        ], sliding=True)
+        ], sliding=True, phase_buildings=phase_buildings)
 
     elif pt == PieceType.BISHOP:
         moves = _ray_moves(board, pos, owner, [
             (1, 1), (1, -1), (-1, 1), (-1, -1),
-        ], sliding=True)
+        ], sliding=True, phase_buildings=phase_buildings)
 
     elif pt == PieceType.KNIGHT:
         moves = _ray_moves(board, pos, owner, [
             (2, 1), (2, -1), (-2, 1), (-2, -1),
             (1, 2), (1, -2), (-1, 2), (-1, -2),
-        ], sliding=False)
+        ], sliding=False, phase_buildings=phase_buildings)
 
     # ── Pawn (most complex: push, double-push, diagonal capture, en passant) ─
 
@@ -207,7 +260,10 @@ def get_pseudo_legal_moves(
         fwd_empty = False
         if 0 <= fwd_rank <= 7:
             fwd = Position(pos.file, fwd_rank)
-            fwd_empty = board.get_unit(fwd) is None
+            # Stage 13: a COMPLETE enemy Building on the square in front is
+            # a wall — it blocks the single push AND the double push behind
+            # it, exactly as an occupying piece would.
+            fwd_empty = board.get_unit(fwd) is None and not blocks_movement(board, fwd, owner)
             if fwd_empty:
                 moves.append(fwd)
             # Double push only from starting rank. Normally also requires
@@ -257,6 +313,13 @@ def get_pseudo_legal_moves(
                     if candidate not in moves:
                         moves.append(candidate)
 
+    # ── Stage 13: a COMPLETE enemy Building's square is never landable ────
+    # _ray_moves already skips them for the sliding/stepping pieces, but
+    # Pawn pushes/captures and the monster leap additions above are built
+    # square-by-square, so the rule is re-applied here for all of them.
+    # Clearing the square is AttackBuilding's job, not a move's.
+    moves = [m for m in moves if not blocks_movement(board, m, owner)]
+
     # ── Stage 5/6: frozen squares cannot be entered ───────────────────────
     moves = [
         m for m in moves
@@ -286,6 +349,24 @@ def get_pseudo_legal_moves(
                 m for m in moves
                 if abs(m.file - pos.file) <= cap and abs(m.rank - pos.rank) <= cap
             ]
+
+    # ── illusory_doubles' no_capture token ───────────────────────────────
+    # "Illusions cannot capture" — they move normally but may never land on
+    # an occupied square.
+    if "no_capture" in unit.statuses:
+        moves = [m for m in moves if board.get_unit(m) is None]
+
+    # ── labyrinth_rune's movement_limit ──────────────────────────────────
+    # A per-unit cap the Trap stamped on this piece directly, as opposed to
+    # the positional aura above. Same filter, different source.
+    for status in unit.statuses:
+        if status.startswith("movement_limit:"):
+            unit_cap = int(status.split(":")[1])
+            moves = [
+                m for m in moves
+                if abs(m.file - pos.file) <= unit_cap and abs(m.rank - pos.rank) <= unit_cap
+            ]
+            break
 
     # ── fractured_path's movement_cost_zone ───────────────────────────────
     # A unit starting its move inside the zone is capped to max_dist

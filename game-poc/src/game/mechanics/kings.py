@@ -30,13 +30,11 @@ Lifecycle (state lives on PlayerState / KingCardState — core/state.py):
         → apply_king_policy_auras() refreshes the live, aura-style effects
           of the player's ACTIVE King (mirrors apply_building_auras).
 
-Only the effects that plug into a system which actually exists today do
-anything — everything else in a King's ``effects`` list (
-``ritual_information_discount``, ``king_support_bonus``,
-``royal_support_suppression``, ``enemy_territory_mobility``, and every
-``duel_effect``) is inert, reserved for Rituals (Stage 11) and the Final
-Duel (Stage 12+), matching the STUB convention already used throughout
-mechanics/effects/ and mechanics/buildings.py.
+Every King effect in data/kings.yaml is wired up as of Stage 13.
+``king_support_bonus`` / ``royal_support_suppression`` and each King's
+``duel_effect`` are the exceptions to "applied here": mechanics/duel.py
+reads them straight off the card when a Final Duel begins, because they
+depend on the arena centre, which doesn't exist until that moment.
 
 Wired-up effect types, and where each is actually applied:
     vessel_support             — core/rules.py._execute_summon_monster
@@ -46,6 +44,10 @@ Wired-up effect types, and where each is actually applied:
     formation_support          — apply_king_policy_auras (this module)
     graveyard_threshold_bonus  — apply_king_policy_auras (this module)
     spell_radius_bonus         — apply_king_policy_auras (this module)
+    enemy_territory_mobility   — apply_king_policy_auras (this module)
+    ritual_information_discount— maybe_ritual_information_discount (this
+                                  module), called from the three voluntary
+                                  Ritual-revelation paths
     graveyard_recycle          — maybe_recycle_destroyed_monster (this
                                   module), called from the primary capture
                                   path in core/rules.py and from
@@ -64,6 +66,7 @@ from game.mechanics.area import in_area
 if TYPE_CHECKING:
     from game.chess.pieces import Position
     from game.core.events import Event
+    from game.core.phases import RevelationState
     from game.core.rng import DeterministicRNG
     from game.core.state import GameState, PlayerState
 
@@ -285,9 +288,12 @@ def apply_king_policy_auras(state: "GameState", player_id: str, registry: "objec
         _apply_graveyard_threshold_bonus(state, player_id, effect, registry)
     for effect in _king_effects(state, player_id, registry, "spell_radius_bonus"):
         _apply_king_spell_radius_bonus(state, player_id, effect, registry)
-    # king_support_bonus, royal_support_suppression, enemy_territory_mobility,
-    # ritual_information_discount — STUB: no functioning target system yet
-    # (Final Duel Royal Support tally is Stage 12+; Rituals are Stage 11+).
+    for effect in _king_effects(state, player_id, registry, "enemy_territory_mobility"):
+        _apply_enemy_territory_mobility(state, player_id, effect, registry)
+    # king_support_bonus / royal_support_suppression are read straight off
+    # the board by mechanics/duel.py when a Final Duel begins, not armed
+    # here. ritual_information_discount is a one-shot payout, not an aura —
+    # see maybe_ritual_information_discount() below.
 
 
 def _apply_formation_support(state: "GameState", player_id: str, effect, registry: "object") -> None:
@@ -343,6 +349,44 @@ def _apply_graveyard_threshold_bonus(state: "GameState", player_id: str, effect,
             unit.add_status(f"shield:{bonus}")
 
 
+def _apply_enemy_territory_mobility(state: "GameState", player_id: str, effect, registry: "object") -> None:
+    """
+    IMPLEMENTED (Stage 13) — shadow_regent: Monsters of ``archetype``
+    (assassin) move ``movement_bonus`` further while standing inside enemy
+    Territory.
+
+    Grants the SAME ``territory_movement_bonus:<N>`` status moon_stalker's
+    per-card ``territory_bonus`` already uses, so the movement layer needs
+    no new branch: mechanics.monsters.get_movement_additions() checks
+    "is this unit's square inside the opponent's Territory?" on every move
+    generation, which is exactly this policy's ``condition:
+    inside_enemy_territory``.
+
+    Idempotent like every other aura here — a unit that already carries a
+    territory bonus (its own card's, or a previous refresh of this one) is
+    left alone rather than having the two stack.
+    """
+    from game.cards.card import MonsterCard
+
+    params = effect.params
+    archetype = params.get("archetype")
+    bonus = params.get("movement_bonus", 1)
+    if not params.get("condition", {}).get("inside_enemy_territory", True):
+        return
+
+    for _pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None:
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard) or (archetype and card.archetype != archetype):
+            continue
+        if not any(s.startswith("territory_movement_bonus:") for s in unit.statuses):
+            unit.add_status(f"territory_movement_bonus:{bonus}")
+
+
 def _apply_king_spell_radius_bonus(state: "GameState", player_id: str, effect, registry: "object") -> None:
     """arcane_sovereign: +radius to Spells cast by archetype units (spellcaster)."""
     from game.cards.card import MonsterCard
@@ -393,10 +437,83 @@ def maybe_recycle_destroyed_monster(
     ps = state.get_player(owner)
     if ps.king_recycle_used_this_turn:
         return False
-    if not _king_effects(state, owner, registry, "graveyard_recycle"):
+    # Stage 13: ossuary_king (a Ritual Monster) carries the same effect on
+    # its card. Either source arms the recycle; the once-per-turn latch is
+    # shared, so running both doesn't recycle twice.
+    from game.mechanics.monsters import has_monster_graveyard_recycle
+    if not _king_effects(state, owner, registry, "graveyard_recycle") \
+            and not has_monster_graveyard_recycle(state, owner, registry):
         return False
 
     ps.king_recycle_used_this_turn = True
     ps.deck.append(card_id)  # "bottom_of_deck" — deck[0] is drawn next
     events.append(CardsReturnedToDeck(player_id=owner, card_ids=(card_id,)))
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ritual_information_discount (arcane_sovereign)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def maybe_ritual_information_discount(
+    state: "GameState",
+    owner: str,
+    new_revelation: "RevelationState",
+    events: "list[Event]",
+    registry: "object | None",
+    rng: "object | None" = None,
+) -> bool:
+    """
+    IMPLEMENTED (Stage 13) — arcane_sovereign: "the kingdom gains additional
+    value the FIRST time it voluntarily reveals one of its hidden Rituals".
+
+    README §15.2 frames information as a resource a player spends. This
+    policy rebates part of that first payment. Three things scope it, all
+    straight from the card's params:
+
+      • ``first_reveal_each_match: true`` — latched on PlayerState
+        (``ritual_info_discount_used``), never reset.
+      • ``reveal_to: foretold`` — only the SEALED→FORETOLD step pays out,
+        not FORETOLD→REVEALED.
+      • ``bonus.draw_cards`` — what the rebate actually is.
+
+    "Voluntarily" is what decides the call sites: this is invoked from the
+    three paths where the OWNER chose to reveal (omen_reader's on-summon
+    ritual_reveal_tradeoff, oracle_of_the_last_star's once-per-turn
+    variant, and ritual_insight's own_ritual reveal_ritual), and NOT from
+    the involuntary triggers of README §15.1 — being checked, losing the
+    Queen, or an enemy omen_bell forcing a reveal. Getting your secrets
+    prised out of you is not a policy dividend.
+
+    Returns True if the discount paid out.
+    """
+    from game.core.events import CardDrawn, DeckRecycled
+
+    if registry is None:
+        return False
+    ps = state.get_player(owner)
+    if ps.ritual_info_discount_used:
+        return False
+
+    for effect in _king_effects(state, owner, registry, "ritual_information_discount"):
+        params = effect.params
+        wanted = params.get("reveal_to", "foretold")
+        if wanted and new_revelation.name.lower() != wanted.lower():
+            continue
+        if params.get("first_reveal_each_match", True):
+            ps.ritual_info_discount_used = True
+
+        count = params.get("bonus", {}).get("draw_cards", 1)
+        for _ in range(count):
+            if not ps.deck and ps.graveyard:
+                ps.deck = list(ps.graveyard)
+                ps.graveyard.clear()
+                if rng is not None:
+                    rng.shuffle(ps.deck)
+                events.append(DeckRecycled(player_id=owner, card_count=len(ps.deck)))
+            if ps.deck:
+                card_id = ps.deck.pop(0)
+                ps.hand.append(card_id)
+                events.append(CardDrawn(player_id=owner, card_id=card_id))
+        return True
+    return False

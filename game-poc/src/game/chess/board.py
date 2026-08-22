@@ -7,6 +7,7 @@ Each square knows everything relevant about that location:
     SquareState.unit          — the UnitInstance currently occupying it (or None)
     SquareState.trap_ids      — IDs of TrapInstances whose radius covers this square
     SquareState.building_id   — ID of a BuildingInstance placed here (or None)
+    SquareState.complete_building_owner — owner of a COMPLETE Building here
     SquareState.territory_owner — "white" | "black" | None  (placeholder, Stage 9)
     SquareState.temporary_effects — short string tags from Spell / effect resolution
 
@@ -44,6 +45,15 @@ class SquareState:
 
     # ID of a BuildingInstance occupying this square (if any).
     building_id: str | None = None
+
+    # Stage 13 — denormalised owner of a *COMPLETE* Building standing here,
+    # or None. Kept on the square (rather than looked up through
+    # GameState.buildings) so chess/movement.py can enforce "a finished
+    # enemy Building is a wall" with nothing but the board in hand — the
+    # same constraint check detection and castling-safety already work
+    # under. Maintained by mechanics.buildings.refresh_building_blocks(),
+    # which is called from every place a Building completes or leaves play.
+    complete_building_owner: str | None = None
 
     # Territorial control (set by Building/Ritual effects). Stage 9 placeholder.
     territory_owner: str | None = None

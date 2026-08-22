@@ -43,7 +43,11 @@ from game.logger import get_logger
 
 _log = get_logger(__name__)
 
+from game.ai.controller import PlayerController
+from game.ai.heuristic_bot import HeuristicBot
 from game.ai.random_bot import RandomBot
+from game.ai.search import SearchLimits
+from game.ai.search_bot import SearchBot
 from game.cards.card import CardRegistry, load_registry_from_yaml
 from game.chess.pieces import Position
 from game.core.actions import (
@@ -51,6 +55,7 @@ from game.core.actions import (
     ActivateRitual,
     ActivateSpell,
     ActivateTrap,
+    AttackBuilding,
     Castle,
     ChangeKing,
     CoronateKing,
@@ -127,11 +132,23 @@ class AppController:
       • A Game instance (facade to the engine).
       • All UI views (BoardView, SidebarOverlay, HandView, PromotionDialog).
       • Input state (selected_pos, legal_dests, castle_dests).
-      • Player mode config: each side can be "human" or "ai".
+      • Player mode config: each side is Human or one of the AI models.
 
-    When a side is set to "ai" its turns are played automatically by a
-    RandomBot.  A short visual delay (_AI_THINK_FRAMES) lets the human
-    see each AI move before the next action.
+    Each side's controller is picked from the sidebar button, which cycles
+    HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI → HUMAN, so any two models
+    can be matched against each other (or against a human) without leaving
+    the app.  ``_player_modes`` keeps the coarse "human" / "ai" split every
+    phase handler branches on, while ``_ai_kinds`` records WHICH bot plays
+    an "ai" side:
+
+        "random"    — AI Stage 0 RandomBot     (README §45)
+        "heuristic" — AI Stage 1 HeuristicBot  (README §46)
+        "search"    — AI Stage 2 SearchBot     (README §47)
+
+    All three are ordinary PlayerControllers, so they receive an Observation and
+    the legal action list and nothing else (README §44).  A short visual
+    delay (_AI_THINK_FRAMES) lets the human see each AI move before the
+    next action.
     """
 
     # ── Construction ──────────────────────────────────────────────────────
@@ -208,20 +225,23 @@ class AppController:
         )
 
         # ── Player modes & bots ───────────────────────────────────────────
-        # "human" → human input; "ai" → RandomBot plays automatically
+        # "human" → human input; "ai" → the bot named by _ai_kinds plays.
         self._player_modes: dict[str, str] = {"white": "human", "black": "human"}
-        self._bots: dict[str, RandomBot] = {
-            "white": RandomBot(seed=1),
-            "black": RandomBot(seed=2),
+        self._ai_kinds: dict[str, str] = {"white": "random", "black": "random"}
+        self._bot_seeds: dict[str, int] = {"white": 1, "black": 2}
+        self._bots: dict[str, PlayerController] = {
+            pid: self._make_bot(pid) for pid in ("white", "black")
         }
-        for pid, bot in self._bots.items():
-            bot.player_id = pid
 
         # Countdown until the AI plays its chosen action (visual delay)
         self._ai_think_countdown: int = 0
 
         # ── Input state ──────────────────────────────────────────────────
         self._selected_pos: Position | None = None
+        # Stage 13 — squares holding a COMPLETE enemy Building the selected
+        # unit may besiege. Kept separate from _legal_dests because clicking
+        # one fires AttackBuilding, which does NOT move the piece.
+        self._siege_dests: list[Position] = []
         self._legal_dests: list[Position] = []
         self._castle_dests: list[Position] = []
         self._mouse_pos: tuple[int, int] = (0, 0)
@@ -718,6 +738,8 @@ class AppController:
                     self._deselect()
                 elif pos in self._castle_dests:
                     self._do_castle(pos, active)
+                elif pos in self._siege_dests:
+                    self._do_siege(self._selected_pos, pos, active)
                 elif pos in self._legal_dests:
                     self._do_move(self._selected_pos, pos, active)
                 else:
@@ -764,12 +786,27 @@ class AppController:
                 else:
                     self._show_toast("Targeting cancelled.")
             elif self._spell_piece_card_id is not None:
-                # Stage 6: two-step piece-targeting Spell mode.
+                # Stage 6: piece-targeting Spell mode. Most piece Spells are
+                # two-step (pick source, then destination), but the ones whose
+                # destination is implied by the effect rather than chosen —
+                # forced_march (move_unit) and magnetic_reversal (pull_unit),
+                # whose actions carry only "position" — are ONE-step: clicking
+                # the piece is the whole flow.
                 if self._spell_piece_source is None:
                     valid_sources = {
                         tuple(a.target["position"]) for a in self._spell_piece_actions
                     }
                     if (pos.file, pos.rank) in valid_sources:
+                        one_step = next(
+                            (a for a in self._spell_piece_actions
+                             if tuple(a.target["position"]) == (pos.file, pos.rank)
+                             and "destination" not in a.target),
+                            None,
+                        )
+                        if one_step is not None:
+                            self._cancel_spell_piece_mode()
+                            self._execute_and_advance(one_step, active)
+                            return
                         self._spell_piece_source = pos
                     else:
                         self._cancel_spell_piece_mode()
@@ -782,6 +819,7 @@ class AppController:
                     match = next(
                         (a for a in self._spell_piece_actions
                          if tuple(a.target["position"]) == src_tuple
+                         and "destination" in a.target
                          and tuple(a.target["destination"]) == (pos.file, pos.rank)),
                         None,
                     )
@@ -1072,7 +1110,41 @@ class AppController:
         it exists, never its name, trigger, radius, charges, or effect type.
         Returns [] if there's nothing to show.
         """
+        from game.core.phases import ConstructionStatus
         from game.mechanics.area import expand_area
+
+        # Stage 13 — Buildings are public information (README §12: "The
+        # Building Pool is public"), so unlike Traps there's nothing to
+        # redact for the enemy's: integrity, siege marks and protection are
+        # all things both players can see on the board anyway.
+        for b in obs.board.building_locations:
+            if b.position != hover_pos or getattr(b, "status", None) == ConstructionStatus.DESTROYED:
+                continue
+            lines = []
+            try:
+                lines.append((self._registry.get(b.building_card_id).name, TOOLTIP_TITLE))
+            except Exception:
+                lines.append((b.building_card_id.replace("_", " ").title(), TOOLTIP_TITLE))
+            side = "yours" if b.owner == obs.player_id else "enemy"
+            lines.append((f"Owner: {b.owner} ({side})", TOOLTIP_TEXT))
+            if b.status == ConstructionStatus.UNDER_CONSTRUCTION:
+                lines.append((f"Under construction: {b.remaining_turns} turn(s) left", TOOLTIP_TEXT))
+            else:
+                lines.append((f"Integrity: {b.integrity}/{b.max_integrity}", TOOLTIP_TEXT))
+                if b.disabled_turns > 0:
+                    lines.append((f"Disabled for {b.disabled_turns} turn(s)", TOOLTIP_TEXT))
+                if b.vulnerable_turns > 0:
+                    lines.append((
+                        f"Marked for destruction — open to any attacker, "
+                        f"+{b.vulnerable_amount} damage ({b.vulnerable_turns} turn(s))",
+                        TOOLTIP_TEXT,
+                    ))
+                if b.protection_turns > 0 and b.protection_uses > 0:
+                    lines.append((
+                        f"Fortified: absorbs {b.protection_uses} destroying blow(s)",
+                        TOOLTIP_TEXT,
+                    ))
+            return lines
 
         for trap in obs.board.trap_locations:
             if trap.position == hover_pos:
@@ -1218,7 +1290,12 @@ class AppController:
             self._spell_piece_card_id = card_id
             self._spell_piece_actions = spell_actions
             self._spell_piece_source = None
-            self._show_toast(f"{card.name} — click your piece to move  (ESC to cancel)")
+            # One-step Spells (no "destination" in their targets) aim at a
+            # piece, not a move — and pull_unit aims at an ENEMY one.
+            if any("destination" not in a.target for a in spell_actions):
+                self._show_toast(f"{card.name} — click the target piece  (ESC to cancel)")
+            else:
+                self._show_toast(f"{card.name} — click your piece to move  (ESC to cancel)")
 
         else:
             self._show_toast(f"{card.name}: target type {card.target_type!r} not supported yet.")
@@ -2033,6 +2110,12 @@ class AppController:
         action = MovePiece(player_id=player_id, source=src, target=dst)
         self._execute_and_advance(action, player_id)
 
+    def _do_siege(self, src: Position, dst: Position, player_id: str) -> None:
+        """Stage 13 — besiege the Building at ``dst``; the piece stays at ``src``."""
+        _log.debug("SIEGE    %s  %s → %s", player_id, src, dst)
+        action = AttackBuilding(player_id=player_id, source=src, target=dst)
+        self._execute_and_advance(action, player_id)
+
     def _do_castle(self, dst: Position, player_id: str) -> None:
         """Convert a castle-destination click into a Castle action."""
         side = "kingside" if dst.file == 6 else "queenside"
@@ -2222,14 +2305,84 @@ class AppController:
         if self._toast_ticks > 0:
             self._toast_ticks -= 1
 
-    # ── Player mode toggle ────────────────────────────────────────────────
+    # ── Player mode selector ──────────────────────────────────────────────
+
+    # The selectable controllers, in cycle order. Each entry is
+    # (player_mode, ai_kind, label) — ai_kind is ignored for "human".
+    # Adding an AI stage to the game means adding one row here.
+    _MODE_CYCLE: list[tuple[str, str, str]] = [
+        ("human", "random",    "HUMAN"),
+        ("ai",    "random",    "RANDOM AI"),
+        ("ai",    "heuristic", "HEURISTIC AI"),
+        ("ai",    "search",    "SEARCH AI"),
+    ]
+
+    # AI Stage 2 budget for interactive play. The UI asks its bot for a move
+    # on the frame the think-delay expires, so the search has to come back
+    # inside a couple of frames' worth of patience — a headless run
+    # (python -m game.sim --white search) can afford far more.
+    _UI_SEARCH_LIMITS: SearchLimits = SearchLimits(
+        max_depth=3, max_nodes=2500, max_seconds=0.6
+    )
+
+    def _make_bot(self, player_id: str) -> PlayerController:
+        """
+        Build the controller currently selected for ``player_id``.
+
+        HeuristicBot and SearchBot are given the card registry — the
+        *public* card definitions, the same rulebook a human reads off the
+        cards. It is not game state, so this is not an information leak
+        (README §44); every bot still receives only an Observation at
+        decision time.
+        """
+        kind = self._ai_kinds.get(player_id, "random")
+        seed = self._bot_seeds.get(player_id, 0)
+        bot: PlayerController
+        if kind == "search":
+            bot = SearchBot(
+                seed=seed,
+                registry=self._registry,
+                limits=self._UI_SEARCH_LIMITS,
+            )
+        elif kind == "heuristic":
+            bot = HeuristicBot(seed=seed, registry=self._registry)
+        else:
+            bot = RandomBot(seed=seed)
+        bot.player_id = player_id
+        return bot
+
+    def mode_label(self, player_id: str) -> str:
+        """Human-readable name of the controller driving ``player_id``."""
+        mode = self._player_modes.get(player_id, "human")
+        if mode != "ai":
+            return "HUMAN"
+        kind = self._ai_kinds.get(player_id, "random")
+        return next(
+            (label for m, k, label in self._MODE_CYCLE if m == "ai" and k == kind),
+            "RANDOM AI",
+        )
 
     def _toggle_mode(self, player_id: str) -> None:
-        """Cycle the player's mode: human → ai → human …"""
-        current = self._player_modes.get(player_id, "human")
-        self._player_modes[player_id] = "ai" if current == "human" else "human"
-        mode = self._player_modes[player_id]
-        self._show_toast(f"{player_id.capitalize()} is now {mode.upper()}")
+        """Cycle: HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI → …"""
+        mode_now = self._player_modes.get(player_id, "human")
+        kind_now = self._ai_kinds.get(player_id, "random")
+        if mode_now != "ai":
+            index = 0
+        else:
+            index = next(
+                (i for i, (m, k, _) in enumerate(self._MODE_CYCLE)
+                 if m == "ai" and k == kind_now),
+                0,
+            )
+        mode, kind, label = self._MODE_CYCLE[(index + 1) % len(self._MODE_CYCLE)]
+
+        self._player_modes[player_id] = mode
+        self._ai_kinds[player_id] = kind
+        # Rebuild so a switched-to bot starts from a clean, seeded state
+        # rather than inheriting the previous controller's history.
+        self._bots[player_id] = self._make_bot(player_id)
+
+        self._show_toast(f"{player_id.capitalize()} is now {label}")
         # If just switched to AI and it's their turn, arm the countdown
         if mode == "ai":
             obs = self._current_obs()
@@ -2511,6 +2664,11 @@ class AppController:
             for a in legal_actions
             if isinstance(a, MovePiece) and a.source == pos
         ]
+        self._siege_dests = [
+            a.target
+            for a in legal_actions
+            if isinstance(a, AttackBuilding) and a.source == pos
+        ]
         # Castle destinations
         active = self._current_obs().active_player
         king_start_file = 4
@@ -2530,6 +2688,7 @@ class AppController:
         self._selected_pos = None
         self._legal_dests = []
         self._castle_dests = []
+        self._siege_dests = []
 
     # ── Render ────────────────────────────────────────────────────────────
 
@@ -2568,7 +2727,7 @@ class AppController:
                 src_tuple = (self._spell_piece_source.file, self._spell_piece_source.rank)
                 board_summon_dests = [
                     Position(*a.target["destination"]) for a in self._spell_piece_actions
-                    if tuple(a.target["position"]) == src_tuple
+                    if "destination" in a.target and tuple(a.target["position"]) == src_tuple
                 ]
         elif obs.phase == Phase.MERCENARY_PLACEMENT and self._player_modes.get(obs.active_player) == "human":
             board_summon_dests = list(self._mercenary_placement_squares)
@@ -2588,6 +2747,7 @@ class AppController:
             show_territory=self._show_territory,
             crowned_kings=self._compute_crowned_kings(obs),
             archetype_map=self._compute_archetype_map(obs),
+            siege_dests=self._siege_dests,
         )
 
         # Stage 6: hover tooltip for Traps / active zone effects.
@@ -2713,6 +2873,9 @@ class AppController:
         self._sidebar.draw(
             obs,
             player_modes=self._player_modes,
+            mode_labels={
+                pid: self.mode_label(pid) for pid in ("white", "black")
+            },
             show_black_hand=self._show_black_hand,
             show_recompose_btn=show_recompose,
             show_mercenary_btn=show_mercenary,

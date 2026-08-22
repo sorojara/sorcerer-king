@@ -6,7 +6,10 @@ Effect types in this category
 ------------------------------
 freeze_square          IMPLEMENTED  — lock landing square after capture
 scorch_square          IMPLEMENTED  — destroy units entering square (ember_drake)
-movement_restriction   IMPLEMENTED  — limit enemy movement range (astral_binder)
+movement_restriction   IMPLEMENTED  — an aura limiting nearby enemies'
+                                       movement range (astral_binder), OR a
+                                       self-contained debuff on one victim
+                                       (labyrinth_rune)
 suppress_spell_zone    IMPLEMENTED  — neutralise continuous Spell zone effects
                                        (blocked:/cursed:) within radius (spellbreaker)
 damage_aura            IMPLEMENTED  — destroy pieces entering radius (dragon_herald)
@@ -40,6 +43,9 @@ remove_spatial_effects IMPLEMENTED  — dispel_field: strips every
                                        "Buildings and Traps are unaffected"
                                        falls out naturally since their tags'
                                        card_id resolves to a different card type
+seal_zone              IMPLEMENTED  — seal_of_lockdown: enemy units inside
+                                       can neither move, capture, nor be
+                                       targeted by Spells for the duration
 temporary_territory    IMPLEMENTED  — border_beacon: tags the Trap's own
                                        radius as the owner's Territory for
                                        duration_turns; read side in
@@ -146,22 +152,40 @@ def _scorch_square(ctx: "EffectContext") -> None:
 
 def _movement_restriction(ctx: "EffectContext") -> None:
     """
-    IMPLEMENTED — astral_binder passive aura.
+    IMPLEMENTED — two cards, two very different shapes, told apart by
+    whether the card names a ``target``:
 
-    Enemy units within ``radius`` squares of this monster cannot move more
-    than ``max_distance`` squares (Chebyshev) per action.
+    1. astral_binder (Monster, no ``target``): a passive AURA. Enemy units
+       within ``radius`` squares of this monster cannot move more than
+       ``max_distance`` squares (Chebyshev) per action. Armed as
+       ``movement_restriction:<radius>:<max_distance>`` on the monster
+       itself; ``mechanics.monsters.get_movement_cap()`` scans the enemy's
+       units for it at legal-move-generation time.
 
-    This handler only flags the aura on the caster
-    (``movement_restriction:<radius>:<max_distance>``); the caster is scanned
-    for at legal-move-generation time by
-    ``mechanics.monsters.get_movement_cap()``, called from
-    ``chess.movement.get_pseudo_legal_moves()`` to filter the enemy's
-    candidate destinations.
+    2. labyrinth_rune (Trap, ``target: triggering_piece``): a DEBUFF on the
+       victim — "An enemy entering the area has its movement limited to 1
+       square on its next turn." Arming the aura status on the victim would
+       invert the card completely: the victim would be unaffected and would
+       instead start restricting the Trap owner's own units. It arms
+       ``movement_limit:<max_distance>:<duration_turns>`` instead, read
+       directly off the moving unit in
+       chess.movement.get_pseudo_legal_moves and decayed on the VICTIM's own
+       EndTurn (same convention as immobilized/exposed).
     """
     if ctx.unit is None:
         return
-    radius      = ctx.effect.params.get("radius", 1)
-    max_distance = ctx.effect.params.get("max_distance", 1)
+    params = ctx.effect.params
+    max_distance = params.get("max_distance", 1)
+
+    if params.get("target") == "triggering_piece":
+        duration = params.get("duration_turns", 1)
+        ctx.unit.statuses = [
+            s for s in ctx.unit.statuses if not s.startswith("movement_limit:")
+        ]
+        ctx.unit.add_status(f"movement_limit:{max_distance}:{duration}")
+        return
+
+    radius = params.get("radius", 1)
     ctx.unit.statuses = [
         s for s in ctx.unit.statuses if not s.startswith("movement_restriction:")
     ]
@@ -461,6 +485,42 @@ def _remove_spatial_effects(ctx: "EffectContext") -> None:
 
 
 # ---------------------------------------------------------------------------
+# seal_zone  (seal_of_lockdown)
+# ---------------------------------------------------------------------------
+
+def _seal_zone(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — seal_of_lockdown ("Seal a 3x3 zone. Enemy units inside
+    cannot move, capture, or be targeted by effects. Lasts 2 turns.").
+
+    _resolve_spell_on_area dispatches this once per square of the resolved
+    area (the same convention freeze_square/immobilize_zone use), tagging
+    each ``sealed:<duration>:<caster>:<card_id>``.
+
+    Three read sides, all keyed on "is this unit an ENEMY of the caster
+    named in the tag" — the sealing player walks through their own seal
+    untouched, unlike the both-sides zones (block_zone, cursed_ground):
+
+      • chess.movement.get_pseudo_legal_moves — a sealed enemy has no
+        moves at all, which covers "cannot move" and "cannot capture" in
+        one stroke.
+      • RulesEngine._resolve_spell_on_piece — refuses a sealed enemy as a
+        Spell target ("cannot be targeted by effects").
+
+    Decays on the CASTER's opponent's own EndTurn, the standard zone
+    convention, so it holds for exactly ``duration_turns`` of their turns.
+    """
+    if ctx.state is None or ctx.position is None:
+        return
+    caster = (ctx.extra or {}).get("caster_owner")
+    duration = ctx.effect.params.get("duration_turns", 2)
+    card_id = ctx.card.id if ctx.card is not None else "-"
+    ctx.state.board.get_square(ctx.position).add_effect(
+        f"sealed:{duration}:{caster}:{card_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # temporary_territory  (border_beacon)
 # ---------------------------------------------------------------------------
 
@@ -499,5 +559,6 @@ BOARD_CONTROL_HANDLERS: dict[str, object] = {
     "movement_cost_zone":   _movement_cost_zone,
     "prohibit_summoning":   _prohibit_summoning,
     "remove_spatial_effects": _remove_spatial_effects,
+    "seal_zone":            _seal_zone,
     "temporary_territory":  _temporary_territory,
 }

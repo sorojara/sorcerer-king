@@ -378,3 +378,201 @@
   description: >
     Move your King to one adjacent legal square without consuming the
     normal chess move. Cannot be activated while in Check.
+- id: sunder_the_walls
+  name: Sunder the Walls
+  spell_type: instant
+  target_type: building
+  effects:
+    - type: building_damage
+      params:
+        target_owner: opponent
+        amount: 2
+  description: >
+    Split one enemy Building along its foundations, dealing 2 damage to it
+    outright. No unit need be anywhere near it. Its defenders still get
+    their say — a nearby Castle Keeper, a durability aura or Emergency
+    Fortifications will each blunt the blow.
+
+- id: binding_chains
+  name: Binding Chains
+  spell_type: spatial
+  target_type: piece
+  effects:
+    - type: immobilize_piece
+      params:
+        target_owner: opponent
+        duration_turns: 1
+  description: >
+    Immobilize target enemy unit for 1 turn — it cannot move. It may still
+    be captured while bound.
+
+- id: celestial_guidance
+  name: Celestial Guidance
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: reposition_unit
+      params:
+        must_be_own: true
+        max_distance: 2
+        destination_must_be_empty: true
+  description: >
+    Move target allied unit up to 2 squares in any direction, ignoring
+    normal movement rules. Does not consume your chess move.
+
+- id: arcane_fortitude
+  name: Arcane Fortitude
+  spell_type: persistent
+  target_type: piece
+  effects:
+    - type: capture_protection
+      params:
+        target_owner: self
+        uses: 1
+        stacking: add
+  description: >
+    Give an allied unit +1 Capture Protection — the next capture attempt
+    against it is negated. Stacks with any shield the unit already holds.
+
+- id: return_to_hand
+  name: Return to Hand
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: dismiss_monster
+      params:
+        target_owner: self
+        restore_vessel: true
+        monster_destination: hand
+  description: >
+    Return target allied non-King unit to your hand. Its Vessel stays on
+    the board, restored to a plain chess piece — you may summon the
+    Monster again later.
+
+- id: purify
+  name: Purify
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: remove_negative_effects
+      params:
+        target_owner: self
+        include_square: true
+  description: >
+    Remove all negative effects, curses, and Trap auras from target allied
+    unit, and clear the hostile zones standing on its square.
+
+- id: siphon_of_power
+  name: Siphon of Power
+  spell_type: instant
+  target_type: piece
+  effects:
+    - type: damage_unit
+      params:
+        target_owner: opponent
+        amount: 1
+        draw_if_survives: 1
+  description: >
+    Deal 1 damage to an enemy unit. If it survives — because a shield
+    absorbed the blow — you draw 1 card instead.
+
+- id: dread_tide
+  name: Dread Tide
+  spell_type: spatial
+  target_type: position
+  radius: 2
+  effects:
+    - type: damage_unit
+      params:
+        target_owner: opponent
+        amount: 1
+        push_from_center: 1
+  description: >
+    Deal 1 damage to all enemy units in a 5x5 area around the target
+    square, and push the survivors 1 square directly away from the centre.
+
+- id: seal_of_lockdown
+  name: Seal of Lockdown
+  spell_type: spatial
+  target_type: position
+  radius: 1
+  effects:
+    - type: seal_zone
+      params:
+        duration_turns: 2
+  description: >
+    Seal a 3x3 zone. Enemy units inside cannot move, cannot capture, and
+    cannot be targeted by effects. Lasts 2 turns.
+
+- id: stolen_moment
+  name: Stolen Moment
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: extra_action
+      params:
+        preparation_action: true
+        chess_move: true
+  description: >
+    Take an extra action this turn: you may cast another Spell or make an
+    additional chess move.
+
+- id: erase_memory
+  name: Erase Memory
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: banish_deck_card
+      params:
+        from: opponent
+        count: 1
+        draw_cards: 1
+  description: >
+    Banish the top card of your opponent's deck face-down. They cannot
+    look at it and it never returns. Then you draw 1 card.
+
+- id: analyze_strategy
+  name: Analyze Strategy
+  spell_type: instant
+  target_type: none
+  effects:
+    - type: dig_top_deck
+      params:
+        look: 3
+        take: 1
+  description: >
+    Look at the top 3 cards of your deck. Put 1 into your hand and put the
+    rest on the bottom of the deck.
+
+- id: ritual_acceleration
+  name: Ritual Acceleration
+  spell_type: instant
+  target_type: none
+  image: ritual_acceleation.png
+  effects:
+    - type: ritual_progress_boost
+      params:
+        trigger: instant_spell
+        amount: 2
+  description: >
+    Advance your Ritual progress by 2 — the SEALED to FORETOLD threshold
+    can be reached sooner.
+
+- id: illusory_doubles
+  name: Illusory Doubles
+  spell_type: persistent
+  target_type: piece
+  effects:
+    - type: spawn_piece
+      params:
+        target_owner: self
+        copy_of_target: true
+        placement: adjacent
+        count: 1
+        duration_turns: 2
+        cannot_capture: true
+        label: illusion
+  description: >
+    Summon an illusion copy of an allied unit in an adjacent empty square.
+    Illusions cannot capture and fall to the first hostile action that
+    reaches them. Lasts 2 turns.

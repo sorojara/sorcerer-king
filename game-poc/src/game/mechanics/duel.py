@@ -533,6 +533,12 @@ def _gather_piece_support(
         amount = _VESSEL_AMOUNT.get(unit.piece.piece_type, 1) - _marked_penalty(unit)
         if amount <= 0:
             continue
+        # rally_the_kingdom's royal_support_bonus — "allied units that
+        # ALREADY qualify as Royal Support count as one additional level".
+        # Applied after the qualification checks above (range, marked
+        # penalty) precisely so it can only ever amplify existing support,
+        # never create it, and never widen ``radius``.
+        amount += state.get_player(owner).royal_support_bonus_amount
         items.append(DuelSupportItem(
             item_id=next_id(), owner=owner, source="piece", ability=ability, amount=amount,
             label=f"{_ABILITY_LABELS[ability]} ({unit.piece.id})",

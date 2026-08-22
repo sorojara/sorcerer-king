@@ -12,6 +12,7 @@ All actions carry a ``player_id`` so the engine can validate turn ownership.
 
 v0.1 action set (locked for Stage 0):
     MovePiece           — chess move
+    AttackBuilding      — besiege a COMPLETE enemy Building (Stage 13)
     SummonMonster       — transform a Vessel piece into a Monster unit
     ActivateSpell       — play a Spell card (with optional target)
     PlaceTrap           — place a Trap card on the board
@@ -67,6 +68,35 @@ class MovePiece(Action):
     Triggers check detection, possible Trap RadiusEntered events,
     and possibly a PROMOTION_SELECTION PendingDecision if a Pawn
     reaches the back rank.
+    """
+
+    source: Position
+    target: Position
+
+
+@dataclass
+class AttackBuilding(Action):
+    """
+    Stage 13 — besiege a COMPLETE enemy Building (README §11 "Buildings ...
+    do not normally capture" — being *attacked* is the exception this
+    action introduces).
+
+    Valid only during Phase.CHESS, and it CONSUMES the chess move exactly
+    like MovePiece. The attacking unit at ``source`` does NOT relocate:
+    a siege is a bombardment, not an occupation, so the Building's square
+    stays impassable until the structure actually falls.
+
+    ``target`` must hold a COMPLETE Building owned by the opponent, on a
+    square with no unit standing on it, reachable by the attacker's normal
+    movement pattern (the Building itself is what blocks the landing).
+
+    Only these units may attack a Building
+    (mechanics.buildings.can_attack_building):
+        • a Ritual Monster (MonsterCard.ritual_only) — the headline rule;
+        • a Monster whose card carries ``building_damage_bonus``
+          (obsidian_dragon, sovereign_of_embers);
+        • ANY unit, if the Building is currently marked by a Spell's
+          ``building_vulnerability`` (siege_order).
     """
 
     source: Position
@@ -385,6 +415,7 @@ class FinalDuelAction(Action):
 # All action types valid in Stage 0 normal play.
 STAGE0_ACTIONS = (
     MovePiece,
+    AttackBuilding,
     SummonMonster,
     ActivateSpell,
     PlaceTrap,

@@ -193,15 +193,17 @@ class CaptureBlocked(Event):
 @dataclass(frozen=True)
 class PiecePushed(Event):
     """
-    A ``push_unit`` monster effect pushed a piece instead of capturing it
-    (storm_dragon).  No ownership change occurs; the pushed piece is
-    relocated to an empty adjacent square.
+    A ``push_unit`` effect pushed a piece instead of capturing it
+    (storm_dragon), or shoved an intruder back out of a Trap's radius
+    (repulsion_field).  No ownership change occurs; the pushed piece is
+    relocated to an empty adjacent square.  ``pushed_by_piece_id`` is None
+    for the Trap variant — no unit did the shoving.
     """
     piece_id: str
     owner: str
     source: Position
     target: Position
-    pushed_by_piece_id: str
+    pushed_by_piece_id: str | None
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,51 @@ class Retaliated(Event):
     was captured (thorn_boar).  Both pieces end up destroyed.
     """
     defender_piece_id: str
+    attacker_piece_id: str
+    position: Position
+
+
+@dataclass(frozen=True)
+class PieceSpawned(Event):
+    """
+    A ``spawn_piece`` effect put a brand-new piece on the board —
+    bone_marauder's Skeleton Pawn or an illusory_doubles copy.  ``label``
+    is the token's provenance tag ("skeleton", "illusion").
+    """
+    player_id: str
+    piece_id: str
+    piece_type: str
+    position: Position
+    label: str
+
+
+@dataclass(frozen=True)
+class PieceExpired(Event):
+    """A spawned token's ``expires:N`` counter ran out and it left the board."""
+    player_id: str
+    piece_id: str
+    position: Position
+
+
+@dataclass(frozen=True)
+class CardBanished(Event):
+    """
+    erase_memory removed a card from a deck permanently.  ``player_id`` is
+    whose deck lost it — the card id is deliberately NOT surfaced to that
+    player anywhere ("they cannot look at it").
+    """
+    player_id: str
+    card_id: str
+
+
+@dataclass(frozen=True)
+class AttackIntercepted(Event):
+    """
+    An ``intercept`` escort (royal_guard) absorbed an assault aimed at the
+    King it was standing next to.  The escort is destroyed, the King is
+    untouched, and no Final Duel is triggered.
+    """
+    interceptor_piece_id: str
     attacker_piece_id: str
     position: Position
 
@@ -470,6 +517,64 @@ class BuildingDestroyed(Event):
     building_instance_id: str
     position: Position
     destroyed_by: str | None = None  # piece_id or None
+
+
+@dataclass(frozen=True)
+class BuildingAttacked(Event):
+    """
+    Stage 13 — a unit spent its chess move besieging a COMPLETE enemy
+    Building (AttackBuilding) and the blow landed. ``integrity_remaining``
+    is the Building's own pool AFTER the hit, excluding any
+    ``building_aura`` durability still shielding it.
+    """
+    building_instance_id: str
+    position: Position
+    attacker_piece_id: str | None
+    damage: int
+    integrity_remaining: int
+
+
+@dataclass(frozen=True)
+class BuildingAttackBlocked(Event):
+    """
+    Stage 13 — a hostile action against a Building was absorbed rather
+    than applied. ``reason`` is one of:
+        "building_capture_protection" — castle_keeper's nearby aura
+        "temporary_building_protection" — emergency_fortifications
+        "building_aura" — siege_captain / titan_of_the_foundation durability
+    """
+    building_instance_id: str
+    position: Position
+    attacker_piece_id: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class BuildingRepaired(Event):
+    """royal_engineer / worldforge_colossus' ``repair_building``."""
+    building_instance_id: str
+    position: Position
+    amount: int
+    integrity: int
+    repaired_by_piece_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BuildingVulnerable(Event):
+    """siege_order's ``building_vulnerability`` — marked for destruction."""
+    building_instance_id: str
+    position: Position
+    duration_turns: int
+    extra_damage: int
+
+
+@dataclass(frozen=True)
+class BuildingProtected(Event):
+    """emergency_fortifications' ``temporary_building_protection``."""
+    building_instance_id: str
+    position: Position
+    uses: int
+    duration_turns: int
 
 
 @dataclass(frozen=True)

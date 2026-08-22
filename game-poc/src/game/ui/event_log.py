@@ -94,6 +94,14 @@ def format_event(event: "ev.Event", registry: "object | None" = None) -> str:
         return f"{event.owner}'s piece pushed {_pos(event.source)} → {_pos(event.target)}"
     if isinstance(event, ev.Retaliated):
         return f"Retaliation at {_pos(event.position)} destroyed both pieces"
+    if isinstance(event, ev.AttackIntercepted):
+        return f"Assault on the King intercepted at {_pos(event.position)}"
+    if isinstance(event, ev.PieceSpawned):
+        return f"{event.player_id} spawned a {event.label} at {_pos(event.position)}"
+    if isinstance(event, ev.PieceExpired):
+        return f"{event.player_id}'s token faded at {_pos(event.position)}"
+    if isinstance(event, ev.CardBanished):
+        return f"A card was banished from {event.player_id}'s deck"
 
     if isinstance(event, ev.MonsterSummoned):
         return f"{event.player_id} summoned {name(event.card_id)} at {_pos(event.position)}"
@@ -148,6 +156,33 @@ def format_event(event: "ev.Event", registry: "object | None" = None) -> str:
         return f"{event.player_id}'s {name(event.building_card_id)} finished construction"
     if isinstance(event, ev.BuildingDestroyed):
         return f"A building at {_pos(event.position)} was destroyed"
+    if isinstance(event, ev.BuildingAttacked):
+        return (
+            f"Building at {_pos(event.position)} took {event.damage} damage "
+            f"({event.integrity_remaining} integrity left)"
+        )
+    if isinstance(event, ev.BuildingAttackBlocked):
+        reason = {
+            "building_capture_protection": "a Keeper's ward",
+            "temporary_building_protection": "emergency fortifications",
+            "building_aura": "reinforced walls",
+        }.get(event.reason, event.reason)
+        return f"Attack on the building at {_pos(event.position)} was absorbed by {reason}"
+    if isinstance(event, ev.BuildingRepaired):
+        return (
+            f"Building at {_pos(event.position)} repaired +{event.amount} "
+            f"(now {event.integrity})"
+        )
+    if isinstance(event, ev.BuildingVulnerable):
+        return (
+            f"Building at {_pos(event.position)} marked for destruction "
+            f"for {event.duration_turns} turn(s)"
+        )
+    if isinstance(event, ev.BuildingProtected):
+        return (
+            f"Building at {_pos(event.position)} fortified — absorbs "
+            f"{event.uses} destroying blow(s) for {event.duration_turns} turn(s)"
+        )
 
     if isinstance(event, ev.SquareFrozen):
         return f"Square {_pos(event.position)} frozen for {event.duration_turns} turn(s)"

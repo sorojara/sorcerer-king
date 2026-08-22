@@ -254,6 +254,9 @@ def _building_to_d(b: BuildingInstance) -> dict:
         "position": _pos_to_d(b.position), "status": b.status.value,
         "builder_piece_id": b.builder_piece_id, "remaining_turns": b.remaining_turns,
         "disabled_turns": b.disabled_turns,
+        "max_integrity": b.max_integrity, "integrity": b.integrity,
+        "protection_uses": b.protection_uses, "protection_turns": b.protection_turns,
+        "vulnerable_turns": b.vulnerable_turns, "vulnerable_amount": b.vulnerable_amount,
     }
 
 def _building_from_d(d: dict) -> BuildingInstance:
@@ -262,6 +265,15 @@ def _building_from_d(d: dict) -> BuildingInstance:
         position=_pos_from_d(d["position"]), status=ConstructionStatus(d["status"]),
         builder_piece_id=d.get("builder_piece_id"), remaining_turns=d.get("remaining_turns", 0),
         disabled_turns=d.get("disabled_turns", 0),
+        # Pre-Stage-13 saves have no integrity fields; default a standing
+        # Building to full health rather than to the dataclass default of 1,
+        # so loading an old save doesn't silently leave a Fortress on one hit.
+        max_integrity=d.get("max_integrity", 1),
+        integrity=d.get("integrity", d.get("max_integrity", 1)),
+        protection_uses=d.get("protection_uses", 0),
+        protection_turns=d.get("protection_turns", 0),
+        vulnerable_turns=d.get("vulnerable_turns", 0),
+        vulnerable_amount=d.get("vulnerable_amount", 1),
     )
 
 def _duel_to_d(ds: DuelState) -> dict:
@@ -329,6 +341,7 @@ def export_state(game: Game, path: str | Path) -> None:
         "phase": state.phase.value,
         "winner": state.winner,
         "rng_seed": state.rng_seed,
+        "trap_seq": state.trap_seq,
         "rng_state": _rng_state_to_json(rng.save_state()),
         "en_passant_target": _pos_or_none_to_d(state.en_passant_target),
         "board": _board_to_d(state.board),
@@ -384,7 +397,18 @@ def import_state(path: str | Path, registry: "Any | None" = None) -> Game:
         winner=doc.get("winner"),
         en_passant_target=_pos_or_none_from_d(doc.get("en_passant_target")),
         rng_seed=doc.get("rng_seed", 0),
+        # Fall back to the Trap count for saves written before trap_seq
+        # existed — the worst case there is the same collision the counter
+        # was added to prevent, which is exactly the old behaviour.
+        trap_seq=doc.get("trap_seq", len(doc.get("traps", []))),
     )
+
+    # Stage 13: SquareState.complete_building_owner is a denormalised view
+    # of state.buildings (chess/movement.py reads it to treat a finished
+    # enemy Building as a wall). _board_from_d doesn't carry it, so rebuild
+    # it from the authoritative list right after both are loaded.
+    from game.mechanics.buildings import refresh_building_blocks
+    refresh_building_blocks(state)
 
     rng = DeterministicRNG(seed=doc.get("rng_seed", 0))
     rng.load_state(_rng_state_from_json(doc["rng_state"]))

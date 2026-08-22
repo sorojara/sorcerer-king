@@ -870,3 +870,114 @@
   duel_ability: spectral_command
   description: >
     Once per turn, draw a card when another allied Monster is destroyed.
+- id: bane_of_structures
+  name: Bane of Structures
+  archetype: warrior
+  supported_vessels:
+    - rook
+    - knight
+  effects:
+    - type: building_damage_bonus
+      params:
+        amount: 1
+  duel_ability: wall_breaker
+  description: >
+    A veteran sapper who reads a wall for its weakest course. May besiege
+    enemy Buildings without any Ritual, and every blow it lands counts
+    double. Slower than a dragon's fire, but it never misses twice.
+
+- id: molten_colossus
+  name: Molten Colossus
+  archetype: dragon
+  supported_vessels:
+    - rook
+  effects:
+    - type: building_damage_bonus
+      params:
+        amount: 2
+    - type: capture_protection
+      params:
+        uses: 1
+  duel_ability: magma_surge
+  description: >
+    A walking furnace. Each blow it lands on a Building strikes three times
+    over, enough to level most structures in a single assault, and it
+    shrugs off the first capture attempt made to stop it. Confined to a
+    Rook Vessel — it advances in straight lines and cannot be hurried.
+
+- id: void_stalker
+  name: Void Stalker
+  archetype: beast
+  supported_vessels:
+    - knight
+    - bishop
+  effects:
+    - type: pass_through_units
+      params:
+        max_units: 1
+        destination_must_be_empty: true
+    - type: ignore_terrain
+      params:
+        buildings: true
+        traps: false
+        units: false
+  duel_ability: shadow_escape
+  description: >
+    Can move through enemy territories and over units. It slips past one
+    occupied square on its way and slides straight through a finished
+    enemy Building rather than being stopped by it — though it still
+    cannot come to rest inside one.
+
+- id: spirit_hunter
+  name: Spirit Hunter
+  archetype: warrior
+  supported_vessels:
+    - bishop
+    - pawn
+  effects:
+    - type: draw_card
+      params:
+        trigger: enemy_summon_nearby
+        radius: 2
+        count: 1
+  duel_ability: predator_instinct
+  description: >
+    When an enemy monster is summoned nearby, draw 1 card. The Hunter
+    reads the shape of a summoning before it finishes and is already
+    moving by the time the thing arrives.
+
+- id: bone_marauder
+  name: Bone Marauder
+  archetype: warrior
+  supported_vessels:
+    - pawn
+    - rook
+  effects:
+    - type: spawn_piece
+      params:
+        trigger: on_destroyed
+        piece_type: pawn
+        placement: adjacent
+        label: skeleton
+        count: 1
+  duel_ability: bone_wall
+  description: >
+    When this is destroyed, summon a Skeleton Pawn on an adjacent square.
+    What falls apart does not stop fighting; it simply fights with fewer
+    pieces of itself.
+
+- id: celestial_oracle
+  name: Celestial Oracle
+  archetype: spellcaster
+  supported_vessels:
+    - bishop
+    - queen
+  effects:
+    - type: inspect_top_deck
+      params:
+        count: 1
+        trigger: once_per_turn
+  duel_ability: celestial_foreknowledge
+  description: >
+    Once per turn, look at the top card of your deck. Knowing what comes
+    next is rarely decisive on its own — but it is never nothing.

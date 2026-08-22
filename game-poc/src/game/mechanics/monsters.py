@@ -139,8 +139,19 @@ def apply_on_summon_effects(
         # "capture_attempt" is included here because retaliate (thorn_boar)
         # is a passive defensive flag — it must be armed at summon time even
         # though it only *resolves* later, when a capture is attempted
-        # against this unit.
-        if trigger not in ("on_summon", "passive", "", "capture_attempt"):
+        # against this unit. "adjacent_king_targeted" (royal_guard's
+        # intercept) is the same shape: a charge banked on summon, spent
+        # only when an assault on the King it escorts actually arrives.
+        # "when_sacrificed" (blood_seer's sacrifice_bonus) joins them for the
+        # same reason: the handler only banks a status that
+        # mechanics.rituals.execute_ritual() reads when the unit is later
+        # spent as Ritual material. There is no other moment at which to
+        # arm it — by the time the sacrifice happens the unit is being
+        # removed, not summoned.
+        if trigger not in (
+            "on_summon", "passive", "", "capture_attempt",
+            "adjacent_king_targeted", "when_sacrificed",
+        ):
             _log.debug("SUMMON   skip effect %r (trigger=%r)", effect.type, trigger)
             continue
 
@@ -515,6 +526,52 @@ def find_cancel_capture_trap(
 # Summoning prohibition (sanctuary spell, vessel_lock trap)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def find_interceptor(
+    state: "GameState",
+    king_pos: Position,
+    king_owner: str,
+) -> "tuple[Position, UnitInstance] | None":
+    """
+    royal_guard's ``intercept`` — "can intercept one attack targeting an
+    adjacent King".
+
+    Returns the first allied unit adjacent to ``king_pos`` that still
+    carries an unspent ``intercept:N`` charge, or None. The caller
+    (RulesEngine._execute_move_piece) redirects the assault onto it: the
+    escort dies, the King survives, and no Final Duel is triggered.
+
+    The charge is NOT spent here — ``consume_intercept()`` does that, so a
+    caller that decides not to redirect after all (e.g. no room to resolve
+    the redirect) leaves the escort's charge intact.
+    """
+    for df in (-1, 0, 1):
+        for dr in (-1, 0, 1):
+            if df == 0 and dr == 0:
+                continue
+            nf, nr = king_pos.file + df, king_pos.rank + dr
+            if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                continue
+            cand_pos = Position(nf, nr)
+            unit = state.board.get_unit(cand_pos)
+            if unit is None or unit.owner != king_owner:
+                continue
+            if is_effects_suppressed(unit):
+                continue
+            for status in unit.statuses:
+                if status.startswith("intercept:") and int(status.split(":")[1]) > 0:
+                    return cand_pos, unit
+    return None
+
+
+def consume_intercept(unit: UnitInstance) -> None:
+    """Spend one ``intercept:N`` charge on ``unit`` (see find_interceptor)."""
+    for idx, status in enumerate(unit.statuses):
+        if status.startswith("intercept:"):
+            charges = int(status.split(":")[1])
+            unit.statuses[idx] = f"intercept:{max(0, charges - 1)}"
+            return
+
+
 def is_summoning_prohibited(board, pos: Position, player_id: str) -> bool:
     """
     True if ``pos`` carries a ``no_summon:`` tag that applies to
@@ -720,6 +777,11 @@ def try_push_unit(
         push_dest = Position(push_f, push_r)
         if state.board.get_unit(push_dest) is not None:
             continue  # blocked — fall back to a normal capture
+        # Stage 13: a COMPLETE Building the DEFENDER may not enter is a wall
+        # for this shove too — fall back to a normal capture.
+        from game.chess.movement import blocks_movement
+        if blocks_movement(state.board, push_dest, defender.owner):
+            continue
 
         state.board.move_unit(target_pos, push_dest)
         events.append(PiecePushed(
@@ -965,6 +1027,58 @@ def check_summon_traps(
         _fire_trap(state, trap, summoned_unit, summon_pos, "summon", events, registry, rng=rng)
 
 
+def check_summon_reactions(
+    state: "GameState",
+    summoned_unit: UnitInstance,
+    summon_pos: Position,
+    events: "list[Event]",
+    registry: "object | None",
+    rng: "DeterministicRNG | None" = None,
+) -> None:
+    """
+    spirit_hunter — "When an enemy monster is summoned nearby, draw 1 card."
+
+    The Monster-borne counterpart to check_summon_traps() above: that one
+    scans ``state.traps`` for a SUMMON-trigger Trap, this one scans the
+    BOARD for an enemy Monster carrying a ``draw_card`` effect whose
+    trigger is ``enemy_summon_nearby``. Same call site
+    (RulesEngine._execute_summon_monster, right after the Monster lands),
+    same "the summon itself is never prevented" contract.
+
+    ``ctx.extra["owner_override"]`` hands _draw_card the REACTING player,
+    since ctx.unit there is the reactor rather than a triggering enemy.
+    """
+    from game.cards.card import MonsterCard
+    from game.mechanics.area import in_area
+
+    if registry is None:
+        return
+
+    watcher_owner = state.opponent_of(summoned_unit.owner)
+    for pos, unit in state.board.all_units_for(watcher_owner):
+        if unit.monster_id is None:
+            continue
+        if is_effects_suppressed(unit):
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard):
+            continue
+        for effect in card.effects:
+            if effect.params.get("trigger") != "enemy_summon_nearby":
+                continue
+            if not in_area(summon_pos, pos, effect.params.get("radius", 1)):
+                continue
+            ctx = _make_ctx(
+                state, unit, pos, card, effect, events, rng=rng, registry=registry,
+                trigger="enemy_summon_nearby",
+                extra={"owner_override": unit.owner},
+            )
+            resolve_effect(ctx)
+
+
 def check_capture_traps(
     state: "GameState",
     capturing_unit: UnitInstance,
@@ -1001,3 +1115,139 @@ def check_capture_traps(
         if not in_area(position, trap.position, radius, card.shape):
             continue
         _fire_trap(state, trap, capturing_unit, position, "capture", events, registry, rng=rng)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 13 — start-of-turn Monster auras
+#
+# A handful of Ritual Monsters carry effects that were originally written as
+# King POLICIES (bannerlord_eternal's formation_support, ossuary_king's
+# graveyard_threshold_bonus). A policy is re-evaluated every turn — the
+# Graveyard grows, formations shift — so these can't be armed once at summon
+# time the way a flat passive can. This mirror of
+# mechanics.kings.apply_king_policy_auras() gives the Monster-borne versions
+# the same refresh, from the same call site (core/game.py _auto_start_turn).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_monster_auras(state: "GameState", player_id: str, registry: "object | None") -> None:
+    """
+    Refresh the policy-shaped effects carried by ``player_id``'s own
+    summoned Monsters. Idempotent — a unit that already holds the granted
+    status is left alone, exactly like the King and Building aura passes.
+    """
+    if registry is None:
+        return
+    from game.cards.card import MonsterCard
+
+    for pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None or is_effects_suppressed(unit):
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard):
+            continue
+        for effect in card.effects:
+            if effect.type == "formation_support":
+                _apply_monster_formation_support(state, player_id, pos, effect, registry)
+            elif effect.type == "graveyard_threshold_bonus":
+                _apply_monster_graveyard_threshold(state, player_id, effect, registry)
+
+
+def _apply_monster_formation_support(
+    state: "GameState", player_id: str, source_pos: Position, effect, registry: "object",
+) -> None:
+    """
+    IMPLEMENTED — bannerlord_eternal: "Warriors fighting near the
+    Bannerlord gain protection."
+
+    Differs from marshal_king's kingdom-wide ``formation_support`` policy
+    in exactly one way, and it's the way the card text differs too: this
+    one is anchored to the Bannerlord's own square and only reaches
+    ``radius`` from it. The grant itself — a ``shield:N`` charge on allied
+    Monsters of ``archetype`` — is identical, so it reuses the same status
+    and therefore the same capture-protection machinery.
+    """
+    from game.cards.card import MonsterCard
+    from game.mechanics.area import in_area
+
+    params = effect.params
+    archetype = params.get("archetype")
+    radius = params.get("radius", 1)
+    bonus = params.get("capture_protection_bonus", 1)
+
+    for pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None or pos == source_pos:
+            continue
+        if not in_area(pos, source_pos, radius):
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard) or (archetype and card.archetype != archetype):
+            continue
+        if not any(s.startswith("shield:") for s in unit.statuses):
+            unit.add_status(f"shield:{bonus}")
+
+
+def _apply_monster_graveyard_threshold(
+    state: "GameState", player_id: str, effect, registry: "object",
+) -> None:
+    """
+    IMPLEMENTED — ossuary_king's ``graveyard_threshold_bonus``. Identical
+    in shape to grave_crowned_king's King-policy version
+    (mechanics.kings._apply_graveyard_threshold_bonus): once the owner's
+    Graveyard reaches ``threshold``, every allied Monster of
+    ``target_archetype`` carries a capture-protection charge.
+    """
+    from game.cards.card import MonsterCard
+
+    params = effect.params
+    ps = state.get_player(player_id)
+    if len(ps.graveyard) < params.get("threshold", 5):
+        return
+    archetype = params.get("target_archetype")
+    bonus = params.get("bonus", {}).get("capture_protection_uses", 1)
+
+    for _pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None:
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if not isinstance(card, MonsterCard) or (archetype and card.archetype != archetype):
+            continue
+        if not any(s.startswith("shield:") for s in unit.statuses):
+            unit.add_status(f"shield:{bonus}")
+
+
+def has_monster_graveyard_recycle(
+    state: "GameState", player_id: str, registry: "object | None",
+) -> bool:
+    """
+    IMPLEMENTED — ossuary_king's ``graveyard_recycle``. Reports whether
+    ``player_id`` has a summoned Monster carrying the effect, so
+    mechanics.kings.maybe_recycle_destroyed_monster() can treat it as an
+    additional source alongside grave_crowned_king's King policy — same
+    once-per-turn cap, same bottom-of-deck destination, one shared latch
+    (a player running both doesn't recycle twice).
+    """
+    if registry is None:
+        return False
+    from game.cards.card import MonsterCard
+
+    for _pos, unit in state.board.all_units_for(player_id):
+        if unit.monster_id is None or is_effects_suppressed(unit):
+            continue
+        try:
+            card = registry.get(unit.monster_id)
+        except KeyError:
+            continue
+        if isinstance(card, MonsterCard) and any(
+            e.type == "graveyard_recycle" for e in card.effects
+        ):
+            return True
+    return False

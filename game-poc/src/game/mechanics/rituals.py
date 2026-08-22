@@ -153,24 +153,51 @@ def _effective_pattern_nodes(ritual: "RitualCard", rstate: "RitualState") -> lis
 
 def _ritual_range_bonus(state: "GameState", player_id: str, registry: "object | None") -> int:
     """
-    herald_of_the_gate's ``ritual_activation_range`` — sum of
-    ``radius_bonus`` from every owned Monster carrying this effect (any
-    that has been summoned — not scoped to proximity to the formation
-    itself, matching circle_keeper's ritual_pattern_substitute's own
-    "keeps it scoped to this unit, wherever it stands" simplification).
-    Used by the Formation Ritual matcher below to accept a candidate
-    within Chebyshev distance <= this bonus of a pattern node's exact
-    offset, instead of requiring an exact match.
+    How much slack the Formation Ritual matcher gives a pattern node: a
+    candidate within Chebyshev distance <= this bonus of a node's exact
+    offset is accepted instead of requiring the exact square.
+
+    Two sources add into it:
+
+    • herald_of_the_gate's ``ritual_activation_range`` — sum of
+      ``radius_bonus`` from every owned Monster carrying this effect (any
+      that has been summoned — not scoped to proximity to the formation
+      itself, matching circle_keeper's ritual_pattern_substitute's own
+      "keeps it scoped to this unit, wherever it stands" simplification).
+
+    • Stage 13 — Shrine's ``ritual_support`` (README §12.4: "Ritual
+      support / Ritual radius"). Every COMPLETE, non-disabled Shrine the
+      player owns loosens the formation by ``bonus`` (default 1). Kept
+      global, matching the herald simplification directly above rather
+      than inventing a proximity test the herald doesn't use either — the
+      Shrine's own Territory/spell reach is where its *positional* value
+      already lives.
     """
     if registry is None:
         return 0
-    from game.cards.card import MonsterCard
+    from game.cards.card import BuildingCard
 
     bonus = 0
     for _pos, unit in state.board.all_units_for(player_id):
         for status in unit.statuses:
             if status.startswith("ritual_range_bonus:"):
                 bonus += int(status.split(":")[1])
+
+    from game.core.phases import ConstructionStatus
+    for b in state.buildings:
+        if b.owner != player_id or b.status != ConstructionStatus.COMPLETE:
+            continue
+        if b.disabled_turns > 0:
+            continue  # saboteur's disable_building — support suspended
+        try:
+            card = registry.get(b.building_card_id)
+        except KeyError:
+            continue
+        if not isinstance(card, BuildingCard):
+            continue
+        for effect in card.effects:
+            if effect.type == "ritual_support":
+                bonus += effect.params.get("bonus", 1)
     return bonus
 
 
@@ -869,6 +896,46 @@ def reveal_random_sealed(
     return chosen.ritual_id
 
 
+def apply_ritual_progress(
+    state: "GameState",
+    owner: str,
+    amount: int,
+    events: "list[Event]",
+    registry: "object | None",
+) -> bool:
+    """
+    Add ``amount`` revelation progress to ``owner``'s FIRST not-yet-REVEALED
+    Ritual (pool order), promoting it a revelation step each time the
+    accumulated progress reaches the RitualCard's
+    ``reveal_progress_threshold`` — a single large boost can promote more
+    than once. Returns True if any progress landed.
+
+    Shared by the two things that generate progress: the end-of-turn
+    ``ritual_progress_boost`` board scan below (ritual_acolyte,
+    high_hierophant_of_the_circle) and ritual_acceleration, the Spell that
+    grants a lump sum on cast.
+    """
+    if amount <= 0 or registry is None:
+        return False
+    ps = state.get_player(owner)
+    target = next(
+        (rs for rs in ps.ritual_pool if rs.revelation != RevelationState.REVEALED), None
+    )
+    if target is None:
+        return False
+    try:
+        ritual = registry.get(target.ritual_id)
+    except KeyError:
+        return False
+
+    target.progress += amount
+    threshold = getattr(ritual, "reveal_progress_threshold", 3) or 3
+    while target.progress >= threshold and target.revelation != RevelationState.REVEALED:
+        target.progress -= threshold
+        promote_one_step(state, owner, target.ritual_id, events)
+    return True
+
+
 def advance_ritual_progress(state: "GameState", ending_player: str, events: "list[Event]", registry: "object | None") -> None:
     """
     Stage 11 — end-of-turn ``ritual_progress_boost`` processing
@@ -918,11 +985,7 @@ def advance_ritual_progress(state: "GameState", ending_player: str, events: "lis
     if total_amount <= 0:
         return
 
-    target.progress += total_amount
-    threshold = getattr(ritual, "reveal_progress_threshold", 3) or 3
-    while target.progress >= threshold and target.revelation != RevelationState.REVEALED:
-        target.progress -= threshold
-        promote_one_step(state, ending_player, target.ritual_id, events)
+    apply_ritual_progress(state, ending_player, total_amount, events, registry)
 
     # omen_bell: an enemy RITUAL_PROGRESS Trap covering the booster's
     # square forces ONE of the advancing player's SEALED Rituals to
@@ -1005,6 +1068,13 @@ def advance_ritual_reveal_tradeoff(
             )
             if target is None or not promote_one_step(state, ending_player, target.ritual_id, events):
                 continue
+
+            # arcane_sovereign's ritual_information_discount — the owner
+            # chose to run this Oracle, so this counts as voluntary.
+            from game.mechanics.kings import maybe_ritual_information_discount
+            maybe_ritual_information_discount(
+                state, ending_player, target.revelation, events, registry, rng=rng,
+            )
 
             count = effect.params.get("draw_cards", 1)
             for _ in range(count):

@@ -10,8 +10,10 @@ ritual_progress_boost           IMPLEMENTED (unit-level flag; Stage 11's
 ritual_pattern_substitute       IMPLEMENTED — Stage 11 — generic ritual
                                  component (mechanics/rituals.py's pattern
                                  matcher reads the status this arms)
-ritual_requirement_reduction    IMPLEMENTED — Stage 11 — reduce a chosen
-                                 Ritual's requirement by 1, once
+ritual_requirement_reduction    IMPLEMENTED — reduce a Ritual's requirement
+                                 by 1, once: as forbidden_priest's activated
+                                 ability, or outright on cast as
+                                 hasten_the_ritual (Spell, no unit)
 ritual_reveal_tradeoff          IMPLEMENTED — Stage 11 — reveal own ritual
                                  to draw
 reveal_ritual                   IMPLEMENTED — two usages sharing one type:
@@ -71,13 +73,31 @@ def _ritual_progress_boost(ctx: "EffectContext") -> None:
     progress accounting happens (mechanics.rituals.advance_ritual_progress,
     called every end-of-turn, not through this handler).
     """
+    params = ctx.effect.params
+    trigger = params.get("trigger", "end_of_turn")
+    amount = params.get("amount", 1)
+
+    # ritual_acceleration (Spell, target_type "none") — there is no unit to
+    # hang a per-turn boost on and no later moment to collect it, so the
+    # progress is applied on cast, through the same accounting
+    # advance_ritual_progress uses at end of turn (threshold promotions
+    # included).
+    if trigger == "instant_spell":
+        if ctx.state is None:
+            return
+        owner = (ctx.extra or {}).get("caster_owner")
+        if owner is None:
+            return
+        from game.mechanics.rituals import apply_ritual_progress
+
+        apply_ritual_progress(ctx.state, owner, amount, ctx.events, ctx.registry)
+        return
+
     if ctx.unit is None:
         return
-    trigger = ctx.effect.params.get("trigger", "end_of_turn")
     if trigger not in ("end_of_turn", "on_summon", "passive", ""):
         return
 
-    amount = ctx.effect.params.get("amount", 1)
     ctx.unit.statuses = [s for s in ctx.unit.statuses if not s.startswith("ritual_boost:")]
     ctx.unit.add_status(f"ritual_boost:{amount}")
 
@@ -127,7 +147,40 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
                    _effective_pattern_nodes for how each condition type
                    spends it.
     """
+    from game.core.phases import RevelationState
+    from game.core.events import RitualRevelationChanged
+    from game.mechanics.rituals import get_ritual_state
+
+    if ctx.state is None:
+        return
+
+    # ── hasten_the_ritual (Spell, target_type "none" — ctx.unit is None) ──
+    # "Fully reveal one of your Rituals. For its next activation attempt,
+    # one generic requirement is ignored." Same two effects as the Monster
+    # branch below (force REVEALED + bank a requirement_reduction), but with
+    # no unit to carry a charge: the Spell IS the charge, spent on cast.
+    # Targets the caster's own first not-yet-REVEALED Ritual in pool order,
+    # the same "the choice rarely matters" simplification used throughout
+    # this module.
     if ctx.unit is None:
+        owner = (ctx.extra or {}).get("caster_owner")
+        if owner is None:
+            return
+        ps = ctx.state.get_player(owner)
+        rstate = next(
+            (rs for rs in ps.ritual_pool
+             if not rs.activated and rs.revelation != RevelationState.REVEALED),
+            None,
+        )
+        if rstate is None:
+            return
+        rstate.requirement_reduction += ctx.effect.params.get("amount", 1)
+        previous = rstate.revelation
+        rstate.revelation = RevelationState.REVEALED
+        ctx.events.append(RitualRevelationChanged(
+            player_id=owner, ritual_id=rstate.ritual_id,
+            old_state=previous, new_state=RevelationState.REVEALED,
+        ))
         return
 
     if ctx.trigger != "activated":
@@ -137,12 +190,8 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
     if "req_reduction:available" not in ctx.unit.statuses:
         return
     ritual_id = (ctx.extra or {}).get("target")
-    if not ritual_id or ctx.state is None:
+    if not ritual_id:
         return
-
-    from game.core.phases import RevelationState
-    from game.core.events import RitualRevelationChanged
-    from game.mechanics.rituals import get_ritual_state
 
     rstate = get_ritual_state(ctx.state, ctx.unit.owner, ritual_id)
     if rstate is None or rstate.activated or rstate.revelation == RevelationState.REVEALED:
@@ -152,11 +201,11 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
     amount = ctx.effect.params.get("amount", 1)
     rstate.requirement_reduction += amount
 
-    old = rstate.revelation
+    previous = rstate.revelation
     rstate.revelation = RevelationState.REVEALED
     ctx.events.append(RitualRevelationChanged(
         player_id=ctx.unit.owner, ritual_id=ritual_id,
-        old_state=old, new_state=RevelationState.REVEALED,
+        old_state=previous, new_state=RevelationState.REVEALED,
     ))
 
 
@@ -184,7 +233,17 @@ def _ritual_reveal_tradeoff(ctx: "EffectContext") -> None:
         return
     params = ctx.effect.params
     trigger = params.get("trigger", "on_summon")
-    if trigger not in ("on_summon", "passive", ""):
+    # omen_reader fires the moment it lands ("On summon, you may reveal
+    # one SEALED Ritual to draw one card"). oracle_of_the_last_star's copy
+    # is ``once_per_turn`` instead — an ACTIVATED ability, reachable via
+    # ActivateMonsterAbility (ritual_reveal_tradeoff is already in
+    # ACTIVATED_EFFECT_TYPES) — so it must accept a dispatch that arrives
+    # with ctx.trigger == "activated" rather than rejecting its own
+    # declared trigger and doing nothing at all.
+    if trigger in ("once_per_turn", "activated"):
+        if ctx.trigger != "activated":
+            return
+    elif trigger not in ("on_summon", "passive", ""):
         return
 
     from game.core.phases import RevelationState
@@ -197,6 +256,14 @@ def _ritual_reveal_tradeoff(ctx: "EffectContext") -> None:
         return
     if not promote_one_step(ctx.state, owner, target.ritual_id, ctx.events):
         return
+
+    # arcane_sovereign's ritual_information_discount — a VOLUNTARY reveal,
+    # so the King policy's once-per-match rebate applies (see
+    # mechanics.kings.maybe_ritual_information_discount).
+    from game.mechanics.kings import maybe_ritual_information_discount
+    maybe_ritual_information_discount(
+        ctx.state, owner, target.revelation, ctx.events, ctx.registry, rng=ctx.rng,
+    )
 
     from game.core.events import CardDrawn, DeckRecycled
 
@@ -251,6 +318,11 @@ def _reveal_ritual(ctx: "EffectContext") -> None:
             return
         if not promote_one_step(ctx.state, owner, target.ritual_id, ctx.events):
             return
+        # arcane_sovereign's ritual_information_discount — voluntary reveal.
+        from game.mechanics.kings import maybe_ritual_information_discount
+        maybe_ritual_information_discount(
+            ctx.state, owner, target.revelation, ctx.events, ctx.registry, rng=ctx.rng,
+        )
         if params.get("benefit") == "draw_card":
             from game.core.events import CardDrawn, DeckRecycled
 
@@ -336,7 +408,22 @@ def _interrupt_ritual(ctx: "EffectContext") -> None:
 # Export
 # ---------------------------------------------------------------------------
 
+def _ritual_support(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED (Stage 13) — Shrine (real logic lives elsewhere).
+
+    A Building effect, and Building effects are never dispatched through
+    this registry: mechanics.rituals._ritual_range_bonus() scans
+    state.buildings directly when a Formation Ritual is matched, because
+    the bonus has to be re-evaluated against the pattern being attempted,
+    not banked as a status at some earlier moment. No-op placeholder so
+    the type is recognised and never logged as UNRESOLVED.
+    """
+    pass
+
+
 RITUAL_HANDLERS: dict[str, object] = {
+    "ritual_support":               _ritual_support,
     "ritual_progress_boost":        _ritual_progress_boost,
     "ritual_pattern_substitute":    _ritual_pattern_substitute,
     "ritual_requirement_reduction": _ritual_requirement_reduction,

@@ -163,6 +163,32 @@ class BuildingInstance:
     # the start of the next owner turn").
     disabled_turns: int = 0
 
+    # ── Stage 13: siege / durability (mechanics/buildings.py) ───────────
+    # ``max_integrity`` is BuildingCard.base_integrity, copied here at
+    # construction start so registry-less callers still have a value.
+    # ``integrity`` is the current, damageable pool: every successful
+    # hostile action (AttackBuilding, demolition_charge's building_damage)
+    # removes one point; the Building collapses when it hits 0 with no
+    # siege_captain-style ``building_aura`` durability bonus left to
+    # absorb the blow. royal_engineer's ``repair_building`` heals it back
+    # up to ``max_integrity`` at the owner's end of turn.
+    max_integrity: int = 1
+    integrity: int = 1
+    # emergency_fortifications' ``temporary_building_protection`` — while
+    # ``protection_turns`` > 0, the next ``protection_uses`` blows that
+    # WOULD destroy this Building are absorbed instead (the Building is
+    # left standing at 1 integrity). Both tick on the OWNER's own EndTurn.
+    protection_uses: int = 0
+    protection_turns: int = 0
+    # siege_order's ``building_vulnerability`` — while ``vulnerable_turns``
+    # > 0 this Building takes ``vulnerable_amount`` EXTRA damage per hostile
+    # action AND is open to being attacked by any enemy unit, not only the
+    # Ritual Monsters / building_damage_bonus Monsters that may normally
+    # besiege (README-derived rule, see mechanics/buildings.py
+    # can_attack_building). Ticks on the OWNER's own EndTurn.
+    vulnerable_turns: int = 0
+    vulnerable_amount: int = 1
+
 
 @dataclass
 class DuelSupportItem:
@@ -345,6 +371,10 @@ class PlayerState:
     deck: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     graveyard: list[str] = field(default_factory=list)
+    # erase_memory's banish_deck_card. Kept SEPARATE from graveyard because
+    # the deck-empty reshuffle recycles the graveyard — a banished card must
+    # never come back, and nothing reveals it to its owner.
+    banished: list[str] = field(default_factory=list)
 
     king_pool: list[KingCardState] = field(default_factory=list)
     active_king: str | None = None
@@ -384,6 +414,21 @@ class PlayerState:
     # mourning_queen's ``death_trigger_draw`` (limit_per_turn: 1) — only the
     # FIRST allied Monster destroyed on this player's turn draws a card.
     death_trigger_draw_used_this_turn: bool = False
+
+    # rally_the_kingdom's ``royal_support_bonus`` — while
+    # ``royal_support_bonus_turns`` > 0, every piece of this player's that
+    # already qualifies as Royal Support contributes
+    # ``royal_support_bonus_amount`` more in a Final Duel (README §27 —
+    # "Does not expand support range", so only the per-item amount moves).
+    # Ticks down on this player's own EndTurn.
+    royal_support_bonus_amount: int = 0
+    royal_support_bonus_turns: int = 0
+
+    # arcane_sovereign's ``ritual_information_discount`` — the policy pays
+    # out only on the FIRST voluntary Ritual revelation of the match
+    # ("first_reveal_each_match: true"), so the payout is latched here.
+    # Never reset — "each match", not "each turn".
+    ritual_info_discount_used: bool = False
 
     # Stage 12: count of Final Duels this player has SURVIVED (Royal Escape)
     # as defender this match. Never reset — feeds the Last Stand escalation
@@ -458,6 +503,14 @@ class GameState:
     # Set to the square behind a double-pushed pawn immediately after that push.
     # Cleared at the start of every subsequent move.
     en_passant_target: "Position | None" = None  # type: ignore[name-defined]
+
+    # Monotonic counter for TrapInstance IDs. NOT derived from
+    # len(state.traps): a Trap is REMOVED from that list once its charges
+    # run out, so the length can go back down and re-issue an ID that is
+    # still referenced by SquareState.trap_ids — after which
+    # ActivateTrap/_fire_trap resolve against whichever duplicate the
+    # lookup happens to hit first. Only ever incremented.
+    trap_seq: int = 0
 
     rng_seed: int = 0
     event_log: list = field(default_factory=list)  # list[Event] — avoids circular import

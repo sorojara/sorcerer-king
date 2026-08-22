@@ -72,6 +72,9 @@ from game.ui.colors import (
     BUILDING_BANNER_ENEMY,
     BUILDING_BANNER_OWN,
     BUILDING_BANNER_UNDER_CONSTR,
+    BUILDING_INTEGRITY_FULL,
+    BUILDING_INTEGRITY_LOST,
+    SIEGE_TARGET_RING,
     BUILDING_MARKER_ENEMY,
     BUILDING_MARKER_OWN,
     BUILDING_MARKER_UNDER_CONSTR,
@@ -550,6 +553,7 @@ class BoardView:
         show_territory: bool = True,
         crowned_kings: "dict[Position, str] | None" = None,
         archetype_map: "dict[Position, str] | None" = None,
+        siege_dests: list[Position] | None = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -585,6 +589,11 @@ class BoardView:
         archetype_map       : Position → archetype string for every summoned
                               piece. Used to choose the faction sprite instead
                               of the neutral chess piece.
+        siege_dests         : Stage 13 — squares holding a COMPLETE enemy
+                              Building the SELECTED unit may besiege
+                              (AttackBuilding). Drawn as a red ring on top of
+                              the Building rather than a legal-move dot,
+                              because clicking one does not move the piece.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos,
@@ -598,6 +607,26 @@ class BoardView:
                           archetype_map or {})
         # ── Building front drawn AFTER the chess piece ────────────────────────
         self._draw_building_front_and_banner(observation)
+        # ── Stage 13: siege target rings, above everything on the square ─────
+        self._draw_siege_targets(siege_dests or [])
+
+    def _draw_siege_targets(self, siege_dests: list[Position]) -> None:
+        """
+        Stage 13 — ring every Building the selected unit may attack.
+
+        Deliberately NOT the usual legal-move dot: a click here spends the
+        chess move without the piece going anywhere, so it needs to read as
+        a different kind of action at a glance.
+        """
+        for pos in siege_dests:
+            sx, sy = _sq_to_screen(pos, self._flip)
+            pygame.draw.rect(
+                self._surface,
+                SIEGE_TARGET_RING,
+                pygame.Rect(sx + 1, sy + 1, SQUARE_SIZE - 2, SQUARE_SIZE - 2),
+                width=3,
+                border_radius=3,
+            )
 
     # ── Private draw helpers ──────────────────────────────────────────────
 
@@ -975,6 +1004,38 @@ class BoardView:
                             SQUARE_SIZE - 4, banner_h),
                 border_radius=1,
             )
+
+            # Stage 13 — integrity pips for a COMPLETE Building that has
+            # taken siege damage. Nothing is drawn at full integrity, so an
+            # undamaged board stays as clean as it was before.
+            if not under_construction:
+                self._draw_integrity_pips(sx, sy, b)
+
+    def _draw_integrity_pips(self, sx: int, sy: int, b: Any) -> None:
+        """
+        Stage 13 — a row of small pips along the top of a damaged
+        Building's square: filled = integrity remaining, hollow = lost.
+
+        Deliberately silent at full health. A Building that has never been
+        attacked shouldn't add clutter to the board; the pips appearing at
+        all IS the signal that a siege is underway.
+        """
+        integrity = getattr(b, "integrity", None)
+        max_integrity = getattr(b, "max_integrity", None)
+        if integrity is None or not max_integrity or integrity >= max_integrity:
+            return
+
+        pip_r = 3
+        gap = 3
+        total_w = max_integrity * (pip_r * 2) + (max_integrity - 1) * gap
+        px = sx + (SQUARE_SIZE - total_w) // 2 + pip_r
+        py = sy + pip_r + 2
+        for i in range(max_integrity):
+            cx = px + i * (pip_r * 2 + gap)
+            if i < integrity:
+                pygame.draw.circle(self._surface, BUILDING_INTEGRITY_FULL, (cx, py), pip_r)
+            else:
+                pygame.draw.circle(self._surface, BUILDING_INTEGRITY_LOST, (cx, py), pip_r, 1)
 
     def _draw_construction_bar(self, sx: int, sy: int, b: Any) -> None:
         """

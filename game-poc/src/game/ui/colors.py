@@ -91,6 +91,13 @@ BUILDING_BANNER_OWN            = ( 80, 220, 110)  # vivid green — your own bui
 BUILDING_BANNER_ENEMY          = (220, 110,  60)  # muted orange — enemy building
 BUILDING_BANNER_UNDER_CONSTR   = (220, 185,  40)  # amber — under construction progress
 
+# Stage 13 — Building integrity pips (drawn only once a Building has taken
+# siege damage; a full-health Building shows nothing).
+BUILDING_INTEGRITY_FULL        = (235, 225, 190)  # bone — integrity remaining
+BUILDING_INTEGRITY_LOST        = (150,  60,  50)  # dried blood — integrity lost
+# Siege target ring — a Building the selected unit may attack this turn.
+SIEGE_TARGET_RING              = (235,  90,  60)
+
 # ── Check / danger ─────────────────────────────────────────────────────────
 CHECK_TINT     = (200,  20,  20, 110)  # red tint on checked king square
 

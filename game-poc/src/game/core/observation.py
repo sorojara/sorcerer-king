@@ -34,10 +34,31 @@ Reference: phase0.md §11 "Observation is critical because of AI"
 
 from __future__ import annotations
 
+from copy import copy as _shallow_copy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable, TypeVar
 
 from game.core.phases import KingCardStatus, Phase, RevelationState
+
+_T = TypeVar("_T")
+
+
+def _detached(items: "Iterable[_T]") -> tuple[_T, ...]:
+    """
+    Copy engine-owned records out of the privacy boundary.
+
+    README §44's rule is that a controller never receives the GameState.
+    Handing it the *live* KingCardState / RitualState / BuildingInstance /
+    TrapInstance / BuildingPoolEntry objects would hand it a writable
+    slice of that state through the back door: those dataclasses are
+    mutable, so a bot could set ``ritual.activated = False`` or
+    ``building.integrity = 99`` and the engine would believe it.
+
+    Every one of these records is flat — its fields are scalars, enums, or
+    frozen Positions — so a shallow copy per record fully detaches it.
+    Value equality is unaffected, which is all any consumer relies on.
+    """
+    return tuple(_shallow_copy(item) for item in items)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,8 +346,8 @@ def build_observation(
 
     pub_board = PublicBoardState(
         units=units,
-        trap_locations=tuple(state.traps),
-        building_locations=tuple(state.buildings),
+        trap_locations=_detached(state.traps),
+        building_locations=_detached(state.buildings),
         square_effects=tuple(square_effects),
     )
 
@@ -419,15 +440,15 @@ def build_observation(
         opponent_hand_count=len(opp.hand),
         opponent_deck_count=len(opp.deck),
         opponent_graveyard=tuple(opp.graveyard),
-        own_building_pool=tuple(ps.building_pool),
-        opponent_building_pool=tuple(opp.building_pool),
+        own_building_pool=_detached(ps.building_pool),
+        opponent_building_pool=_detached(opp.building_pool),
         own_territory=tuple(_territory_squares(state, player_id, registry)),
         opponent_territory=tuple(_territory_squares(state, opp_id, registry)),
-        own_king_pool=tuple(ps.king_pool),
+        own_king_pool=_detached(ps.king_pool),
         own_active_king=ps.active_king,
         own_retired_kings=tuple(ps.retired_kings),
         opponent_king_info=tuple(opp_king_info),
-        own_rituals=tuple(ps.ritual_pool),
+        own_rituals=_detached(ps.ritual_pool),
         opponent_ritual_info=tuple(opp_ritual_info),
         phase=state.phase,
         turn_number=state.turn_number,

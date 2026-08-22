@@ -108,6 +108,18 @@ BUILDING_TERRITORY_RADIUS: dict[BuildingSize, int] = {
 }
 
 
+# Stage 13 — Building durability (integrity), derived from ``size``. This is
+# how many successful hostile actions a COMPLETE Building absorbs before it
+# collapses (see mechanics/buildings.py damage_building). Kept as its own
+# table for the same reason as the two above: retuning the siege economy
+# must never silently retune Territory reach or Pool cost.
+BUILDING_BASE_INTEGRITY: dict[BuildingSize, int] = {
+    BuildingSize.SMALL: 1,
+    BuildingSize.MEDIUM: 2,
+    BuildingSize.MAJOR: 3,
+}
+
+
 class SpellType(Enum):
     INSTANT = "instant"         # Resolves immediately, goes to graveyard
     PERSISTENT = "persistent"   # Stays on the board for N turns
@@ -279,6 +291,16 @@ class BuildingCard:
         size of radius over size of building").
         """
         return BUILDING_TERRITORY_RADIUS[self.size]
+
+    @property
+    def base_integrity(self) -> int:
+        """
+        Stage 13 — how many successful hostile actions this Building absorbs
+        once COMPLETE, derived from ``size`` (BUILDING_BASE_INTEGRITY).
+        Copied onto BuildingInstance.max_integrity at construction start so
+        registry-less unit tests still have a sane value to work with.
+        """
+        return BUILDING_BASE_INTEGRITY[self.size]
 
 
 @dataclass(frozen=True)

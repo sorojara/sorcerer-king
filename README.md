@@ -440,6 +440,88 @@ They:
 
 ---
 
+## 11.1 Buildings as Terrain
+
+A **completed** Building is a physical obstacle.
+
+The square it occupies:
+
+- cannot be entered by the opposing side
+- blocks a sliding piece's line, exactly like a wall
+- never blocks its own owner (the Builder Pawn is standing on it the
+  moment construction finishes)
+
+A Building under construction is **not** terrain. It is contested the way
+it always was — by capturing the committed Builder Pawn.
+
+Effects that explicitly ignore Building terrain (Sky Serpent) may slide
+**through** an occupied square, but still may not stop on it. The
+structure is there.
+
+---
+
+## 11.2 Siege
+
+Going around a Building is the normal answer. Knocking it down is the
+expensive one.
+
+**Only these may attack a Building:**
+
+| Attacker | Why |
+| --- | --- |
+| A **Ritual Monster** | The headline rule. Siege capability is the strategic payoff for completing a Ritual. |
+| A Monster with **building_damage_bonus** | Cards whose entire text is about tearing down infrastructure (Obsidian Dragon, Sovereign of Embers). |
+| **Any unit**, against a Building a Spell has cracked open | Siege Order's `building_vulnerability` breaches the defences for everyone. |
+
+Everything else on the board — every Pawn, Knight, Rook, Queen, and every
+ordinary Monster — simply cannot threaten infrastructure.
+
+**Attacking is not moving.** A siege is declared as its own action against
+an adjacent-or-reachable Building square. It consumes the attacker's chess
+move for the turn, and the attacker does not relocate: the square stays
+impassable until the structure actually falls.
+
+A Building on a square where a unit is standing cannot be besieged. Deal
+with the garrison first.
+
+---
+
+## 11.3 Building Integrity
+
+Every completed Building has an integrity pool derived from its size:
+
+| Size | Integrity |
+| --- | --- |
+| Small | 1 |
+| Medium | 2 |
+| Major | 3 |
+
+One successful hostile action removes one point. At zero, the Building
+collapses and its square opens up.
+
+Layers of defence, in the order a blow meets them:
+
+1. **Building Capture Protection** (Castle Keeper) — an allied Monster
+   nearby absorbs the entire action and spends a charge.
+2. **Building Vulnerability** (Siege Order) — the target is already
+   cracked open, so the blow lands harder.
+3. **Building Aura** (Siege Captain, Titan of the Foundation) — extra
+   effective hit points, re-evaluated on every blow. Kill the Monster
+   projecting it and the Building is back to bare integrity.
+4. **Temporary Building Protection** (Emergency Fortifications) — the last
+   line: a blow that *would* destroy the Building is absorbed and the
+   structure is left standing on its final point.
+
+**Repair** (Royal Engineer, Worldforge Colossus) restores integrity at the
+owner's end of turn, capped at the Building's maximum.
+
+Some effects bypass the attack rules entirely because they are not a unit
+attacking: a Demolition Charge is the ground under the Building
+detonating, and it damages adjacent enemy Buildings through the same
+defensive stack.
+
+---
+
 # 12. Building Pool
 
 Buildings should **not** be part of the random Main Deck.
@@ -1617,6 +1699,26 @@ Deliverable:
 
 Headless AI-vs-AI games that terminate correctly.
 
+### Stage 2 completion notes
+
+`game/ai/random_bot.py` plus `game/sim.py` (`play_match`, `run_matches`,
+and a `python -m game.sim` CLI). Details in §45; telemetry from those runs
+in §42.
+
+**Termination is not free.** RandomBot mirrors wander — most finish inside
+50 turns, but some pass 400 and a few never converge, because random play
+rarely assembles a mate. `--max-steps` abandons those and the aggregator
+counts them as *unfinished* rather than as a loss for either side, so a
+hung match can never quietly skew a win rate.
+
+**Simulation is slow, and the cost is in the engine, not the bot.** Profiling
+a heuristic-vs-random match puts ~85 % of the time in
+`chess/movement.py::get_legal_moves`, which `deepcopy`s the whole board once
+per candidate move to test whether it leaves the King in check. That is
+fine at UI pace (one decision per click) and expensive at simulation pace.
+A make/unmake pair in place of the copy is the obvious fix when bulk
+balance runs start to matter.
+
 ---
 
 ## Stage 3 — Minimal Pygame UI
@@ -1857,6 +1959,31 @@ Deliverable:
 
 A complete ugly but playable game.
 
+### Stage 13 completion notes
+
+Two things were finished here.
+
+**Every card effect now resolves.** Each effect type declared anywhere in
+`data/*.yaml` dispatches to a real handler — no type in the shipped card
+pool is missing one, and `test_stage13_effects.py` asserts that as a
+standing invariant. The remainder of the "ARMED, DORMANT" backlog was one
+cluster with one shared cause: `building_damage_bonus`, `building_aura`,
+`building_capture_protection`, `building_damage`, `building_vulnerability`,
+`temporary_building_protection`, `repair_building` and `ignore_terrain`
+all described a contest over Buildings that had no contest to join. §11.1
+–§11.3 above is that contest; implementing it resolved all eight at once.
+
+The four with no shared cause were implemented individually:
+`royal_support_bonus` (Rally the Kingdom), `enemy_territory_mobility`
+(Shadow Regent / Eclipse Executioner), `ritual_information_discount`
+(Arcane Sovereign) and `ritual_support` (Shrine).
+
+**Siege is what makes Ritual Monsters worth the board investment.** Before
+Stage 13 a completed Ritual bought a strong unit and nothing structural.
+Now it buys the only routine answer to enemy infrastructure — which is
+also why Buildings could safely become hard terrain rather than
+decoration.
+
 ---
 
 # 42. Telemetry and Balance Instrumentation
@@ -1894,6 +2021,36 @@ King policy win rate
 ```
 
 These metrics will be essential for balancing.
+
+### §42 implementation notes
+
+Implemented in `game/telemetry.py`.
+
+Every `Game` owns a `MatchTelemetry` recorder (`game.telemetry`), fed by
+`Game.execute()` with each action and the events it produced. It reads
+only — same seed, same match, whether recording is on or off
+(`Game.new(..., telemetry=False)` disables it). `game.match_stats()`
+returns a `MatchStats` snapshot at any point.
+
+Two layers, because the §42 list mixes two kinds of metric:
+
+| layer | class | metrics |
+|---|---|---|
+| one match | `MatchStats` / `PlayerMatchStats` | everything countable inside a single game |
+| many matches | `TelemetryAggregator` | the *rates* — first-player, archetype, King policy |
+
+Rejected actions are counted too (`illegal_action_count`), which is how
+`ActivateRitual` interrupted by an enemy `profane_interruption` Trap stays
+visible rather than vanishing.
+
+Export: `MatchStats.to_json()`, `TelemetryAggregator.to_json()`,
+`TelemetryAggregator.write_csv(path)` — one row per match.
+
+Bulk collection is `game/sim.py`:
+
+```bash
+python -m game.sim --matches 50 --white heuristic --black random --csv telemetry.csv
+```
 
 ---
 
@@ -1950,6 +2107,31 @@ This prevents accidental AI cheating.
 
 This architectural rule should exist from the first implementation.
 
+### §44 implementation notes
+
+The boundary is `core/observation.py`'s `build_observation`, reached only
+through `Game.get_observation(player_id)`. `PlayerController.choose_action`
+takes `(observation, legal_actions)` — there is no parameter a GameState
+could arrive through, and no controller in the codebase has one.
+
+Two properties make it airtight rather than merely conventional:
+
+1. **Nothing private crosses.** Opponent hand IDs, deck order, hidden King
+   identities, sealed Ritual identities and the RNG are all absent from the
+   Observation's whole object graph.
+2. **Nothing crossing is writable.** The Observation is a frozen dataclass,
+   and every mutable engine record it exposes — `KingCardState`,
+   `RitualState`, `BuildingPoolEntry`, `TrapInstance`, `BuildingInstance` —
+   is handed over as a detached copy. A bot cannot reach through its own
+   Observation and set `ritual.activated` or `building.integrity`.
+
+Both are asserted in `tests/test_ai_information_rules.py`, which walks the
+Observation graph and re-checks the contract for every shipped bot.
+
+One thing deliberately *not* behind the boundary: the `CardRegistry`. It
+holds card definitions — the public rulebook a human reads off the cards —
+and no match state. Bots may consult it; every bot also works without it.
+
 ---
 
 # 45. AI Stage 0 — RandomBot
@@ -1968,6 +2150,29 @@ Purpose:
 - run automated simulations
 
 RandomBot is a testing tool, not intended to be a fun opponent.
+
+### §45 implementation notes
+
+`game/ai/random_bot.py`, with its own seeded `random.Random` so bot choices
+and game randomness vary independently.
+
+One deviation from the literal `random.choice(legal_actions)`: during
+PREPARATION the legal list is dominated numerically by `SummonMonster`
+entries (one per card × vessel), so uniform choice would summon nearly
+every turn. The bot picks an action *type* uniformly first, then an action
+within it; `DismissMonster` sits outside that pool at a flat 5 % so the bot
+doesn't spend the match undoing its own summons.
+
+The four stated purposes are covered by `game/sim.py` (engine stability,
+legal-action validation, fuzzing, automated simulation):
+
+```bash
+python -m game.sim --matches 100 --white random --black random
+```
+
+Any action the engine refuses is logged and retried with that action
+removed, and a match that will not terminate is abandoned at `--max-steps`
+and reported as unfinished — a fuzz harness reports, it does not hang.
 
 ---
 
@@ -2013,6 +2218,68 @@ Deliverable:
 
 A competent non-searching opponent.
 
+### §46 implementation notes
+
+Two files:
+
+- `game/ai/evaluation.py` — the weighted state evaluation. Every category
+  listed above is scored, and `evaluation_breakdown()` returns them
+  individually so the weights can be tuned against §42 telemetry.
+  `EvalWeights` is a frozen dataclass of coefficients — swapping one in is
+  how an AI Personality (§51) or a Difficulty tier (§52) will be built.
+- `game/ai/heuristic_bot.py` — `HeuristicBot`, the controller.
+
+Because a controller has no simulator (executing a candidate action to see
+the resulting state is §47's job), the bot scores
+
+```text
+score(action) = evaluate_observation(obs) + delta(action)
+```
+
+where `delta` is a per-action-type estimate built from the same weights:
+material captured, the square's safety, the strategic system advanced.
+
+Threat awareness comes from `board_from_observation()`, which rebuilds a
+`BoardState` from the Observation's public unit list and asks
+`chess/movement.py` what each side attacks. Only public information goes
+in, so this is what a human staring at the board could work out — it is a
+threat map, not a game simulator. It buys the bot free material, avoidance
+of hanging its own pieces, and a path around enemy Traps and hazard zones.
+
+Ties break on the bot's own seeded RNG, and a short memory of its own
+recent moves discourages shuffling one piece back and forth forever.
+
+A second memory, added while measuring §47, records which Monster
+abilities have already fired **this turn**. Activating an ability does not
+consume the chess move and several abilities (`inspect_top_deck`,
+`burrow`) stay legal after use, so the flat `MONSTER_ABILITY` bias alone
+had the bot re-firing one ability every decision and never playing chess
+at all — 173 activations and 3 moves in a 200-action sample. Once per
+turn per Monster is the cap; both AI stages inherit it.
+
+Selectable per side from the pygame sidebar: each side's button cycles
+**HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI**.
+
+#### Measured baseline
+
+5 matches per pairing, 400 actions each. Mean pieces captured per match,
+and matches won outright inside that budget:
+
+| pairing | white | black | wins |
+|---|---|---|---|
+| heuristic (W) vs random (B) | **13.0** | 3.8 | heuristic 3 |
+| random (W) vs heuristic (B) | 2.8 | **14.0** | heuristic 4 |
+| random vs random | 5.0 | 5.2 | — |
+
+The advantage follows the bot, not the colour, which is what "competent"
+has to mean before any of these weights are worth tuning.
+
+Re-measured after the once-per-turn ability cap above; the first pass
+recorded 9.6 / 7.4 captures and no winner at all, because in every match
+where the bot summoned a Monster with a repeatable ability it stopped
+playing chess. Same weights, same seeds — the difference is entirely the
+bot getting to move.
+
 ---
 
 # 47. AI Stage 2 — SearchBot
@@ -2042,6 +2309,127 @@ Potential techniques:
 This works well for deterministic visible portions of the game.
 
 However, the complete game contains hidden information and randomness, so pure minimax will not be the final solution.
+
+### §47 implementation notes
+
+Two files:
+
+- `game/ai/search.py` — the search itself: the position, the forward
+  model, the leaf evaluation, and negamax with alpha-beta.
+- `game/ai/search_bot.py` — `SearchBot`, the controller. It subclasses
+  `HeuristicBot`, so everything Stage 1 already decided well is inherited
+  rather than re-derived.
+
+**What gets searched.** The paragraph above is the design brief: search
+the deterministic visible portion, and nothing else. That portion is the
+chessboard, so `SearchBot` searches the CHESS phase and falls back to the
+Stage 1 scorer everywhere else. A Summon, a Ritual or a Recompose turns on
+cards nobody can see and draws that have not happened; a minimax that
+quietly assumes "the opponent holds nothing" would be *worse* there than
+the §46 estimate. Those decisions wait for §48's belief model and §49's
+sampler.
+
+**The position.** `board_for_search()` rebuilds a `BoardState` from the
+Observation — the §46 reconstruction plus the two things the *movement*
+rules read and it left out: COMPLETE Buildings (walls) and square effect
+tags (`walled:` stops a ray, `frozen:`/`blocked:` remove destinations).
+All public (README §35), so this stays inside §44. Traps and hazard zones
+are frozen into a `Hazards` map once per decision, since they never move
+during a search.
+
+**The forward model.** Moves come from the engine's own
+`chess/movement.py`, so Monster movement additions and Building terrain
+behave in the tree exactly as they do in the game. `make`/`unmake` mutate
+one board in place — copying 64 squares per node is what separates a
+depth-2 search from a depth-4 one — and an occupancy map is kept in step
+so no node ever walks empty squares. Promotion is auto-Queen, matching
+what the bots already choose in the real game.
+
+Inside the tree the search runs on **pseudo-legal** moves and treats
+capturing the King as terminal, rather than paying `get_legal_moves`'
+per-move board copy at every node. The bot only ever plays actions from
+the engine's legal list, so root legality is guaranteed either way. King
+capture scores large but finite and decays with ply: it forces the Final
+Duel (§22), it does not win the game.
+
+**Techniques, as listed above.** Negamax with alpha-beta; iterative
+deepening (so a budget that runs out mid-iteration costs nothing — the
+previous iteration's answer stands); move ordering by MVV-LVA with a
+promotion bonus, plus the previous iteration's best move first; a
+transposition table with proper bound flags at depth ≥ 2; and a
+quiescence extension, without which the bot cheerfully hangs a Queen one
+ply beyond the horizon.
+
+**Scoring a candidate.** `score(action) = negamax(position_after(action),
+depth-1) + bias(action)`. `MovePiece` and `Castle` change the board;
+`EndTurn` is a null move (the opponent simply gets the position), which is
+what makes "move" and "pass" comparable at all; `AttackBuilding` leaves
+the attacker in place (§11.2) and is valued by its Stage 1 bias on top of
+the searched position. Because a bias is added after the search, root
+alpha windows are widened by a fixed margin so no pruned candidate could
+have been rescued by its bias. A `MovePiece` carries almost no bias —
+material and safety already came out of the search, and counting them
+twice is exactly the bug this design is meant to avoid.
+
+The leaf evaluation is a board-only, strictly antisymmetric subset of the
+§46 weights (`EvalWeights` is shared, so a personality tuned for §51 tunes
+both bots at once). The card-system categories — Rituals, Buildings, hand
+quality, Territory — are constant across a chess search, so omitting them
+changes no ranking and costs nothing.
+
+**Budgets.** `SearchLimits(max_depth, max_nodes, max_seconds,
+quiescence_depth)` bounds every decision; the pygame UI asks for its move
+on a single frame, so it runs a tighter budget (0.6 s) than a headless run
+needs to. On a Monster-free board the move generator is called without the
+registry — the `movement_restriction` aura check re-scans the whole board
+on every call and can do nothing when there are no Monsters — which is
+worth roughly a doubling of search speed in the opening.
+
+Selectable per side from the pygame sidebar: each side's button now cycles
+**HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI**, so any two models can be
+matched head-to-head, or against a human. Headless:
+
+```bash
+python -m game.sim --matches 20 --white search --black heuristic --search-depth 3
+```
+
+#### Measured baseline
+
+Same protocol as §46 — 5 matches per pairing, 400 actions each, default
+search budget (depth 3, 2500 nodes, 0.6 s). Mean pieces captured per
+match, and matches won outright inside that budget:
+
+| pairing | white | black | wins |
+|---|---|---|---|
+| search (W) vs heuristic (B) | **11.0** | 10.2 | search 1 |
+| heuristic (W) vs search (B) | 9.4 | **14.2** | search 2 |
+| search (W) vs random (B) | **12.2** | 0.8 | search 3 of 4 |
+| random (W) vs search (B) | 0.6 | **7.0** | search 5 |
+| heuristic (W) vs random (B) | 13.0 | 3.8 | heuristic 3 |
+| random (W) vs heuristic (B) | 2.8 | 14.0 | heuristic 4 |
+
+Read the two metrics together, because they say different things. Against
+the Stage 1 bot the material edge is real but narrow as White (+0.8) and
+clear as Black (+4.8) — and across those ten matches SearchBot won three
+and HeuristicBot none. Against RandomBot it wins eight of nine and takes
+*fewer* pieces than the greedy bot does, which is the expected shape: it
+declines the losing trades a random opponent lets you get away with, and
+its matches end sooner, so there is less time to accumulate captures.
+
+The margin over Stage 1 is narrower than "adds a search tree" suggests,
+for two honest reasons. The engine's move generator costs ~0.3 ms a call,
+so the default budget completes depth 2 (plus quiescence) in a crowded
+midgame and only reaches depth 3 in quiet ones — the ceiling here is
+nodes per second, not the search. And chess is one of several systems: a
+match is also Rituals, Buildings and card draws, all of which both bots
+play with the same Stage 1 code. §48's belief model is what starts moving
+those.
+
+One caveat about the fifth match of `search vs random`: it did not finish,
+and not because of the bot — a Trap's `push_unit` effect crashed the
+engine (`mechanics/effects/movement.py` moves a unit from the square it
+*was* on without checking it is still there). Unrelated to AI, reachable
+by any controller, tracked separately.
 
 ---
 

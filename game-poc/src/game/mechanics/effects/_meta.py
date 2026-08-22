@@ -13,13 +13,19 @@ vessel_support               IMPLEMENTED — allow extra vessel types in radius
                                   mechanics.monsters.get_extra_vessel_types(),
                                   wired into SummonMonster legal-action
                                   generation + validation)
-ignore_terrain               ARMED, DORMANT — no Building/Territory movement
-                                  restriction exists anywhere in this engine
-                                  to ignore; flag is armed for a future one
-building_damage_bonus       ARMED, DORMANT — no action lets a piece attack a
-                                  COMPLETE Building (README §11: "do not
-                                  normally capture"); flag armed for later
-building_capture_protection ARMED, DORMANT — same blocker as building_damage_bonus
+ignore_terrain               IMPLEMENTED (Stage 13) — slide THROUGH the
+                                  square of a COMPLETE enemy Building instead
+                                  of being stopped by it (sky_serpent); read
+                                  by chess.movement._ray_moves
+building_damage_bonus       IMPLEMENTED (Stage 13) — grants permission to
+                                  besiege, and ``destroy_on_capture`` flattens
+                                  a Building in one blow (obsidian_dragon,
+                                  sovereign_of_embers); read by
+                                  mechanics.buildings.can_attack_building() /
+                                  attack_damage()
+building_capture_protection IMPLEMENTED (Stage 13) — first layer of
+                                  mechanics.buildings.damage_building()'s
+                                  defensive stack (castle_keeper)
 weakened_target_bonus       IMPLEMENTED — bypasses an adjacent retaliate
                                   effect ONLY when the retaliating unit's own
                                   capture_protection was already spent; see
@@ -34,6 +40,10 @@ challenge_unit               IMPLEMENTED — restrict an adjacent enemy to
 territory_bonus              IMPLEMENTED — extra leap mobility while standing
                                   in enemy Territory (moon_stalker); read by
                                   mechanics.monsters.get_movement_additions()
+enemy_territory_mobility    IMPLEMENTED (Stage 13) — same behaviour, other
+                                  cards (eclipse_executioner; shadow_regent as
+                                  a King policy via mechanics.kings); arms the
+                                  same territory_movement_bonus status
 graveyard_inspect            IMPLEMENTED — private GraveyardInspected event
                                   revealing the owner's own Graveyard (grave_scholar)
 graveyard_counter            IMPLEMENTED — passive counter from destroyed
@@ -58,8 +68,9 @@ ritual_activation_range     IMPLEMENTED — extends Formation Ritual node
                                   matching by radius_bonus (herald_of_the_gate);
                                   consumed in mechanics.rituals pattern matcher
 restore_builder              IMPLEMENTED — on summon, restore the Builder
-                                  token to one adjacent Pawn that already
-                                  spent it (guild_foreman)
+                                  token to up to ``max_targets`` adjacent
+                                  Pawns that already spent it
+                                  (guild_foreman 1, worldforge_colossus 2)
 capture_then_retreat        IMPLEMENTED — post-capture retreat away from the
                                   enemy King (dusk_reaver; reuses the
                                   REPOSITION PendingDecision machinery)
@@ -224,14 +235,18 @@ def _vessel_support(ctx: "EffectContext") -> None:
 
 def _ignore_terrain(ctx: "EffectContext") -> None:
     """
-    ARMED, DORMANT — sky_serpent. Nothing in this engine currently makes
-    Buildings or Territory restrict movement (no such restriction exists
-    to ignore — grep confirms chess.movement never reads ``building_id``
-    and Territory only ever gates SummonMonster/Trap/Spell placement, not
-    movement). The status is armed so a future movement restriction can
-    consult it, but today it has no observable effect. Flagged to the
-    user rather than inventing a new movement-restriction mechanic
-    unprompted.
+    IMPLEMENTED (Stage 13) — sky_serpent, "Ignores movement restrictions
+    created by Buildings and Territory".
+
+    Stage 13 made a COMPLETE enemy Building a wall: its square stops rays
+    and can never be landed on (chess/movement.py blocks_movement). The
+    ``ignore_building_terrain`` status armed here lets this unit SLIDE
+    THROUGH such a square instead of being stopped by it. It still cannot
+    stop there — the square is physically occupied by the structure, and
+    clearing it is what AttackBuilding is for.
+
+    Territory itself still gates only SummonMonster / Trap / Spell
+    placement, never movement, so there is nothing further to ignore.
     """
     if ctx.unit is None:
         return
@@ -242,14 +257,22 @@ def _ignore_terrain(ctx: "EffectContext") -> None:
 
 def _building_damage_bonus(ctx: "EffectContext") -> None:
     """
-    ARMED, DORMANT — obsidian_dragon. README §11 says Buildings "do not
-    normally capture", and indeed no action in this engine lets a piece
-    attack/capture a COMPLETE Building (the only destruction paths are
-    construction-disruption — capturing the committed Builder Pawn — and
-    the King Succession sacrifice, neither of which is "this monster
-    capturing a Building"). The status is armed so a future
-    attack-a-building action can consult it, but today it has no
-    observable effect.
+    IMPLEMENTED (Stage 13) — obsidian_dragon / sovereign_of_embers.
+
+    Two things now hang off this effect, both read straight from the card
+    by mechanics/buildings.py rather than from the status armed here:
+
+      • can_attack_building() — carrying it is one of the three ways a
+        unit earns permission to besiege at all (the others being "is a
+        Ritual Monster" and "the Building is marked by siege_order").
+      • attack_damage() — ``destroy_on_capture: true`` turns one blow into
+        an outright demolition, aura durability included ("Buildings
+        captured by this monster are destroyed immediately").
+
+    The ``building_destroyer`` status is armed purely as a marker — both
+    behaviours above read the CARD, not this flag, so nothing in the engine
+    currently consults it. Kept as a ready-made "this piece can siege"
+    lookup for a UI badge; it is deliberately not load-bearing.
     """
     if ctx.unit is None:
         return
@@ -258,11 +281,13 @@ def _building_damage_bonus(ctx: "EffectContext") -> None:
 
 def _building_capture_protection(ctx: "EffectContext") -> None:
     """
-    ARMED, DORMANT — castle_keeper. Same blocker as building_damage_bonus:
-    there is no "attempt to destroy a Building" action to protect against
-    today. Arms a status (rather than raising) so summoning castle_keeper
-    no longer crashes; still a no-op until a building-attack mechanic
-    exists.
+    IMPLEMENTED (Stage 13) — castle_keeper.
+
+    Arms ``building_capture_protection:<radius>:<uses>``. It is the FIRST
+    layer of mechanics.buildings.damage_building()'s defensive stack: a
+    hostile action against an allied Building within ``radius`` of this
+    Monster is absorbed whole and one charge is spent, before damage,
+    vulnerability or durability auras are even considered.
     """
     if ctx.unit is None:
         return
@@ -345,6 +370,34 @@ def _challenge_unit(ctx: "EffectContext") -> None:
     target_unit.add_status(f"challenged_by:{ctx.unit.piece.id}:{duration}")
 
 
+def _enemy_territory_mobility(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED (Stage 13) — eclipse_executioner (Monster) and, via
+    mechanics.kings._apply_enemy_territory_mobility, shadow_regent (King
+    policy). Card text: this unit moves ``movement_bonus`` further while
+    it stands inside enemy Territory.
+
+    Mechanically identical to moon_stalker's ``territory_bonus`` below —
+    two cards, one behaviour — so it arms the SAME
+    ``territory_movement_bonus:N`` status rather than a parallel one, and
+    inherits its enemy-Territory test in get_movement_additions() for free.
+    The ``archetype`` param only matters for the King-policy variant, where
+    the effect has to pick out which of the kingdom's Monsters it applies
+    to; on the Monster's own card it describes itself, so it is not
+    re-checked here.
+    """
+    if ctx.unit is None:
+        return
+    params = ctx.effect.params
+    if not params.get("condition", {}).get("inside_enemy_territory", True):
+        return
+    bonus = params.get("movement_bonus", 1)
+    ctx.unit.statuses = [
+        s for s in ctx.unit.statuses if not s.startswith("territory_movement_bonus:")
+    ]
+    ctx.unit.add_status(f"territory_movement_bonus:{bonus}")
+
+
 def _territory_bonus(ctx: "EffectContext") -> None:
     """
     IMPLEMENTED — moon_stalker. Arms ``territory_movement_bonus:N``, read
@@ -420,12 +473,18 @@ def _dismiss_monster(ctx: "EffectContext") -> None:
     """
     IMPLEMENTED — vessel_reclaimer activated ability.
 
-    Distinct from the player's own DismissMonster action (which targets
-    the player's OWN unit and returns the card to hand): this targets an
-    ADJACENT allied Monster (``ctx.extra["target"]``, an (file, rank)
-    tuple enumerated by RulesEngine.get_legal_actions) and sends the card
-    to the Graveyard instead (card text: "sending the Monster card to the
-    Graveyard").
+    Two cards share this type, told apart by ``monster_destination``:
+
+    1. vessel_reclaimer (Monster, activated): targets an ADJACENT allied
+       Monster (``ctx.extra["target"]``, an (file, rank) tuple enumerated
+       by RulesEngine.get_legal_actions) and sends the card to the
+       GRAVEYARD — "sending the Monster card to the Graveyard".
+
+    2. sever_the_bond (Spell, target_type "piece"): the targeted piece IS
+       ``ctx.unit`` — _resolve_spell_on_piece already resolved and
+       ownership-checked it, and supplies no ``target`` at all — and the
+       card goes back to HAND. Requiring an adjacent second target here
+       made the Spell impossible to cast at all.
     """
     from game.chess.pieces import Position
     from game.core.events import MonsterDismissed
@@ -433,20 +492,28 @@ def _dismiss_monster(ctx: "EffectContext") -> None:
 
     if ctx.unit is None or ctx.position is None or ctx.state is None:
         return
+
+    params = ctx.effect.params
+    destination = params.get("monster_destination", "graveyard")
     target = (ctx.extra or {}).get("target")
+
     if target is None:
-        raise IllegalActionError("dismiss_monster requires an adjacent allied Monster target.")
-    tf, tr = target
-    if max(abs(tf - ctx.position.file), abs(tr - ctx.position.rank)) != 1:
-        raise IllegalActionError("dismiss_monster target must be adjacent.")
-    target_pos = Position(tf, tr)
-    target_unit = ctx.state.board.get_unit(target_pos)
-    if (
-        target_unit is None
-        or target_unit.owner != ctx.unit.owner
-        or target_unit.monster_id is None
-    ):
-        raise IllegalActionError("dismiss_monster target must be an adjacent allied Monster.")
+        # sever_the_bond — the Spell's own target is the Monster to dismiss.
+        if ctx.unit.monster_id is None:
+            raise IllegalActionError("That piece is not hosting a Monster.")
+        target_unit, target_pos = ctx.unit, ctx.position
+    else:
+        tf, tr = target
+        if max(abs(tf - ctx.position.file), abs(tr - ctx.position.rank)) != 1:
+            raise IllegalActionError("dismiss_monster target must be adjacent.")
+        target_pos = Position(tf, tr)
+        target_unit = ctx.state.board.get_unit(target_pos)
+        if (
+            target_unit is None
+            or target_unit.owner != ctx.unit.owner
+            or target_unit.monster_id is None
+        ):
+            raise IllegalActionError("dismiss_monster target must be an adjacent allied Monster.")
 
     card_id = target_unit.monster_id
     target_unit.monster_id = None
@@ -459,7 +526,11 @@ def _dismiss_monster(ctx: "EffectContext") -> None:
             )
         )
     ]
-    ctx.state.get_player(target_unit.owner).graveyard.append(card_id)
+    ps = ctx.state.get_player(target_unit.owner)
+    if destination == "hand":
+        ps.hand.append(card_id)
+    else:
+        ps.graveyard.append(card_id)
     ctx.events.append(MonsterDismissed(
         player_id=target_unit.owner,
         card_id=card_id,
@@ -535,10 +606,11 @@ def _ritual_activation_range(ctx: "EffectContext") -> None:
 
 def _restore_builder(ctx: "EffectContext") -> None:
     """
-    IMPLEMENTED — guild_foreman on_summon. One adjacent allied Pawn that
-    has already spent its once-per-match Builder token
-    (``builder_available == False``) regains it. Picks the first such
-    Pawn found among the 8 neighbouring squares (``max_targets: 1``).
+    IMPLEMENTED — guild_foreman / worldforge_colossus on_summon. Adjacent
+    allied Pawns that have already spent their once-per-match Builder token
+    (``builder_available == False``) regain it, up to ``max_targets`` of
+    them — guild_foreman asks for 1, worldforge_colossus for 2 ("restores
+    exhausted builders", plural).
     """
     from game.core.events import BuilderRestored
     from game.core.phases import PieceType
@@ -547,8 +619,11 @@ def _restore_builder(ctx: "EffectContext") -> None:
         return
     pos = ctx.position
     owner = ctx.unit.owner
+    remaining = ctx.effect.params.get("max_targets", 1)
     for df in (-1, 0, 1):
         for dr in (-1, 0, 1):
+            if remaining <= 0:
+                return
             if df == 0 and dr == 0:
                 continue
             nf, nr = pos.file + df, pos.rank + dr
@@ -564,12 +639,12 @@ def _restore_builder(ctx: "EffectContext") -> None:
             ):
                 continue
             neighbour.builder_available = True
+            remaining -= 1
             ctx.events.append(BuilderRestored(
                 player_id=owner,
                 piece_id=neighbour.piece.id,
                 restored_by_piece_id=ctx.unit.piece.id,
             ))
-            return
 
 
 def _capture_then_retreat(ctx: "EffectContext") -> None:
@@ -692,7 +767,81 @@ def _temporary_vessel_class(ctx: "EffectContext") -> None:
     ctx.unit.add_status(f"vessel_class_override:{duration}:{'|'.join(classes)}")
 
 
+def _extra_action(ctx: "EffectContext") -> None:
+    """
+    IMPLEMENTED — stolen_moment ("Take an extra action this turn: you may
+    cast another Spell or make an additional chess move.").
+
+    Both allowances are plain per-turn latches on PlayerState, so the card
+    is exactly "clear the latches the caster has already spent":
+    ``preparation_action_used`` gates ActivateSpell (and every other major
+    Preparation action), ``chess_move_used`` gates MovePiece.
+
+    Ordering matters and works out for free: _execute_activate_spell calls
+    _mark_prep_used BEFORE dispatching effects, so by the time this runs
+    the latch it is clearing is the one this very Spell just set. The
+    caster ends the turn having spent the Stolen Moment and holding one
+    fresh action, which is the card.
+    """
+    if ctx.state is None:
+        return
+    owner = (ctx.extra or {}).get("caster_owner")
+    if owner is None:
+        return
+    params = ctx.effect.params
+    ps = ctx.state.get_player(owner)
+    if params.get("preparation_action", True):
+        ps.preparation_action_used = False
+    if params.get("chess_move", True):
+        ps.chess_move_used = False
+
+
+def _resolved_elsewhere(ctx: "EffectContext") -> None:
+    """
+    INERT — effect types whose real logic lives outside this registry, but
+    which CAN still reach it because the card carrying them is a Monster
+    (Ritual Monsters reuse several effects originally written as King
+    policies or Building auras).
+
+    Registered so a summon-time dispatch resolves quietly instead of
+    logging UNRESOLVED. Where each one actually runs:
+
+        formation_support           mechanics.monsters.apply_monster_auras()
+                                    (bannerlord_eternal) /
+                                    mechanics.kings.apply_king_policy_auras()
+                                    (marshal_king)
+        graveyard_threshold_bonus   same pair (ossuary_king / grave_crowned_king)
+        graveyard_recycle           mechanics.kings.maybe_recycle_destroyed_monster(),
+                                    which accepts a Monster source as of Stage 13
+        ritual_information_discount mechanics.kings.maybe_ritual_information_discount()
+        territory_summon_bonus      mechanics.kings.is_in_territory_with_king_bonus()
+        building_territory_bonus    mechanics.territory._building_zone_squares()
+        capture_protection_aura     mechanics.buildings.apply_building_auras()
+        spell_radius_aura           same
+        trap_radius_bonus           mechanics.buildings.trap_radius_bonus()
+        trap_territory_bonus        mechanics.territory.trap_zone_squares()
+        spell_territory_bonus       mechanics.territory.spell_zone_squares()
+        final_duel_guard_bonus      mechanics.duel._gather_building_support()
+        final_duel_support_range    mechanics.duel._support_radius_bonus()
+    """
+    pass
+
+
 META_HANDLERS: dict[str, object] = {
+    # Resolved outside this registry — see _resolved_elsewhere().
+    "formation_support":                _resolved_elsewhere,
+    "graveyard_threshold_bonus":        _resolved_elsewhere,
+    "graveyard_recycle":                _resolved_elsewhere,
+    "ritual_information_discount":      _resolved_elsewhere,
+    "territory_summon_bonus":           _resolved_elsewhere,
+    "building_territory_bonus":         _resolved_elsewhere,
+    "capture_protection_aura":          _resolved_elsewhere,
+    "spell_radius_aura":                _resolved_elsewhere,
+    "trap_radius_bonus":                _resolved_elsewhere,
+    "trap_territory_bonus":             _resolved_elsewhere,
+    "spell_territory_bonus":            _resolved_elsewhere,
+    "final_duel_guard_bonus":           _resolved_elsewhere,
+    "final_duel_support_range":         _resolved_elsewhere,
     "spell_radius_bonus":               _spell_radius_bonus,
     "suppress_monster_effects":         _suppress_monster_effects,
     "temporary_vessel_class":           _temporary_vessel_class,
@@ -705,6 +854,7 @@ META_HANDLERS: dict[str, object] = {
     "restore_effect_charge":            _restore_effect_charge,
     "challenge_unit":                   _challenge_unit,
     "territory_bonus":                  _territory_bonus,
+    "enemy_territory_mobility":         _enemy_territory_mobility,
     "graveyard_inspect":                _graveyard_inspect,
     "graveyard_counter":                _graveyard_counter,
     "capture_protection_from_counter":  _capture_protection_from_counter,
@@ -715,4 +865,5 @@ META_HANDLERS: dict[str, object] = {
     "ritual_activation_range":          _ritual_activation_range,
     "restore_builder":                  _restore_builder,
     "capture_then_retreat":             _capture_then_retreat,
+    "extra_action":                     _extra_action,
 }

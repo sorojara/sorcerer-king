@@ -12,6 +12,14 @@ Controls:
     ESC         — deselect the current piece
     Q           — quit
 
+    The sidebar's "♔ White" / "♚ Black" buttons choose who plays each side,
+    cycling HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI — so any two AI
+    models can be matched against each other, or against you.
+
+Headless simulation (no UI):
+    python -m game.sim --matches 50 --white heuristic --black random
+    python -m game.sim --matches 20 --white search --black heuristic
+
 Note:
     Pygame must be installed:
         pip install pygame>=2.5
