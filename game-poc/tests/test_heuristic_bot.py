@@ -148,9 +148,23 @@ class TestEvaluationCategories:
         "duel_probability",
     ]
 
+    #: Added after §46, by the stage that needed it.
+    #: ``king_policy`` (AI Stage 6, README §53): the evaluator did not look
+    #: at Kings at all, so ChangeKing was scored as a bare negative
+    #: constant and CoronateKing as a flat bonus. Measured consequence —
+    #: Succession fired 0 times in 3,998 player-matches, and the first
+    #: Coronation matched the player's own archetype 1 time in 12.
+    LATER_CATEGORIES = ["king_policy"]
+
     def test_every_readme_category_is_scored(self, game: Game):
         breakdown = evaluation_breakdown(game.get_observation("white"))
-        assert set(breakdown) == set(self.README_CATEGORIES)
+        assert set(self.README_CATEGORIES) <= set(breakdown)
+
+    def test_no_category_is_scored_that_nothing_asked_for(self, game: Game):
+        breakdown = evaluation_breakdown(game.get_observation("white"))
+        assert set(breakdown) == set(self.README_CATEGORIES) | set(
+            self.LATER_CATEGORIES
+        )
 
     def test_score_is_the_sum_of_the_breakdown(self, game: Game):
         obs = game.get_observation("white")

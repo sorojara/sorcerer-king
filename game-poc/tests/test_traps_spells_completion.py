@@ -39,7 +39,7 @@ from game.chess.movement import get_pseudo_legal_moves
 from game.chess.pieces import ChessPiece, Position, UnitInstance
 from game.core.actions import ActivateSpell, ActivateTrap, MovePiece, PlaceTrap, SummonMonster
 from game.core.observation import build_observation
-from game.core.phases import ConstructionStatus, KingCardStatus, Phase, PieceType
+from game.core.phases import ConstructionStatus, KingCardStatus, Phase, PieceType, RevelationState
 from game.core.rng import DeterministicRNG
 from game.core.rules import IllegalActionError, RulesEngine
 from game.core.state import (
@@ -493,7 +493,13 @@ class TestInterruptRitual:
         vessel = _place(board, "white", PieceType.BISHOP, "d4", "wb")
         seer = _place(board, "white", PieceType.PAWN, "d3", "wp")
         white = _player("white")
-        white.ritual_pool = [RitualState(ritual_id="rite_of_the_wyrm")]
+        # REVEALED: the interruption is about the SACRIFICE being blocked, so
+        # the attempt has to be legal enough to reach the Trap check —
+        # ActivateRitual now refuses a Ritual that hasn't finished revealing
+        # (README §15), and it refuses it before burning anyone's Trap.
+        white.ritual_pool = [RitualState(
+            ritual_id="rite_of_the_wyrm", revelation=RevelationState.REVEALED,
+        )]
         state = _state(board, white, _player("black"))
         state.traps.append(TrapInstance(
             id="t1", owner="black", card_id="profane_interruption", charges=1,

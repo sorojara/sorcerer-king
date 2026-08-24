@@ -49,6 +49,8 @@ from game.core.rng import DeterministicRNG
 from game.core.rules import IllegalActionError, RulesEngine
 from game.core.state import BuildingInstance, GameState, PlayerState
 from game.mechanics.buildings import (
+    RITUAL_SIEGE_DAMAGE,
+    attack_damage,
     can_attack_building,
     damage_building,
     refresh_building_blocks,
@@ -254,11 +256,19 @@ def test_siege_order_opens_a_building_to_any_unit(registry):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_attack_building_damages_without_moving(registry, rng):
+    """
+    The blow lands and the attacker stays where it is. A siege_captain aura
+    keeps the Fortress standing through the first hit so the integrity drop
+    is observable — a Ritual Monster's 2 damage flattens a bare one outright
+    (test_attack_building_destroys_at_zero_integrity covers that).
+    """
     engine = RulesEngine(registry=registry)
     state = _state()
     titan = _put(state, Position(0, 0), "white", PieceType.ROOK,
                  monster_id="titan_of_the_foundation", registry=registry)
     b = _build(state, Position(0, 3), "black", "fortress", registry)
+    _put(state, Position(1, 3), "black", PieceType.KNIGHT,
+         monster_id="siege_captain", registry=registry)     # building_aura +1
     hp_before = b.integrity
 
     events = engine.execute(
@@ -266,11 +276,40 @@ def test_attack_building_damages_without_moving(registry, rng):
     )
 
     assert any(isinstance(e, BuildingAttacked) for e in events)
-    assert b.integrity == hp_before - 1
+    assert b.integrity < hp_before
     assert b.status == ConstructionStatus.COMPLETE
     # The attacker stayed put; the chess move is spent.
     assert state.board.get_unit(Position(0, 0)) is titan
     assert state.get_player("white").chess_move_used is True
+
+
+def test_ritual_monster_hits_harder_than_an_ordinary_attacker(registry):
+    """
+    README §11.3 — siege is the payoff for completing a Ritual, so a Ritual
+    Monster's blow is worth 2 where everything else deals 1. Without this a
+    Ritual Monster besieged no harder than a Pawn under a siege_order mark,
+    and strictly softer than the Main-Deck cards built for the job.
+    """
+    state = _state()
+    b = _build(state, Position(0, 3), "black", "fortress", registry)
+
+    plain_rook = _put(state, Position(0, 0), "white", PieceType.ROOK)
+    assert attack_damage(plain_rook, b, registry) == 1
+
+    ritual = _put(state, Position(1, 0), "white", PieceType.ROOK,
+                  monster_id="titan_of_the_foundation", registry=registry)
+    assert attack_damage(ritual, b, registry) == RITUAL_SIEGE_DAMAGE
+
+    # building_damage_bonus still stacks on top of the Ritual base, and
+    # destroy_on_capture still overrides everything.
+    sovereign = _put(state, Position(2, 0), "white", PieceType.ROOK,
+                     monster_id="sovereign_of_embers", registry=registry)
+    assert attack_damage(sovereign, b, registry) > b.max_integrity
+
+    # Ordinary Main-Deck siege Monsters are untouched by the Ritual base.
+    colossus = _put(state, Position(3, 0), "white", PieceType.ROOK,
+                    monster_id="molten_colossus", registry=registry)
+    assert attack_damage(colossus, b, registry) == 3
 
 
 def test_attack_building_destroys_at_zero_integrity(registry, rng):
@@ -327,17 +366,49 @@ def test_attack_building_rejected_when_out_of_reach(registry, rng):
             player_id="white", source=Position(0, 0), target=Position(4, 4)), rng)
 
 
-def test_attack_building_rejected_when_garrisoned(registry, rng):
+def test_garrison_does_not_shield_a_building(registry, rng):
+    """
+    README §11.2 — a siege targets the structure, not the square's occupant.
+
+    The old rule ("deal with the garrison first") was unsatisfiable: a
+    COMPLETE Building is impassable to the enemy, so no attacker can ever
+    move onto that square to take the garrison. Since a Building is raised
+    on the Builder Pawn's own square and nothing moves that Pawn off, every
+    finished Building was born permanently unbesiegeable, for free.
+    """
     engine = RulesEngine(registry=registry)
     state = _state()
     _put(state, Position(0, 0), "white", PieceType.ROOK,
          monster_id="titan_of_the_foundation", registry=registry)
+    b = _build(state, Position(0, 3), "black", "fortress", registry)
+    garrison = _put(state, Position(0, 3), "black", PieceType.KNIGHT)
+
+    engine.execute(state, AttackBuilding(
+        player_id="white", source=Position(0, 0), target=Position(0, 3)), rng)
+
+    assert b.status == ConstructionStatus.DESTROYED
+    # The garrison is untouched — the siege razed the structure under it,
+    # and it is now standing on an ordinary open square.
+    assert state.board.get_unit(Position(0, 3)) is garrison
+    assert state.board.get_square(Position(0, 3)).complete_building_owner is None
+
+
+def test_garrisoned_building_is_offered_as_a_siege_target(registry):
+    """The enumerator must agree with the executor, or a bot sees no siege."""
+    engine = RulesEngine(registry=registry)
+    state = _state()
+    _put(state, Position(0, 0), "white", PieceType.ROOK,
+         monster_id="titan_of_the_foundation", registry=registry)
+    _put(state, Position(7, 7), "white", PieceType.KING)
+    _put(state, Position(7, 0), "black", PieceType.KING)
     _build(state, Position(0, 3), "black", "fortress", registry)
     _put(state, Position(0, 3), "black", PieceType.KNIGHT)
 
-    with pytest.raises(IllegalActionError):
-        engine.execute(state, AttackBuilding(
-            player_id="white", source=Position(0, 0), target=Position(0, 3)), rng)
+    actions = engine.get_legal_actions(state, "white", registry=registry)
+    assert any(
+        isinstance(a, AttackBuilding) and a.target == Position(0, 3)
+        for a in actions
+    )
 
 
 def test_attack_building_appears_in_legal_actions(registry):
@@ -509,6 +580,53 @@ def test_repair_building_heals_at_owner_end_of_turn(registry):
     repair_buildings(state, "black", events, registry)
     assert b.integrity == b.max_integrity
     assert len(events) == before
+
+
+def test_repair_is_suppressed_the_round_the_building_was_hit(registry):
+    """
+    README §11.3 — nothing gets patched up while it is still being battered.
+
+    Without this, royal_engineer's +1 per turn exactly cancelled the damage
+    a besieger dealt per turn and the Building never fell, whatever the
+    attacker did.
+    """
+    from game.mechanics.buildings import repair_buildings, tick_building_timers
+
+    state = _state()
+    _put(state, Position(1, 3), "black", PieceType.ROOK,
+         monster_id="royal_engineer", registry=registry)
+    b = _build(state, Position(0, 3), "black", "fortress", registry)
+
+    # Hit it, then run the owner's EndTurn: repair passes it over.
+    damage_building(state, b, 1, [], registry, attacker_piece_id="x")
+    hit_to = b.integrity
+    repair_buildings(state, "black", [], registry)
+    assert b.integrity == hit_to
+    tick_building_timers(state, "black")            # clears the flag
+
+    # The attacker lets up: the next EndTurn repairs normally.
+    repair_buildings(state, "black", [], registry)
+    assert b.integrity == hit_to + 1
+
+
+def test_a_sustained_siege_now_actually_fells_a_repaired_building(registry):
+    """The stalemate this fix exists to close: 1 damage/turn vs +1 repair/turn."""
+    from game.mechanics.buildings import repair_buildings, tick_building_timers
+
+    state = _state()
+    _put(state, Position(1, 3), "black", PieceType.ROOK,
+         monster_id="royal_engineer", registry=registry)
+    b = _build(state, Position(0, 3), "black", "fortress", registry)
+
+    rounds = 0
+    while b.status == ConstructionStatus.COMPLETE and rounds < 10:
+        rounds += 1
+        damage_building(state, b, 1, [], registry, attacker_piece_id="x")
+        repair_buildings(state, "black", [], registry)
+        tick_building_timers(state, "black")
+
+    assert b.status == ConstructionStatus.DESTROYED
+    assert rounds == b.max_integrity
 
 
 def test_nearer_building_shields_the_one_behind_it(registry):

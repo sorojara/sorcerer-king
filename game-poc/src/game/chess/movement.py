@@ -46,7 +46,6 @@ Public API:
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from game.chess.board import BoardState
@@ -185,12 +184,29 @@ def get_pseudo_legal_moves(
     # seal_of_lockdown's seal_zone — an enemy of the sealing player standing
     # inside the zone can neither move nor capture, which is the same thing
     # as having no legal destinations at all.
-    for eff in board.get_square(pos).temporary_effects:
-        if eff.startswith("sealed:"):
-            parts = eff.split(":")
-            caster = parts[2] if len(parts) > 2 else None
-            if caster is not None and caster != unit.owner:
-                return []
+    #
+    # The King is exempt, and that exemption is load-bearing.  "No legal
+    # destinations" is exactly the input checkmate and stalemate detection
+    # reads, so a seal laid over the enemy King used to *manufacture* one:
+    # zero moves plus a check is checkmate (SIEGE), zero moves without one
+    # is stalemate (LAST_STAND), and either way the sealing player chose
+    # the moment the Final Duel began.  README §53's corpus measured what
+    # that was worth — a player merely *dealt* seal_of_lockdown won 80 % of
+    # their decided matches, +0.377 score at 15.5σ, the largest effect in a
+    # 117-card pool by a factor of one and a half.
+    #
+    # The exemption is not a special case invented for this card, it is the
+    # rule the rest of the game already follows: ``damage_unit`` says
+    # "Kings are never damaged", and every other effect that removes a
+    # piece steps around the King the same way.  A Spell was never meant to
+    # be able to end the game outright, and this is the one that could.
+    if unit.piece.piece_type != PieceType.KING:
+        for eff in board.get_square(pos).temporary_effects:
+            if eff.startswith("sealed:"):
+                parts = eff.split(":")
+                caster = parts[2] if len(parts) > 2 else None
+                if caster is not None and caster != unit.owner:
+                    return []
 
     owner = unit.owner
     pt = unit.piece.piece_type
@@ -576,6 +592,66 @@ def can_castle_queenside(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Internal: check filtering without copying the board
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _leaves_king_in_check(
+    board: BoardState,
+    pos: Position,
+    target: Position,
+    owner: str,
+    ep_capture_sq: "Position | None",
+) -> bool:
+    """
+    Apply ``pos → target`` to ``board``, ask whether ``owner``'s King is
+    attacked, then put the board back exactly as it was.
+
+    This used to be ``deepcopy(board)`` once per candidate destination,
+    which made legal-move generation by far the most expensive thing the
+    engine did: a full 64-square, every-unit deep copy for every
+    destination of every piece, and ``get_legal_actions`` runs that for the
+    whole army.  A profile of 600 headless steps spent 83 % of its total
+    runtime inside ``copy.deepcopy``, nearly all of it here.
+
+    Make/unmake is exact rather than approximate.  The copy-based version
+    performed exactly three mutations — vacate the source square, vacate
+    the en-passant victim's square, occupy the target square — and all
+    three are plain ``SquareState.unit`` assignments, so saving and
+    restoring those three slots reproduces the identical board.  Nothing
+    reached from here mutates: ``is_in_check`` and
+    ``get_pseudo_legal_moves`` only read.
+
+    The saved slots are unwound in reverse order, so the restore stays
+    correct even if two of the three were ever the same square.
+    """
+    squares = board.squares
+
+    src = squares[pos]
+    moving = src.unit
+    if moving is None:
+        raise ValueError(f"No unit at source square {pos}")
+
+    restore: list = []
+    try:
+        if ep_capture_sq is not None:
+            victim = squares[ep_capture_sq]
+            restore.append((victim, victim.unit))
+            victim.unit = None
+
+        restore.append((src, src.unit))
+        src.unit = None
+
+        tgt = squares[target]
+        restore.append((tgt, tgt.unit))
+        tgt.unit = moving
+
+        return is_in_check(board, owner)
+    finally:
+        for square, previous in reversed(restore):
+            square.unit = previous
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public: fully legal moves (check-filtered + castling)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -601,22 +677,20 @@ def get_legal_moves(
     on get_pseudo_legal_moves.
     """
     legal: list[Position] = []
+    is_pawn = unit.piece.piece_type == PieceType.PAWN
     for target in get_pseudo_legal_moves(board, pos, unit, en_passant_target, registry=registry, state=state):
-        sim = deepcopy(board)
-
-        # En passant: also remove the captured pawn from its real square
+        # En passant: the captured pawn stands beside the target, not on it.
+        ep_capture_sq: Position | None = None
         if (
-            unit.piece.piece_type == PieceType.PAWN
+            is_pawn
             and en_passant_target is not None
             and target == en_passant_target
             and board.get_unit(target) is None
         ):
             direction = 1 if unit.owner == "white" else -1
-            captured_sq = Position(target.file, target.rank - direction)
-            sim.remove_unit(captured_sq)
+            ep_capture_sq = Position(target.file, target.rank - direction)
 
-        sim.move_unit(pos, target)
-        if not is_in_check(sim, unit.owner):
+        if not _leaves_king_in_check(board, pos, target, unit.owner, ep_capture_sq):
             legal.append(target)
 
     return legal

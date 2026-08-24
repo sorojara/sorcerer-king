@@ -89,11 +89,13 @@ from game.core.actions import (
     PromotePawn,
     ReorderTopDeck,
     RepositionUnit,
+    RevealRitual,
     SelectMercenaryCards,
     SelectRecomposeCards,
     StartConstruction,
     SummonMonster,
 )
+from game.core.phases import RevelationState
 from game.logger import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -132,6 +134,15 @@ class ActionBias:
     ABILITY_REPEAT = -6.0        # ... but only once per turn, per Monster
 
     RITUAL = 6.0                 # the payoff the whole Ritual system exists for
+    # README §15.2 — RevealRitual is the toll booth in front of RITUAL: a
+    # Ritual cannot be activated until it is REVEALED, so a bot that never
+    # reveals never gets the 6.0 above. Expressed as a FRACTION of RITUAL
+    # rather than its own constant so an AI Personality tuning "RITUAL"
+    # (personality.py bias_tilt) moves the whole plan together — a Ritualist
+    # reveals eagerly, and a style that abstains from Rituals stops paying
+    # information for a payoff it will never collect.
+    REVEAL_RITUAL_FORETELL = 0.18   # × RITUAL, for SEALED → FORETOLD
+    REVEAL_RITUAL_REVEAL = 0.40     # × RITUAL, for FORETOLD → REVEALED
     CONSTRUCTION = 1.5
     CORONATION = 5.0             # free action, pure upside (README §17)
     SUCCESSION = -1.5            # costs a piece and/or a Building (README §19.1)
@@ -284,14 +295,17 @@ class HeuristicBot(PlayerController):
         if isinstance(action, ActivateRitual):
             return b.RITUAL + self._ritual_cost(action, ctx)
 
+        if isinstance(action, RevealRitual):
+            return self._reveal_ritual_score(action, ctx)
+
         if isinstance(action, StartConstruction):
             return b.CONSTRUCTION
 
         if isinstance(action, CoronateKing):
-            return b.CORONATION
+            return b.CORONATION + self._score_coronation(action, ctx)
 
         if isinstance(action, ChangeKing):
-            return b.SUCCESSION
+            return b.SUCCESSION + self._score_change_king(action, ctx)
 
         if isinstance(action, DeclareRecompose):
             return self._score_recompose(ctx)
@@ -457,6 +471,98 @@ class HeuristicBot(PlayerController):
                 score += self._bias.SUMMON_KING_ADJACENT
 
         return score
+
+    def _score_coronation(self, action: CoronateKing, ctx: EvalContext) -> float:
+        """
+        Which King to crown, not whether to.
+
+        ``CORONATION`` is 5.0 and the first one is free (README §17), so the
+        bot was always going to crown *something* — but with a flat bias it
+        crowned whichever candidate the action list happened to offer
+        first, which is as good as at random across a pool of three. Getting
+        this wrong is what made Succession look necessary; getting it right
+        is most of the value, since a King crowned to match the deck rarely
+        needs replacing.
+        """
+        from game.ai.evaluation import board_archetype, king_policy_value
+
+        obs = ctx.obs
+        if obs is None:
+            return 0.0
+        return king_policy_value(
+            action.king_card_id, obs, ctx.weights, ctx.registry,
+            board_archetype(obs, ctx.registry),
+        )
+
+    def _score_change_king(self, action: ChangeKing, ctx: EvalContext) -> float:
+        """
+        Succession is worth the King you gain minus the King you retire
+        minus what it costs to swap them.
+
+        This used to be the bare ``SUCCESSION`` bias and nothing else — a
+        constant −1.5, with no upside term of any kind. Since
+        ``END_PREPARATION`` is 0.0, no ChangeKing could ever outscore
+        passing, and README §53's corpus confirmed the consequence: the
+        action was offered at 19.2 % of decision points and chosen **0
+        times in 3,998 player-matches**. An entire system (§17–§19) was
+        unreachable, and §53's own goal of finding "dominant King
+        succession paths" was unanswerable because no path ever had a
+        second King on it.
+
+        The bias stays as friction — retiring a King is irreversible
+        (§19: "a retired King cannot become active again"), so it should
+        need to clear a bar — but it is now friction on a real comparison
+        instead of the whole answer.
+        """
+        from game.ai.evaluation import board_archetype, king_policy_value
+
+        obs = ctx.obs
+        if obs is None:
+            return 0.0
+
+        archetype = board_archetype(obs, ctx.registry)
+        gained = king_policy_value(
+            action.king_card_id, obs, ctx.weights, ctx.registry, archetype
+        )
+        retired = king_policy_value(
+            getattr(obs, "own_active_king", None), obs, ctx.weights,
+            ctx.registry, archetype,
+        )
+
+        cost = 0.0
+        sacrifice = getattr(action, "sacrifice_position", None)
+        if sacrifice is not None:
+            unit = ctx.unit_at(sacrifice)
+            if unit is not None:
+                cost += ctx.weights.material * piece_value(unit.piece_type) * 0.5
+        if getattr(action, "destroy_building_id", None) is not None:
+            cost += ctx.weights.building_complete
+
+        return gained - retired - cost
+
+    def _reveal_ritual_score(self, action: "RevealRitual", ctx: EvalContext) -> float:
+        """
+        What one voluntary revelation step is worth (README §15.2).
+
+        Revealing costs information and buys nothing on the board, so the
+        only reason to do it is the Ritual waiting at the top of the ladder.
+        The second step is worth more than the first because it is the one
+        that actually unlocks ActivateRitual; the first only shortens the
+        queue. Both are scaled off ``RITUAL`` so the whole plan moves with a
+        personality's appetite for Rituals — see the note on the constants.
+        """
+        b = self._bias
+        rstate = next(
+            (rs for rs in ctx.obs.own_rituals if rs.ritual_id == action.ritual_id),
+            None,
+        )
+        if rstate is None:
+            return 0.0
+        near_payoff = rstate.revelation == RevelationState.FORETOLD
+        fraction = (
+            b.REVEAL_RITUAL_REVEAL if near_payoff else b.REVEAL_RITUAL_FORETELL
+        )
+        return b.RITUAL * fraction
 
     def _ritual_cost(self, action: ActivateRitual, ctx: EvalContext) -> float:
         """The Ritual bonus is flat; the material it eats is not."""

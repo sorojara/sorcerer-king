@@ -206,6 +206,10 @@ def format_event(event: "ev.Event", registry: "object | None" = None) -> str:
     if isinstance(event, ev.FinalDuelTriggered):
         return f"Final Duel! {event.attacker} vs {event.defender} ({event.duel_type.value})"
     if isinstance(event, ev.GameOver):
+        # No winner means a README §53 termination limit called the match
+        # (repetition / no progress / turn ceiling) — nobody won it.
+        if event.winner is None:
+            return f"Game over — draw ({event.reason})"
         return f"Game over — {event.winner} wins ({event.reason})"
 
     # Stage 12: Final Duel round-by-round actions (see ui/pygame_app.py's

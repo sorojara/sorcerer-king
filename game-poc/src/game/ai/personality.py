@@ -100,6 +100,15 @@ STAPLE_BIASES: tuple[str, ...] = (
 )
 STAPLE_FLOOR: float = 0.6
 
+#: The one way past that floor.  A play style whose whole idea is to skip a
+#: system — the Chess Purist declining the card game — names it in
+#: ``Personality.abstains`` and gets this bias instead of the floor.  It is
+#: a *declaration*, not a multiplier: a style cannot drift below the floor
+#: by tuning, only by saying outright which systems it does not play.  The
+#: value sits below every board-derived bonus a Summon or a Ritual can pick
+#: up, so an abstaining bot passes PREPARATION rather than half-playing it.
+ABSTAIN_BIAS: float = -4.0
+
 
 def clamp_tilt(multiplier: float) -> float:
     """Force a personality multiplier inside ``[TILT_FLOOR, TILT_CEIL]``."""
@@ -123,22 +132,29 @@ class ActionBiasSet:
         self,
         tilt: "dict[str, float] | None" = None,
         base: "type[ActionBias] | ActionBias" = ActionBias,
+        abstains: "frozenset[str] | None" = None,
     ) -> None:
         tilt = tilt or {}
-        unknown = set(tilt) - {n for n in dir(base) if n.isupper()}
+        abstains = abstains or frozenset()
+        fields = {n for n in dir(base) if n.isupper()}
+        unknown = (set(tilt) | set(abstains)) - fields
         if unknown:
             raise ValueError(
                 f"unknown ActionBias field(s): {', '.join(sorted(unknown))}"
             )
-        for name in dir(base):
-            if not name.isupper():
-                continue
+        for name in fields:
             default = getattr(base, name)
+            if name in abstains:
+                # A declared abstention (see ABSTAIN_BIAS): this style does
+                # not play this system at all.
+                setattr(self, name, ABSTAIN_BIAS)
+                continue
             value = default * clamp_tilt(tilt.get(name, 1.0))
             if name in STAPLE_BIASES:
-                # The staple floor is what stops a play style from becoming
-                # a refusal to play: whatever the tilt asked for, a Summon
-                # stays worth summoning.
+                # The staple floor is what stops a play style from *drifting*
+                # into a refusal to play: whatever the tilt asked for, a
+                # Summon stays worth summoning unless the style said outright
+                # that it abstains.
                 value = max(value, default * STAPLE_FLOOR)
             setattr(self, name, value)
 
@@ -199,9 +215,20 @@ class Personality:
 
     ``weight_tilt`` / ``bias_tilt`` are multipliers on ``EvalWeights`` and
     ``ActionBias`` fields; both are clamped when applied (see the module
-    docstring).  ``blend`` is the Opportunist's escape hatch: given an
-    Observation it returns a mixture over *other* personality keys, which
-    ``tilts()`` averages into a single tilt for that decision.
+    docstring).
+
+    ``abstains`` names the staple actions this style declines outright —
+    the Chess Purist's whole idea.  It is the only way past the staple
+    floor, and it is deliberately a declaration rather than a tuning knob:
+    a style cannot *drift* into refusing to play, it has to say so.
+
+    ``blend`` is the adaptive styles' escape hatch: given an Observation it
+    returns a mixture over *stance* names, which ``tilts()`` averages into
+    a single tilt for that turn.  A stance is any entry in ``_STANCES`` —
+    the five §51 archetypes, plus the private stances an adaptive style
+    switches between.  A blended style's ``abstains`` is its own; stances
+    do not contribute abstentions, because "sometimes refuses to play a
+    system" is not a thing this design wants to be able to express.
     """
 
     key: str
@@ -210,6 +237,7 @@ class Personality:
     priorities: tuple[str, ...] = ()
     weight_tilt: "dict[str, float]" = field(default_factory=dict)
     bias_tilt: "dict[str, float]" = field(default_factory=dict)
+    abstains: frozenset[str] = frozenset()
     blend: "Callable[[Observation], dict[str, float]] | None" = None
 
     @property
@@ -235,7 +263,7 @@ class Personality:
 
     def biases(self, obs: "Observation | None" = None) -> ActionBiasSet:
         """The action-bias table for this play style."""
-        return ActionBiasSet(self.tilts(obs)[1])
+        return ActionBiasSet(self.tilts(obs)[1], abstains=self.abstains)
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"Personality({self.key!r})"
@@ -258,10 +286,10 @@ def _blend_tilts(mix: "dict[str, float]", attr: str) -> "dict[str, float]":
     """
     keys: set[str] = set()
     for pkey in mix:
-        keys.update(getattr(PERSONALITIES[pkey], attr))
+        keys.update(getattr(_STANCES[pkey], attr))
     return {
         name: sum(
-            share * getattr(PERSONALITIES[pkey], attr).get(name, 1.0)
+            share * getattr(_STANCES[pkey], attr).get(name, 1.0)
             for pkey, share in mix.items()
         )
         for name in keys
@@ -388,7 +416,86 @@ def opportunist_mix(obs: "Observation") -> "dict[str, float]":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# The five play styles (README §51)
+# The Rogue's clock
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: A full board is two armies of 39 points.  Below ``_ENDGAME_MATERIAL`` of
+#: the total still standing, the game is being decided rather than built.
+_OPENING_MATERIAL: float = 60.0
+_ENDGAME_MATERIAL: float = 24.0
+
+_EARLY_TURN: float = 10.0
+_LATE_TURN: float = 28.0
+
+_DECK_COMFORTABLE: float = 10.0
+_DECK_EMPTY: float = 2.0
+
+
+def _ramp(value: float, start: float, full: float) -> float:
+    """
+    0.0 at ``start``, 1.0 at ``full``, linear between, clamped outside.
+
+    ``start`` may be either side of ``full``, so a signal that *falls* as
+    the game progresses (material, deck size) reads the same way as one
+    that rises (turn number).
+    """
+    if start == full:
+        return 1.0 if value == full else 0.0
+    return max(0.0, min(1.0, (value - start) / (full - start)))
+
+
+def endgame_pressure(obs: "Observation") -> float:
+    """
+    How much the board says the endgame has arrived, in ``[0, 1]``.
+
+    Built only from signals that do not go backwards — material on the
+    board, the turn number, the deck draining, Rituals coming out from
+    under their seals.  That matters: the Rogue's whole idea is that it
+    commits *once*.  A signal that flickers (a King in check for one turn)
+    would have it dumping its hand and then wishing it hadn't, so none are
+    used, and no latch is needed to paper over it.
+    """
+    material = sum(
+        _PIECE_POINTS.get(unit.piece_type, 0.0) for unit in obs.board.units
+    )
+    revealed = sum(
+        1 for rs in obs.own_rituals
+        if getattr(rs, "revelation", None) in (
+            RevelationState.FORETOLD, RevelationState.REVEALED
+        )
+    ) + sum(
+        1 for info in obs.opponent_ritual_info
+        if info.revelation in (
+            RevelationState.FORETOLD, RevelationState.REVEALED
+        )
+    )
+
+    signals = (
+        _ramp(material, _OPENING_MATERIAL, _ENDGAME_MATERIAL),
+        _ramp(float(obs.turn_number), _EARLY_TURN, _LATE_TURN),
+        _ramp(float(obs.own_deck_count), _DECK_COMFORTABLE, _DECK_EMPTY),
+        _ramp(float(revealed), 0.0, 3.0),
+    )
+    return sum(signals) / len(signals)
+
+
+def rogue_mix(obs: "Observation") -> "dict[str, float]":
+    """
+    The Rogue's stance for this turn: hoarding, spending, or on the way
+    between the two.
+
+    A hard switch would make the Rogue's one interesting moment depend on a
+    threshold nobody can see, and would flip back and forth around it.  A
+    ramp means the hand starts opening as the endgame approaches and is
+    fully open by the time it arrives — which is what "feels like the end
+    game starts" actually looks like from the other side of the board.
+    """
+    pressure = endgame_pressure(obs)
+    return {"rogue_hoard": 1.0 - pressure, "rogue_spend": pressure}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The play styles
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONQUEROR = Personality(
@@ -560,6 +667,150 @@ ASSASSIN = Personality(
     },
 )
 
+CHESS_PURIST = Personality(
+    key="purist",
+    name="Chess Purist",
+    blurb="Wins at chess. Declines the card game.",
+    priorities=(
+        "Chess play    everything",
+        "Material      high",
+        "King safety   high",
+        "Preparation   declined",
+    ),
+    weight_tilt={
+        # Everything that shows up on a chessboard, turned up.
+        "material": 1.35,
+        "board_control_square": 1.5,
+        "board_control_centrality": 1.5,
+        "pawn_advance": 1.4,
+        "king_safety_check": 1.4,
+        "king_safety_attacker": 1.35,
+        "royal_support": 1.3,
+        "enemy_king_check": 1.4,
+        "enemy_king_attacker": 1.3,
+        "hanging_penalty": 1.4,          # it is playing for the pieces
+        # Everything that does not, turned down to the floor.  It cannot go
+        # to zero — the Purist still *sees* an enemy Building as terrain and
+        # an enemy Monster as a stronger piece, because both are on the board
+        # and pretending otherwise would be blindness, not purity.
+        "building_complete": 0.6,
+        "building_under_construction": 0.6,
+        "building_integrity": 0.6,
+        "territory_square": 0.6,
+        "ritual_progress": 0.6,
+        "ritual_foretold": 0.6,
+        "ritual_revealed": 0.6,
+        "ritual_activated": 0.6,
+        "ritual_monster": 0.6,
+        "card_in_hand": 0.6,
+        "card_in_deck": 0.6,
+        "hand_summonable": 0.6,
+        "hand_playable": 0.6,
+    },
+    bias_tilt={
+        "CASTLE": 1.6,                   # the one preparation-ish thing it loves
+        "MERCENARY": 0.6,
+        "RECOMPOSE": 0.6,
+    },
+    # The declaration.  Everything the card game asks it to do, it declines
+    # — and because this is stated rather than tuned, the staple floor stays
+    # intact for every other style (see ABSTAIN_BIAS).  Coronation is NOT on
+    # the list: a King is a chess piece, and §17 makes crowning one free.
+    abstains=frozenset({
+        "SUMMON", "RITUAL", "CONSTRUCTION",
+        "SPELL", "TRAP", "ACTIVATE_TRAP", "MONSTER_ABILITY",
+    }),
+)
+
+# ── The Rogue's two stances (README §51-style, but private) ──────────────
+# Not roster entries: nobody picks "Hoarding" from the menu.  They exist so
+# the Rogue can be expressed the same way the Opportunist is — as a blend —
+# rather than as a second adaptive mechanism.
+
+_ROGUE_HOARD = Personality(
+    key="rogue_hoard",
+    name="Rogue (hoarding)",
+    blurb="Plays chess and keeps its powder dry.",
+    weight_tilt={
+        # Cards in hand are the whole point of the stance.
+        "card_in_hand": 2.2,
+        "card_in_deck": 1.5,
+        "hand_summonable": 1.6,
+        "hand_playable": 1.5,
+        # Meanwhile: play solid, unspectacular chess.
+        "material": 1.25,
+        "board_control_square": 1.25,
+        "board_control_centrality": 1.2,
+        "king_safety_attacker": 1.2,
+        "hanging_penalty": 1.3,
+        # Don't chase the long games yet.
+        "ritual_progress": 0.7,
+        "building_complete": 0.75,
+        "territory_square": 0.75,
+        "duel_pressure": 0.8,
+    },
+    bias_tilt={
+        # Floored, not abstained — the Rogue *saves* its resources, it does
+        # not swear off them.  A free Ritual is still a free Ritual.
+        "SUMMON": 0.6,
+        "RITUAL": 0.6,
+        "CONSTRUCTION": 0.6,
+        "SPELL": 0.6,
+        "TRAP": 0.6,
+        "MERCENARY": 0.6,
+        "RECOMPOSE": 2.0,                # a negative bias — churn the hand less
+    },
+)
+
+_ROGUE_SPEND = Personality(
+    key="rogue_spend",
+    name="Rogue (spending)",
+    blurb="Empties the hand and closes the game out.",
+    weight_tilt={
+        # A card still in hand at the end is a card that did nothing.
+        "card_in_hand": 0.6,
+        "card_in_deck": 0.6,
+        # Everything it was saving for.
+        "ritual_progress": 2.2,
+        "ritual_revealed": 2.0,
+        "ritual_activated": 2.4,
+        "ritual_monster": 2.0,
+        "monster_unit": 1.8,
+        "monster_effect": 1.6,
+        "building_complete": 1.4,
+        # ... spent on ending it.
+        "enemy_king_check": 1.8,
+        "enemy_king_attacker": 1.8,
+        "duel_pressure": 2.2,
+        "hanging_penalty": 0.8,          # no time left to be careful
+    },
+    bias_tilt={
+        "SUMMON": 2.0,
+        "RITUAL": 2.0,
+        "SPELL": 1.8,
+        "TRAP": 1.5,
+        "ACTIVATE_TRAP": 1.5,
+        "MONSTER_ABILITY": 1.5,
+        "MERCENARY": 1.8,
+        "CONSTRUCTION": 1.2,
+        "RECOMPOSE": 0.6,                # now worth digging for the last card
+        "DUEL_STRIKE": 1.3,
+    },
+)
+
+ROGUE = Personality(
+    key="rogue",
+    name="Rogue",
+    blurb="Hoards its cards, then spends everything late.",
+    priorities=(
+        "Early    chess, and saving cards",
+        "Late     every resource at once",
+        "Switch   as the endgame arrives",
+        "Reads    material, turn, deck, Rituals",
+    ),
+    blend=lambda obs: rogue_mix(obs),
+)
+
 OPPORTUNIST = Personality(
     key="opportunist",
     name="Opportunist",
@@ -575,9 +826,23 @@ OPPORTUNIST = Personality(
 )
 
 
-#: Every play style, in the order README §51 lists them.
+#: Every play style, README §51's five in the order it lists them, then the
+#: two the game added after it.
 PERSONALITIES: "dict[str, Personality]" = {
-    p.key: p for p in (CONQUEROR, ARCHITECT, RITUALIST, ASSASSIN, OPPORTUNIST)
+    p.key: p for p in (
+        CONQUEROR, ARCHITECT, RITUALIST, ASSASSIN, OPPORTUNIST,
+        CHESS_PURIST, ROGUE,
+    )
+}
+
+#: What a ``blend`` may name: every play style, plus the private stances an
+#: adaptive style switches between.  Stances are not selectable — nobody
+#: picks "Rogue (hoarding)" off a menu — they are how an adaptive style is
+#: written down.
+_STANCES: "dict[str, Personality]" = {
+    **PERSONALITIES,
+    _ROGUE_HOARD.key: _ROGUE_HOARD,
+    _ROGUE_SPEND.key: _ROGUE_SPEND,
 }
 
 PERSONALITY_KEYS: list[str] = list(PERSONALITIES)

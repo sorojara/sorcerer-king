@@ -51,6 +51,7 @@ from game.core.state import (
     BuildingPoolEntry,
     GameState,
     KingCardState,
+    MatchLimits,
     PlayerState,
 )
 from game.telemetry import MatchStats, MatchTelemetry
@@ -179,6 +180,10 @@ class Game:
         self._telemetry = MatchTelemetry(
             game_id=state.game_id, seed=state.rng_seed, enabled=telemetry
         )
+        # README §53: what each player was dealt, before anything happens to
+        # it. The deal is the randomisation every card-strength number leans
+        # on, and it precedes the first event.
+        self._telemetry.record_opening(state)
 
     # ── Factory ──────────────────────────────────────────────────────────
 
@@ -193,6 +198,7 @@ class Game:
         white_building_pool: "list[BuildingPoolEntry] | None" = None,
         black_building_pool: "list[BuildingPoolEntry] | None" = None,
         telemetry: bool = True,
+        limits: "MatchLimits | None" = None,
     ) -> "Game":
         """
         Create a new game in the standard starting position.
@@ -206,6 +212,10 @@ class Game:
             player's public pre-match Building Pool (README §12). Defaults
             to ``_default_building_pool()`` when omitted.
         ``telemetry``  — README §42 match instrumentation; on by default.
+        ``limits``     — README §53 termination ceilings (repetition, no
+            progress, turn cap). Defaults to ``MatchLimits()``; §57 keeps
+            the numbers configurable, so a balance run or a self-play
+            corpus can set its own.
 
         Initial state:
             • Standard chess starting position.
@@ -295,6 +305,7 @@ class Game:
             board=board,
             players={"white": white, "black": black},
             rng_seed=seed,
+            limits=limits if limits is not None else MatchLimits(),
         )
 
         return cls(state=state, rng=rng, registry=registry, telemetry=telemetry)

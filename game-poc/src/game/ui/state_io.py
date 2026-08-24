@@ -257,6 +257,7 @@ def _building_to_d(b: BuildingInstance) -> dict:
         "max_integrity": b.max_integrity, "integrity": b.integrity,
         "protection_uses": b.protection_uses, "protection_turns": b.protection_turns,
         "vulnerable_turns": b.vulnerable_turns, "vulnerable_amount": b.vulnerable_amount,
+        "damaged_this_round": b.damaged_this_round,
     }
 
 def _building_from_d(d: dict) -> BuildingInstance:
@@ -274,6 +275,10 @@ def _building_from_d(d: dict) -> BuildingInstance:
         protection_turns=d.get("protection_turns", 0),
         vulnerable_turns=d.get("vulnerable_turns", 0),
         vulnerable_amount=d.get("vulnerable_amount", 1),
+        # Saves written before the repair-suppression rule have no flag;
+        # False just means "repairable", which is the safe default for a
+        # Building nobody is currently besieging.
+        damaged_this_round=d.get("damaged_this_round", False),
     )
 
 def _duel_to_d(ds: DuelState) -> dict:

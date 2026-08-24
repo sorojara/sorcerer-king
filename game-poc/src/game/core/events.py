@@ -668,8 +668,10 @@ class FinalDuelTriggered(Event):
 
 @dataclass(frozen=True)
 class GameOver(Event):
-    winner: str
-    reason: str  # "final_duel_victory" | "duel_forfeit" | …
+    #: None when the match was called by a README §53 termination limit
+    #: (see MatchLimits) rather than won — nobody wins a stagnation.
+    winner: str | None
+    reason: str  # "final_duel_victory" | "duel_forfeit" | "repetition" | …
 
 
 # ─────────────────────────────────────────────────────────────────────────────

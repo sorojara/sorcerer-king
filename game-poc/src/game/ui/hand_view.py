@@ -27,7 +27,7 @@ Scrollable hand (current):
 
 When ``opponent_hand`` is provided (a list of card IDs obtained from the
 raw game state for the debug "show black hand" feature), a second row is
-drawn above the active hand labelled "Black hand (debug)".
+drawn below the active hand labelled "Black hand".
 
 When ``discard_mode=True``, the strip label turns red and each card tile
 gets a red hover-able border to indicate the player must click one to
@@ -187,7 +187,7 @@ class HandView:
         """
         Render the hand strip below the board.
 
-        ``opponent_cards``       — if given, an extra debug row is drawn above.
+        ``opponent_cards``       — if given, an extra debug row is drawn below.
         ``discard_mode``         — when True, cards show red border (must discard).
         ``selected_card_id``     — card held for summon targeting (gold border).
         ``playable_card_ids``    — Stage 6: when given, any own-hand card_id NOT
@@ -204,7 +204,10 @@ class HandView:
                                    others are shown greyed out.
         """
         if opponent_cards is not None:
-            opp_y = self._y - self.HEIGHT
+            # Below the own-hand row, in the extra strip the window grows by
+            # when the debug toggle is on (_WIN_H_DEBUG in pygame_app.py) —
+            # drawing it ABOVE would put it on top of the board's bottom rank.
+            opp_y = self._y + self.HEIGHT
             self._draw_row(
                 opp_y,
                 card_ids=opponent_cards,

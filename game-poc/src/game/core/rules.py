@@ -104,6 +104,7 @@ from game.core.actions import (
     PromotePawn,
     ReorderTopDeck,
     RepositionUnit,
+    RevealRitual,
     SelectMercenaryCards,
     SelectRecomposeCards,
     StartConstruction,
@@ -120,6 +121,7 @@ from game.core.events import (
     EnPassantCapture,
     Event,
     FinalDuelTriggered,
+    GameOver,
     MercenaryContractFired,
     MercenaryPiecePlaced,
     MonsterAbilityActivated,
@@ -142,6 +144,7 @@ from game.core.phases import (
     KingCardStatus,
     Phase,
     PieceType,
+    RevelationState,
     VALID_VESSEL_TYPES,
 )
 from game.core.rng import DeterministicRNG
@@ -237,6 +240,11 @@ class RulesEngine:
             _log.warning("OWNERSHIP FAIL  %s: %s", type(action).__name__, exc)
             raise
 
+        # A decision nobody can resolve blocks the match, so it is cleared
+        # here rather than enforced (see _reposition_is_stale).  This is the
+        # mutating entry point; get_legal_actions only declines to offer it.
+        self._drop_stale_pending_decision(state)
+
         events: list[Event] = []
 
         # Dispatch
@@ -267,6 +275,8 @@ class RulesEngine:
                 events = self._execute_start_construction(state, action)
             elif isinstance(action, ActivateRitual):
                 events = self._execute_activate_ritual(state, action, rng, registry=self._registry)
+            elif isinstance(action, RevealRitual):
+                events = self._execute_reveal_ritual(state, action, rng, registry=self._registry)
             elif isinstance(action, CoronateKing):
                 events = self._execute_coronate_king(state, action)
             elif isinstance(action, ChangeKing):
@@ -839,14 +849,19 @@ class RulesEngine:
                                 player_id=player_id, trap_instance_id=trap.id,
                             ))
                 # Stage 11: Activate Ritual — one per legal sacrifice combo
-                # per not-yet-activated Ritual in the player's pool (see
-                # mechanics/rituals.find_ritual_candidates; bounded per
-                # condition type, no combinatorial explosion).
+                # per REVEALED, not-yet-activated Ritual in the player's pool
+                # (see mechanics/rituals.find_ritual_candidates; bounded per
+                # condition type, no combinatorial explosion). A Ritual that
+                # is still SEALED or FORETOLD is skipped outright: the
+                # revelation ladder has to be climbed first, via RevealRitual
+                # below or a §15.1 trigger.
                 if registry is not None:
                     from game.cards.card import RitualCard
                     from game.mechanics.rituals import find_ritual_candidates
                     for rstate in ps.ritual_pool:
                         if rstate.activated or rstate.ritual_id not in registry:
+                            continue
+                        if rstate.revelation != RevelationState.REVEALED:
                             continue
                         ritual = registry.get(rstate.ritual_id)
                         if not isinstance(ritual, RitualCard):
@@ -857,13 +872,30 @@ class RulesEngine:
                                 ritual_id=rstate.ritual_id,
                                 sacrifice_positions=combo,
                             ))
+
+            # Stage 11 (README §15.2): Reveal Ritual — OUTSIDE the
+            # preparation-action guard above, because it does not consume
+            # one. Its own cap is per-turn and lives on PlayerState, so a
+            # player can still reveal after summoning, building, or crowning.
+            if not ps.ritual_reveal_used_this_turn:
+                for rstate in ps.ritual_pool:
+                    if rstate.activated or rstate.revelation == RevelationState.REVEALED:
+                        continue
+                    actions.append(RevealRitual(
+                        player_id=player_id, ritual_id=rstate.ritual_id,
+                    ))
             return actions
 
         if phase == Phase.CHESS:
             # Stage 5: if a REPOSITION decision is pending, only reposition actions
             # are legal until the player resolves it.
             pd = state.pending_decision
-            if pd is not None and pd.decision_type == DecisionType.REPOSITION and pd.player_id == player_id:
+            if (
+                pd is not None
+                and pd.decision_type == DecisionType.REPOSITION
+                and pd.player_id == player_id
+                and not self._reposition_is_stale(state, pd)
+            ):
                 piece_id = pd.context.get("piece_id")
                 cur_tuple = pd.context.get("current_pos")
                 if piece_id and cur_tuple:
@@ -959,6 +991,10 @@ class RulesEngine:
                         continue
                     for eff in card.effects:
                         if eff.type not in ACTIVATED_EFFECT_TYPES:
+                            continue
+                        # Once per turn per (unit, ability) — see
+                        # PlayerState.abilities_used_this_turn.
+                        if (unit.piece.id, eff.type) in ps.abilities_used_this_turn:
                             continue
                         if eff.type not in _TARGETED_ABILITIES:
                             # Stage 13: a couple of untargeted abilities
@@ -1189,32 +1225,93 @@ class RulesEngine:
                 return actions
 
             if effect.type == "reposition_unit":
-                max_dist = effect.params.get("max_distance", 1)
-                must_be_own = effect.params.get("must_be_own", True)
-                for pos, unit in state.board.all_units_for(player_id):
-                    if must_be_own and unit.piece.piece_type == PieceType.KING:
+                # The handler (mechanics/effects/movement.py _reposition_unit)
+                # implements four modes off the card's own params.  This
+                # enumeration used to implement only one of them — the plain
+                # max_distance box — which made two cards *provably* dead:
+                # knightfall was offered Pawns when it can only target a
+                # Knight, and evacuation_order was never offered the King it
+                # exists to move, because the blanket no-King rule below
+                # skipped it.  README §53's corpus analysis is what found
+                # them: both sat at a 0 % play rate over ~100 deck
+                # appearances each while every offered action was refused.
+                # Whatever is enumerated here has to match what the handler
+                # will accept, or the card is unplayable however well it is
+                # implemented.
+                from game.mechanics.effects.movement import _KNIGHT_OFFSETS
+
+                params = effect.params
+                max_dist = params.get("max_distance", 1)
+                must_be_own = params.get("must_be_own", True)
+                piece_types = params.get("piece_types")
+                knight_pattern = params.get("movement_pattern") == "knight"
+                targets_own_king = params.get("target") == "own_king"
+
+                from game.chess.movement import blocks_movement, is_in_check
+
+                # evacuation_order: "Cannot be activated while in Check."
+                if (
+                    targets_own_king
+                    and params.get("only_when_not_in_check", False)
+                    and is_in_check(state.board, player_id)
+                ):
+                    candidates = []
+                else:
+                    candidates = list(state.board.all_units_for(player_id))
+
+                for pos, unit in candidates:
+                    is_king = unit.piece.piece_type == PieceType.KING
+                    if targets_own_king:
+                        if not is_king:
+                            continue
+                    elif must_be_own and is_king:
+                        continue
+                    if (
+                        piece_types is not None
+                        and unit.piece.piece_type.value not in piece_types
+                    ):
                         continue
                     # Stage 8: a Pawn committed to construction cannot be
                     # relocated by any means, including this Spell.
                     if is_committed_builder(state, unit.piece.id):
                         continue
-                    for df in range(-max_dist, max_dist + 1):
-                        for dr in range(-max_dist, max_dist + 1):
-                            nf, nr = pos.file + df, pos.rank + dr
-                            if not (0 <= nf <= 7 and 0 <= nr <= 7):
+
+                    if knight_pattern:
+                        offsets = _KNIGHT_OFFSETS
+                    else:
+                        offsets = [
+                            (df, dr)
+                            for df in range(-max_dist, max_dist + 1)
+                            for dr in range(-max_dist, max_dist + 1)
+                        ]
+
+                    for df, dr in offsets:
+                        nf, nr = pos.file + df, pos.rank + dr
+                        if not (0 <= nf <= 7 and 0 <= nr <= 7):
+                            continue
+                        dest = Position(nf, nr)
+                        if state.board.get_unit(dest) is not None:
+                            continue
+                        # Stage 13: a COMPLETE enemy Building is terrain
+                        # the relocated unit can't stand on either.
+                        if blocks_movement(state.board, dest, unit.owner):
+                            continue
+                        # evacuation_order's destination_must_be_legal: the
+                        # King may not walk into check.  Tested the same way
+                        # the handler tests it, so the offer and the
+                        # acceptance cannot disagree.
+                        if targets_own_king and params.get(
+                            "destination_must_be_legal", False
+                        ):
+                            state.board.move_unit(pos, dest)
+                            unsafe = is_in_check(state.board, unit.owner)
+                            state.board.move_unit(dest, pos)
+                            if unsafe:
                                 continue
-                            dest = Position(nf, nr)
-                            if state.board.get_unit(dest) is not None:
-                                continue
-                            # Stage 13: a COMPLETE enemy Building is terrain
-                            # the relocated unit can't stand on either.
-                            from game.chess.movement import blocks_movement
-                            if blocks_movement(state.board, dest, unit.owner):
-                                continue
-                            actions.append(ActivateSpell(
-                                player_id=player_id, card_id=card_id,
-                                target={"position": (pos.file, pos.rank), "destination": (nf, nr)},
-                            ))
+                        actions.append(ActivateSpell(
+                            player_id=player_id, card_id=card_id,
+                            target={"position": (pos.file, pos.rank), "destination": (nf, nr)},
+                        ))
 
             elif effect.type == "move_unit":
                 # forced_march: advance one owned Pawn ``distance`` squares
@@ -1511,12 +1608,35 @@ class RulesEngine:
         events: list[Event] = []
 
         # ── En passant detection ──────────────────────────────────────────
-        is_ep = (
+        # The diagonal test is load-bearing, not decoration.  En passant is
+        # a *capture*, so the file always changes; a straight push that
+        # happens to land on the en-passant square is an ordinary move.
+        # Without that check, a Pawn pushing h2→h3 while ``ep`` was h3
+        # (White's own double-push from two plies earlier, with a Pawn
+        # since returned to h2 by tunnel_mole's burrow) was read as en
+        # passant, and the "captured" square it computed was h2 — the
+        # mover's own square.  The engine removed the moving Pawn and then
+        # crashed trying to move it: "No unit at source square h2".
+        # Found by a README §53 corpus run, one match in a thousand.
+        #
+        # The victim test is the same argument from the other side: the
+        # square behind the target has to actually hold an enemy Pawn.
+        is_ep = False
+        if (
             unit.piece.piece_type == PieceType.PAWN
             and ep is not None
             and action.target == ep
+            and action.source.file != action.target.file
             and state.board.get_unit(action.target) is None
-        )
+        ):
+            _direction = 1 if unit.owner == "white" else -1
+            _victim_sq = Position(action.target.file, action.target.rank - _direction)
+            _victim = state.board.get_unit(_victim_sq)
+            is_ep = (
+                _victim is not None
+                and _victim.owner != unit.owner
+                and _victim.piece.piece_type == PieceType.PAWN
+            )
         if is_ep:
             direction = 1 if unit.owner == "white" else -1
             captured_sq = Position(action.target.file, action.target.rank - direction)
@@ -1905,10 +2025,16 @@ class RulesEngine:
             raise IllegalActionError(f"No completed Building at {action.target}.")
         if building.owner == action.player_id:
             raise IllegalActionError("Cannot attack your own Building.")
-        if state.board.get_unit(action.target) is not None:
-            raise IllegalActionError(
-                "A unit is garrisoning that Building — capture it first."
-            )
+        # A siege targets the STRUCTURE, not the square's occupant, so a
+        # unit standing on the Building does not shield it. The older rule
+        # ("deal with the garrison first") was unsatisfiable: a COMPLETE
+        # Building is impassable to the enemy (chess.movement.blocks_
+        # movement), so no enemy piece can ever move onto that square to
+        # capture the garrison. Since a Building is raised on the Builder
+        # Pawn's OWN square (_execute_start_construction) and nothing
+        # moves that Pawn off, every finished Building started life
+        # permanently unbesiegeable, for free. Razing one still leaves the
+        # garrison standing on the now-empty square.
         if not can_attack_building(state, unit, building, self._registry):
             raise IllegalActionError(
                 "Only Ritual Monsters, Monsters with a building_damage_bonus, "
@@ -1983,6 +2109,12 @@ class RulesEngine:
         Rook "see" a second Building through the first, when in reality the
         near one still blocks the ray. A siege has to be reachable given the
         board as it actually stands.
+
+        A garrisoned Building is enumerated like any other — see
+        _execute_attack_building on why a unit standing on the structure no
+        longer shields it. With the wall lifted the garrison reads to the
+        move generator as an ordinary enemy piece, so the square is
+        reachable exactly when the attacker could capture on it.
         """
         from game.core.phases import ConstructionStatus
 
@@ -1991,7 +2123,6 @@ class RulesEngine:
             b.position for b in state.buildings
             if b.owner == opponent
             and b.status == ConstructionStatus.COMPLETE
-            and state.board.get_unit(b.position) is None
         ]
         if not wall_squares:
             return set()
@@ -2358,6 +2489,17 @@ class RulesEngine:
             )
         effect_entry = matching[0]
 
+        # Once per turn per (unit, ability).  get_legal_actions already stops
+        # offering a spent ability; this is the rule itself, so a caller that
+        # builds the action by hand cannot slip past it.
+        ability_key = (unit.piece.id, action.ability_id)
+        ps = state.get_player(action.player_id)
+        if ability_key in ps.abilities_used_this_turn:
+            raise IllegalActionError(
+                f"{action.ability_id!r} has already been activated by this "
+                f"Monster this turn."
+            )
+
         events: list[Event] = []
 
         ctx = EffectContext(
@@ -2373,6 +2515,10 @@ class RulesEngine:
             extra={"target": action.target},
         )
         resolve_effect(ctx)
+
+        # Recorded only after the effect resolved: an ability whose handler
+        # rejected the attempt was never spent.
+        ps.abilities_used_this_turn.add(ability_key)
 
         events.append(MonsterAbilityActivated(
             player_id=action.player_id,
@@ -3084,6 +3230,18 @@ class RulesEngine:
         if rstate is None:
             raise IllegalActionError(f"Ritual {action.ritual_id!r} is not in your pool.")
 
+        # README §15: a Ritual is summoned from the last rung of the
+        # revelation ladder, never off it. Everything about the Ritual is
+        # public by the time the sacrifice happens — the opponent has had at
+        # least one turn to answer it. RevealRitual is how the owner climbs
+        # there voluntarily (§15.2); the §15.1 triggers push them up it
+        # whether they like it or not.
+        if rstate.revelation != RevelationState.REVEALED:
+            raise IllegalActionError(
+                f"Ritual {ritual.name!r} is {rstate.revelation.name.lower()} — "
+                f"it must be REVEALED before it can be activated."
+            )
+
         # profane_interruption: an enemy Trap covering any of the proposed
         # sacrifice squares blocks this attempt outright — checked BEFORE
         # validate_ritual so nothing is sacrificed either way (README text:
@@ -3135,6 +3293,63 @@ class RulesEngine:
         check_summon_traps(state, vessel_unit, _vessel_pos, events, registry, rng=rng)
         check_summon_reactions(state, vessel_unit, _vessel_pos, events, registry, rng=rng)
 
+        return events
+
+    def _execute_reveal_ritual(
+        self,
+        state: GameState,
+        action: RevealRitual,
+        rng: DeterministicRNG,
+        registry: "object | None" = None,
+    ) -> list[Event]:
+        """
+        Stage 11 — README §15.2: voluntarily advance one of your own Rituals
+        by exactly one revelation step.
+
+        Free by design. The price of revelation is the information itself —
+        the opponent's Observation widens the moment this resolves — so
+        charging the preparation action on top would bill the player twice
+        for one decision. What keeps it *progressive* is the per-turn cap
+        (PlayerState.ritual_reveal_used_this_turn): one step per turn, so
+        SEALED → FORETOLD → REVEALED → summoned is a three-turn commitment
+        the opponent can watch coming.
+
+        Counts as voluntary for arcane_sovereign's
+        ``ritual_information_discount`` (mechanics/kings.py) — this is the
+        player choosing to spend information, which is exactly what that
+        policy rebates, unlike being checked or losing the Queen.
+        """
+        from game.mechanics.kings import maybe_ritual_information_discount
+        from game.mechanics.rituals import get_ritual_state, promote_one_step
+
+        self._require_phase(state, Phase.PREPARATION)
+
+        ps = state.get_player(action.player_id)
+        if ps.ritual_reveal_used_this_turn:
+            raise IllegalActionError(
+                "You have already revealed a Ritual this turn — revelation "
+                "advances one step per turn."
+            )
+
+        rstate = get_ritual_state(state, action.player_id, action.ritual_id)
+        if rstate is None:
+            raise IllegalActionError(f"Ritual {action.ritual_id!r} is not in your pool.")
+        if rstate.activated:
+            raise IllegalActionError(
+                f"Ritual {action.ritual_id!r} has already been completed."
+            )
+        if rstate.revelation == RevelationState.REVEALED:
+            raise IllegalActionError(
+                f"Ritual {action.ritual_id!r} is already fully revealed."
+            )
+
+        events: list[Event] = []
+        promote_one_step(state, action.player_id, action.ritual_id, events)
+        ps.ritual_reveal_used_this_turn = True
+
+        maybe_ritual_information_discount(
+            state, action.player_id, rstate.revelation, events, registry, rng=rng,
+        )
         return events
 
     def _execute_coronate_king(
@@ -3801,7 +4016,114 @@ class RulesEngine:
         state.phase = Phase.START
         # (The auto-start is triggered by the next call from the game loop)
 
+        self._check_stagnation(state, events)
+
         return events
+
+    # ── Stage 6 (README §53): guaranteeing the match ends ─────────────────
+
+    @staticmethod
+    def _reposition_is_stale(state: GameState, pd: "PendingDecision") -> bool:
+        """
+        True when a pending REPOSITION names a piece that is no longer where
+        the decision was raised about it.
+
+        blade_dancer's after-capture reposition (and tunnel_mole's burrow)
+        raise the decision about a specific piece on a specific square, and
+        CHESS then offers *nothing but* that reposition until it is
+        resolved.  If the piece is captured or moved in between — a Trap
+        firing on the same square will do it — every option refers to an
+        empty square, each one is refused, the decision is never cleared,
+        and the player is locked out of their own turn for the rest of the
+        match.
+
+        Self-play found it as the second shape of non-terminating match: 3791
+        RepositionUnit attempts against "No piece at a6", 4000 steps, no
+        result.  A decision about a piece that is not there has nothing left
+        to decide, so it is dropped rather than enforced.
+        """
+        piece_id = pd.context.get("piece_id")
+        cur_tuple = pd.context.get("current_pos")
+        if not piece_id or not cur_tuple:
+            return True
+
+        unit = state.board.get_unit(Position(*cur_tuple))
+        return unit is None or unit.piece.id != piece_id
+
+    def _drop_stale_pending_decision(self, state: GameState) -> None:
+        """Clear a pending decision that can no longer be resolved."""
+        pd = state.pending_decision
+        if (
+            pd is not None
+            and pd.decision_type == DecisionType.REPOSITION
+            and self._reposition_is_stale(state, pd)
+        ):
+            _log.warning(
+                "STALE    dropping unresolvable REPOSITION decision for %s "
+                "(piece %s no longer at %s)",
+                pd.player_id, pd.context.get("piece_id"),
+                pd.context.get("current_pos"),
+            )
+            state.pending_decision = None
+
+
+    def _check_stagnation(self, state: GameState, events: list[Event]) -> None:
+        """
+        End a match that has stopped going anywhere.
+
+        §31 gives the game four ways to finish and every one of them is an
+        *event*: a King captured, a checkmate, a stalemate, a Duel won.
+        None of them is guaranteed to arrive.  Two sides that shuffle
+        pieces can decline all four indefinitely, and measurement said they
+        do — half of a 12-match RandomBot sample ran to the harness's own
+        4000-step abort with no result, and a self-play corpus where half
+        the games have no outcome is half a corpus.
+
+        So this is the floor chess has always had underneath it, extended
+        to the systems this game adds: threefold repetition, a fifty-move
+        rule that also watches Buildings and Rituals, and a turn ceiling
+        behind both.  All three are ``MatchLimits`` values rather than
+        constants, per §57.
+
+        The result is a **draw** — ``winner`` stays None while the phase
+        goes to GAME_OVER, and ``GameOver.reason`` names which limit fired.
+        This is the one place the game admits a drawn match: §31's endings
+        all route through the Final Duel precisely so that a match is
+        decided by the kingdom each player built, and awarding a stagnation
+        to whoever happens to lead on material would decide it by a rule
+        the design never made.  A draw records what actually happened —
+        neither player got there.
+
+        Called once per ply, from EndTurn, which is the only point where
+        both the position and the side to move are settled.
+        """
+        if state.is_game_over() or state.phase == Phase.FINAL_DUEL:
+            return
+
+        limits = state.limits
+
+        progress = state.progress_key()
+        if progress == state.last_progress_key:
+            state.no_progress_plies += 1
+        else:
+            state.last_progress_key = progress
+            state.no_progress_plies = 0
+
+        position = state.position_key()
+        seen = state.position_counts.get(position, 0) + 1
+        state.position_counts[position] = seen
+
+        if seen >= limits.repetition_limit:
+            reason = "repetition"
+        elif state.no_progress_plies >= limits.no_progress_plies:
+            reason = "no_progress"
+        elif state.turn_number > limits.max_turns:
+            reason = "turn_limit"
+        else:
+            return
+
+        state.phase = Phase.GAME_OVER
+        events.append(GameOver(winner=None, reason=reason))
 
     def _resolve_restore_effect_charge(
         self,

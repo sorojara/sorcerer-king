@@ -24,8 +24,10 @@ from game.ai.controller import PlayerController
 from game.ai.evaluation import DEFAULT_WEIGHTS, EvalContext, EvalWeights
 from game.ai.heuristic_bot import ActionBias, HeuristicBot
 from game.ai.personality import (
+    ABSTAIN_BIAS,
     ARCHITECT,
     ASSASSIN,
+    CHESS_PURIST,
     CONQUEROR,
     DEFAULT_PERSONALITY,
     MIX_MAX_SHARE,
@@ -34,14 +36,17 @@ from game.ai.personality import (
     PERSONALITIES,
     PERSONALITY_KEYS,
     RITUALIST,
+    ROGUE,
     STAPLE_BIASES,
     STAPLE_FLOOR,
     TILT_CEIL,
     TILT_FLOOR,
     ActionBiasSet,
     Personality,
+    endgame_pressure,
     get_personality,
     opportunist_mix,
+    rogue_mix,
     weights_from_tilt,
 )
 from game.ai.personality_bot import PersonalityBot
@@ -88,14 +93,18 @@ def _put(state: GameState, square: str, owner: str, piece_type: str) -> None:
 # The catalogue
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_readme_51_names_all_five_play_styles():
-    assert PERSONALITY_KEYS == [
+def test_the_readme_51_five_come_first_then_the_rest():
+    assert PERSONALITY_KEYS[:5] == [
         "conqueror", "architect", "ritualist", "assassin", "opportunist",
     ]
+    assert PERSONALITY_KEYS[5:] == ["purist", "rogue"]
+
+
+def test_every_style_can_describe_itself():
     for key, style in PERSONALITIES.items():
         assert style.key == key
         assert style.name and style.blurb
-        assert style.priorities, f"{key} has no README §51 priority table"
+        assert style.priorities, f"{key} has no priority table"
 
 
 def test_personalities_are_distinct():
@@ -108,9 +117,13 @@ def test_personalities_are_distinct():
         seen.append(signature)
 
 
-def test_only_the_opportunist_is_adaptive():
-    assert OPPORTUNIST.is_adaptive
-    assert all(not p.is_adaptive for p in _FIXED)
+def test_the_adaptive_styles_are_the_two_that_read_the_board():
+    """
+    §51's Opportunist re-mixes the archetypes; the Rogue switches between
+    its own two stances.  Everything else is a fixed set of numbers.
+    """
+    adaptive = {p.key for p in PERSONALITIES.values() if p.is_adaptive}
+    assert adaptive == {"opportunist", "rogue"}
 
 
 def test_get_personality_accepts_keys_and_instances():
@@ -163,19 +176,50 @@ def test_no_evaluation_category_is_ever_zeroed(style: Personality):
 @pytest.mark.parametrize("style", _FIXED, ids=lambda s: s.key)
 def test_staple_actions_keep_a_positive_bias(style: Personality):
     """
-    The user-facing promise: no play style stops playing the game.
+    The user-facing promise: no play style *drifts* into not playing.
 
     A Ritualist that never summons a Monster, or an Assassin that never
-    builds, is a broken bot — so the staples are floored for everyone.
+    builds, is a broken bot — so the staples are floored for everyone.  The
+    exception is a style that declares an abstention outright, which is
+    covered by its own tests below.
     """
     biases = style.biases()
     for name in STAPLE_BIASES:
+        if name in style.abstains:
+            continue
         default = getattr(ActionBias, name)
         value = getattr(biases, name)
         assert value > 0.0, f"{style.key} gave up on {name}"
         assert value >= default * STAPLE_FLOOR - 1e-9, (
             f"{style.key}.{name} = {value:.2f}, below the {STAPLE_FLOOR}× floor"
         )
+
+
+def test_only_the_chess_purist_abstains():
+    """
+    Skipping a system has to be a deliberate, declared design choice — if
+    any other style could do it by accident the guardrail means nothing.
+    """
+    abstaining = {p.key for p in PERSONALITIES.values() if p.abstains}
+    assert abstaining == {"purist"}
+
+
+def test_abstention_is_a_declaration_not_a_tuning_knob():
+    """
+    No multiplier can push a staple below its floor.  Only ``abstains``
+    can, and only for the names it lists.
+    """
+    starved = ActionBiasSet({"SUMMON": 0.0, "RITUAL": 0.0})
+    assert starved.SUMMON == pytest.approx(ActionBias.SUMMON * STAPLE_FLOOR)
+
+    declared = ActionBiasSet({"SUMMON": 0.0}, abstains=frozenset({"SUMMON"}))
+    assert declared.SUMMON == ABSTAIN_BIAS
+    assert declared.RITUAL >= ActionBias.RITUAL * STAPLE_FLOOR
+
+
+def test_abstaining_from_a_field_that_does_not_exist_raises():
+    with pytest.raises(ValueError, match="unknown ActionBias"):
+        ActionBiasSet(abstains=frozenset({"SUMMMON"}))
 
 
 def test_the_staple_floor_actually_bites():
@@ -266,6 +310,152 @@ def test_assassin_hunts_the_king_and_accepts_the_risk():
 def test_every_style_still_values_free_material(style: Personality):
     """Damped is not disabled — a free Queen is still a free Queen."""
     assert style.weights().material > 0.5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Chess Purist
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_purist_turns_the_chessboard_up():
+    w = CHESS_PURIST.weights()
+    assert w.material > DEFAULT_WEIGHTS.material
+    assert w.board_control_square > DEFAULT_WEIGHTS.board_control_square
+    assert w.hanging_penalty > DEFAULT_WEIGHTS.hanging_penalty
+    assert w.king_safety_check > DEFAULT_WEIGHTS.king_safety_check
+    assert CHESS_PURIST.biases().CASTLE > ActionBias.CASTLE
+
+
+def test_purist_declines_the_card_game():
+    b = CHESS_PURIST.biases()
+    for name in ("SUMMON", "RITUAL", "CONSTRUCTION", "SPELL", "TRAP",
+                 "ACTIVATE_TRAP", "MONSTER_ABILITY"):
+        assert getattr(b, name) == ABSTAIN_BIAS, name
+
+
+def test_purist_still_crowns_a_king():
+    """
+    §17 makes Coronation a free action, and a King is a chess piece — so
+    it is the one preparation-phase thing the Purist has no reason to skip.
+    """
+    assert "CORONATION" not in CHESS_PURIST.abstains
+    assert CHESS_PURIST.biases().CORONATION > 0
+
+
+def test_purist_still_sees_what_is_on_the_board():
+    """
+    Declining to *play* the card systems is not the same as being blind to
+    them: an enemy Building is terrain and an enemy Monster is a stronger
+    piece, so those weights are damped to the floor, never zeroed.
+    """
+    w = CHESS_PURIST.weights()
+    for name in ("building_complete", "ritual_progress", "monster_unit"):
+        assert getattr(w, name) > 0
+        assert getattr(w, name) >= getattr(DEFAULT_WEIGHTS, name) * TILT_FLOOR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Rogue
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_rogue_hoards_at_the_start(game, registry):
+    obs = _obs(game.state, "white", registry)
+    assert endgame_pressure(obs) < 0.25
+    mix = rogue_mix(obs)
+    assert mix["rogue_hoard"] > mix["rogue_spend"]
+    # A card in hand is worth more than usual, and spending is discouraged.
+    assert ROGUE.weights(obs).card_in_hand > DEFAULT_WEIGHTS.card_in_hand
+    assert ROGUE.biases(obs).SUMMON < ActionBias.SUMMON
+
+
+def _make_endgame(game):
+    """
+    Strip the board, run the clock on, drain the decks, and bring a Ritual
+    out from under its seal — every signal ``endgame_pressure`` reads.
+    """
+    for square in ("a1", "b1", "c1", "d1", "f1", "g1", "h1", "a2", "b2",
+                   "c2", "d2", "e2", "f2", "g2", "h2",
+                   "a8", "b8", "c8", "d8", "f8", "g8", "h8",
+                   "a7", "b7", "c7", "d7", "e7", "f7", "g7", "h7"):
+        try:
+            game.state.board.remove_unit(P(square))
+        except Exception:                      # noqa: BLE001 - square empty
+            pass
+    game.state.turn_number = 30
+    for pid in ("white", "black"):
+        game.state.get_player(pid).deck = game.state.get_player(pid).deck[:1]
+    for rs in game.state.get_player("white").ritual_pool:
+        rs.revelation = RevelationState.REVEALED
+
+
+def test_rogue_spends_at_the_end(game, registry):
+    early = _obs(game.state, "white", registry)
+    _make_endgame(game)
+    obs = _obs(game.state, "white", registry)
+
+    assert endgame_pressure(obs) > 0.75
+    mix = rogue_mix(obs)
+    assert mix["rogue_spend"] > mix["rogue_hoard"]
+    # The hand is now for spending, not keeping — measured against what the
+    # same style wanted in the opening, since the hoard→spend blend crosses
+    # the default somewhere in between and the crossing point is not the
+    # claim being made.
+    assert ROGUE.weights(obs).card_in_hand < ROGUE.weights(early).card_in_hand
+    assert ROGUE.weights(obs).card_in_hand <= DEFAULT_WEIGHTS.card_in_hand
+    assert ROGUE.biases(obs).SUMMON > ActionBias.SUMMON
+    assert ROGUE.weights(obs).ritual_progress > DEFAULT_WEIGHTS.ritual_progress
+
+
+def test_rogue_switches_direction_between_the_two(game, registry):
+    early = _obs(game.state, "white", registry)
+    early_summon = ROGUE.biases(early).SUMMON
+    early_cards = ROGUE.weights(early).card_in_hand
+
+    _make_endgame(game)
+    late = _obs(game.state, "white", registry)
+    assert ROGUE.biases(late).SUMMON > early_summon
+    assert ROGUE.weights(late).card_in_hand < early_cards
+
+
+def test_endgame_pressure_stays_in_range(game, registry):
+    """Every signal is a clamped ramp, so the sum cannot escape [0, 1]."""
+    obs = _obs(game.state, "white", registry)
+    assert 0.0 <= endgame_pressure(obs) <= 1.0
+    _make_endgame(game)
+    assert 0.0 <= endgame_pressure(_obs(game.state, "white", registry)) <= 1.0
+
+
+def test_the_rogue_never_abstains():
+    """
+    It *saves* its resources, it does not swear off them — which is the
+    whole difference between the Rogue and the Chess Purist.
+    """
+    assert not ROGUE.abstains
+    obs_free_biases = ROGUE.biases()
+    for name in STAPLE_BIASES:
+        assert getattr(obs_free_biases, name) > 0
+
+
+def test_rogue_weights_stay_inside_the_guardrails(game, registry):
+    for prepare in (lambda g: None, _make_endgame):
+        prepare(game)
+        obs = _obs(game.state, "white", registry)
+        w = ROGUE.weights(obs)
+        for name, default in vars(DEFAULT_WEIGHTS).items():
+            if isinstance(default, int):
+                continue
+            ratio = getattr(w, name) / default
+            assert TILT_FLOOR - 1e-9 <= ratio <= TILT_CEIL + 1e-9, name
+        biases = ROGUE.biases(obs)
+        for name in STAPLE_BIASES:
+            assert getattr(biases, name) >= getattr(ActionBias, name) * STAPLE_FLOOR
+
+
+def test_rogue_stances_are_not_selectable():
+    """The stances are how the Rogue is written down, not menu entries."""
+    assert "rogue_hoard" not in PERSONALITIES
+    assert "rogue_spend" not in PERSONALITIES
+    with pytest.raises(ValueError, match="Unknown personality"):
+        get_personality("rogue_hoard")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,12 +634,8 @@ def test_opportunist_holds_one_mix_for_a_whole_turn(game, registry):
 # It still plays the whole game
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("key", PERSONALITY_KEYS)
-def test_style_ranks_summon_and_construction_above_passing(key, game, registry):
-    """
-    The behavioural half of "not 100% personality": whatever the style, a
-    Summon and a Construction still beat doing nothing.
-    """
+def _prep_scores(key, game, registry):
+    """(pass score, {action type: best score}) for one style, one position."""
     bot = PersonalityBot(seed=5, personality=key, registry=registry, limits=_FAST)
     bot.player_id = "white"
     obs = _obs(game.state, "white", registry)
@@ -461,13 +647,39 @@ def test_style_ranks_summon_and_construction_above_passing(key, game, registry):
     pass_score = next(
         bot.score_action(a, ctx) for a in legal if isinstance(a, EndPreparation)
     )
+    best = {}
     for kind in (SummonMonster, StartConstruction):
         candidates = [a for a in legal if isinstance(a, kind)]
-        if not candidates:
-            continue
-        best = max(bot.score_action(a, ctx) for a in candidates)
-        assert best > pass_score, (
+        if candidates:
+            best[kind] = max(bot.score_action(a, ctx) for a in candidates)
+    return pass_score, best
+
+
+@pytest.mark.parametrize(
+    "key", [k for k in PERSONALITY_KEYS if not PERSONALITIES[k].abstains]
+)
+def test_style_ranks_summon_and_construction_above_passing(key, game, registry):
+    """
+    The behavioural half of "not 100% personality": whatever the style, a
+    Summon and a Construction still beat doing nothing.
+    """
+    pass_score, best = _prep_scores(key, game, registry)
+    for kind, score in best.items():
+        assert score > pass_score, (
             f"{key} would rather pass than play {kind.__name__}"
+        )
+
+
+def test_the_chess_purist_really_does_decline(game, registry):
+    """
+    The mirror image, and the whole point of the style: the one bot that
+    declared an abstention passes PREPARATION rather than playing it.
+    """
+    pass_score, best = _prep_scores("purist", game, registry)
+    assert best, "the fixture offered no preparation actions to decline"
+    for kind, score in best.items():
+        assert score < pass_score, (
+            f"the Chess Purist still wanted to play {kind.__name__}"
         )
 
 
@@ -573,6 +785,8 @@ class TestPlayerPicker:
             ("personality", "ritualist"),
             ("personality", "assassin"),
             ("personality", "opportunist"),
+            ("personality", "purist"),
+            ("personality", "rogue"),
             ("random", None),          # the human row
         ]
         assert roster[-1].mode == "human"

@@ -40,6 +40,10 @@ reads SquareState.complete_building_owner, kept in sync by
 refresh_building_blocks() below). The only way past it is to knock it
 down, and only a narrow set of units may even try — see
 can_attack_building().
+
+A siege targets the structure and ignores whoever is standing on it: the
+square being impassable to the enemy is exactly why a garrison cannot be
+"dealt with first" (see core/rules.py._execute_attack_building).
 """
 
 from __future__ import annotations
@@ -509,6 +513,15 @@ def can_attack_building(
 #: by stacking auras, small enough to stay readable in an event log.
 _OVERWHELMING = 99
 
+#: What a Ritual Monster's blow is worth, against the 1 every other
+#: attacker deals (README §11.2). Siege is meant to be the strategic payoff
+#: for completing a Ritual, but at 1 damage a Ritual Monster besieged no
+#: harder than a Pawn walking into a siege_order mark — and strictly worse
+#: than bane_of_structures / molten_colossus, which are ordinary Main Deck
+#: draws. 2 makes the Ritual investment out-siege the cards you merely draw
+#: and drops a bare Fortress in one action.
+RITUAL_SIEGE_DAMAGE = 2
+
 
 def attack_damage(
     unit: "UnitInstance",
@@ -518,12 +531,22 @@ def attack_damage(
     """
     Damage one AttackBuilding from ``unit`` deals.
 
-    Base 1. ``building_damage_bonus`` with ``destroy_on_capture: true``
-    (obsidian_dragon, sovereign_of_embers — "Buildings captured by this
-    monster are destroyed immediately") instead returns a blow large
-    enough to flatten any Building outright, aura durability included.
-    siege_order's extra damage is added inside damage_building() so that
-    every damage source benefits from it, not just this one.
+    Base 1, or ``RITUAL_SIEGE_DAMAGE`` for a Ritual Monster — the same
+    ``MonsterCard.ritual_only`` flag can_attack_building() reads for its
+    headline permission clause, so "Ritual Monsters are the siege units"
+    is one rule about one property rather than two that can drift.
+    ``building_damage_bonus`` stacks on top of that base; with
+    ``destroy_on_capture: true`` (obsidian_dragon, sovereign_of_embers —
+    "Buildings captured by this monster are destroyed immediately") it
+    instead returns a blow large enough to flatten any Building outright,
+    aura durability included. siege_order's extra damage is added inside
+    damage_building() so that every damage source benefits from it, not
+    just this one.
+
+    A suppressed Monster (monster_seal / nullification_glyph) falls back to
+    1 along with every other Monster contribution — it only reaches this
+    function at all through can_attack_building()'s siege_order clause,
+    which is a property of the Building, not of the attacker.
     """
     if unit.monster_id is None or registry is None:
         return 1
@@ -540,7 +563,7 @@ def attack_damage(
     if is_effects_suppressed(unit):
         return 1
 
-    damage = 1
+    damage = RITUAL_SIEGE_DAMAGE if card.ritual_only else 1
     for eff in card.effects:
         if eff.type != "building_damage_bonus":
             continue
@@ -690,6 +713,15 @@ def damage_building(
         ))
         return False
 
+    # Past the shield, the blow reached the structure — so the Building is
+    # under active bombardment and repair_buildings will pass it over on
+    # the owner's EndTurn. Marked here rather than only where integrity
+    # actually drops so that a blow soaked by ``building_aura`` durability
+    # or by ``temporary_building_protection`` still suppresses the repair:
+    # otherwise the aura holds the line while the engineer heals behind it,
+    # which is the same stalemate by a longer route.
+    building.damaged_this_round = True
+
     if is_siege_open(building):
         amount += building.vulnerable_amount
 
@@ -748,10 +780,17 @@ def tick_building_timers(state: "GameState", owner: str) -> None:
     on a Building — emergency_fortifications' protection and siege_order's
     vulnerability mark — on the OWNER's own turn, the same convention every
     other per-instance timer in this engine uses.
+
+    Also clears ``damaged_this_round``, which repair_buildings has just
+    read. Order matters: core/rules.py._execute_end_turn calls
+    repair_buildings BEFORE this, so a Building hit during the round skips
+    exactly one repair and is eligible again next round if the attacker
+    lets up.
     """
     for b in state.buildings:
         if b.owner != owner:
             continue
+        b.damaged_this_round = False
         if b.protection_turns > 0:
             b.protection_turns -= 1
             if b.protection_turns == 0:
@@ -803,6 +842,12 @@ def repair_buildings(
                 if b.owner != owner or b.status != ConstructionStatus.COMPLETE:
                     continue
                 if b.integrity >= b.max_integrity:
+                    continue
+                # Hit since the owner's last EndTurn: no patching up a
+                # structure while it is still being battered. Without this
+                # a single royal_engineer's +1/turn exactly cancelled the
+                # 1/turn a besieger dealt, and the Building never fell.
+                if b.damaged_this_round:
                     continue
                 if not in_area(b.position, pos, radius):
                     continue

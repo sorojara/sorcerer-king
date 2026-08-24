@@ -75,6 +75,7 @@ from game.core.actions import (
     PlaceTrap,
     PromotePawn,
     RepositionUnit,
+    RevealRitual,
     SelectMercenaryCards,
     SelectRecomposeCards,
     StartConstruction,
@@ -82,11 +83,12 @@ from game.core.actions import (
 )
 from game.core.phases import HAND_SIZE_LIMIT
 from game.core.game import Game
-from game.core.phases import KingCardStatus, Phase, PieceType
+from game.core.phases import KingCardStatus, Phase, PieceType, RevelationState
 from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
 from game.ui.board_view import (
     BOARD_OFFSET_X,
+    BOARD_OFFSET_Y,
     BOARD_PIXEL_SIZE,
     BoardView,
     BuildingSpriteCache,
@@ -97,7 +99,13 @@ from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
 from game.ui.font import FTFont, load_font
 from game.ui.hand_view import HandView
 from game.ui.event_log import LOG_HEIGHT, EventLogPanel
-from game.ui.overlays import CardViewer, PromotionDialog, SidebarOverlay
+from game.ui.overlays import (
+    CardViewer,
+    CardZoomOverlay,
+    PromotionDialog,
+    SidebarOverlay,
+)
+from game.ui.ritual_bar import BAR_HEIGHT as _RITUAL_BAR_H, RitualBar
 from game.ui.state_io import export_state, import_state
 
 # How many render frames the AI "thinks" before playing (visual pause)
@@ -116,16 +124,27 @@ _SIDEBAR_W: int = SidebarOverlay.SIDEBAR_WIDTH  # 200
 # board_view.py must match this exactly — see the note on that constant.
 _LEFT_SIDEBAR_W: int = BOARD_OFFSET_X     # 220
 
+# Stage 11: the Ritual strip (ui/ritual_bar.py) sits between the top of the
+# window and the top of the board, spanning exactly the board's width. It
+# only pushes the BOARD down — the two sidebars still start at y=0 and just
+# get taller, which is free extra room for the CardViewer and the Event Log.
+# BOARD_OFFSET_Y in board_view.py is the single source of truth for its
+# height; _RITUAL_BAR_H is that same number under the widget's own name.
+_RITUAL_H: int = _RITUAL_BAR_H            # 132 == BOARD_OFFSET_Y
+
 WIN_W: int = _LEFT_SIDEBAR_W + _BOARD_W + _SIDEBAR_W   # 1060
-WIN_H: int = _BOARD_H + _HAND_H          # 746  (base — no debug row)
-_WIN_H_DEBUG: int = _BOARD_H + _HAND_H * 2  # 852  (with black-hand debug row)
+WIN_H: int = _RITUAL_H + _BOARD_H + _HAND_H          # 878  (base — no debug row)
+_WIN_H_DEBUG: int = _RITUAL_H + _BOARD_H + _HAND_H * 2  # 984  (with black-hand debug row)
 
 _SIDEBAR_X: int = _LEFT_SIDEBAR_W + _BOARD_W   # 860 — right sidebar's left edge
-_HAND_Y: int = _BOARD_H                  # 640  (base hand-strip top)
+_HAND_Y: int = _RITUAL_H + _BOARD_H      # 772  (base hand-strip top)
 
 # Font sizes
 _FONT_PX: int = 52    # chess glyph + large UI text
 _FONT_SM_PX: int = 14  # small labels
+_FONT_MD_PX: int = 20  # body text in the full-screen card zoom
+_FONT_LG_PX: int = 30  # card name in the full-screen card zoom
+_FONT_XS_PX: int = 12  # Ritual-strip sub-lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +289,12 @@ class AppController:
     the legal action list and nothing else (README §44).  A short visual
     delay (_AI_THINK_FRAMES) lets the human see each AI move before the
     next action.
+
+    That delay, and the search-based bots' own thinking time, are both
+    tunable at runtime via ``_ai_speed`` / ``_AI_SPEEDS`` (sidebar "AI
+    Speed" button or the S key) — see the docstring on ``_AI_SPEEDS`` for
+    why an AI-vs-AI spectator match needs this and a human-vs-AI game
+    usually doesn't.
     """
 
     # ── Construction ──────────────────────────────────────────────────────
@@ -291,6 +316,11 @@ class AppController:
         # Fonts via compat shim (pygame._freetype, no sysfont/font circular dep)
         self._font_large: FTFont = load_font(_FONT_PX)
         self._font_small: FTFont = load_font(_FONT_SM_PX)
+        # Stage 11: the full-screen card zoom needs readable body copy, and
+        # the Ritual strip needs a size below _FONT_SM_PX for its sub-lines.
+        self._font_zoom_title: FTFont = load_font(_FONT_LG_PX)
+        self._font_zoom_body: FTFont = load_font(_FONT_MD_PX)
+        self._font_tiny: FTFont = load_font(_FONT_XS_PX)
 
         # ── Card registry ─────────────────────────────────────────────────
         _data_dir = Path(__file__).parent.parent / "data"
@@ -344,6 +374,28 @@ class AppController:
             font_small=self._font_small,
             width=_LEFT_SIDEBAR_W,
         )
+        # Stage 11: the Ritual strip above the board — both pools at a
+        # glance, the viewer's own in full and the rival's redacted to
+        # whatever their revelation state has leaked so far.
+        self._ritual_bar = RitualBar(
+            surface=self._screen,
+            font=self._font_small,
+            font_small=self._font_tiny,
+            x_offset=BOARD_OFFSET_X,
+            width=_BOARD_W,
+            registry=self._registry,
+        )
+        # Stage 11: right-click a card in the CardViewer to blow it up
+        # full-screen; holds the card_id being zoomed, None when closed.
+        self._card_zoom = CardZoomOverlay(
+            surface=self._screen,
+            font_title=self._font_zoom_title,
+            font_body=self._font_zoom_body,
+            font_small=self._font_small,
+            registry=self._registry,
+            images_dir=_data_dir / "images",
+        )
+        self._card_zoom_id: "str | None" = None
 
         # ── Player modes & bots ───────────────────────────────────────────
         # "human" → human input; "ai" → the bot named by _ai_kinds plays.
@@ -354,6 +406,9 @@ class AppController:
             "white": DEFAULT_PERSONALITY, "black": DEFAULT_PERSONALITY,
         }
         self._bot_seeds: dict[str, int] = {"white": 1, "black": 2}
+        # AI think-speed tier — read by _make_bot (search budget) and
+        # _tick_ai (think-delay), so it must exist before _bots is built.
+        self._ai_speed: str = "normal"
         self._bots: dict[str, PlayerController] = {
             pid: self._make_bot(pid) for pid in ("white", "black")
         }
@@ -400,6 +455,17 @@ class AppController:
         # card click); target_type "piece" uses the two-step fields below.
         self._targeting_card_id: str | None = None
         self._targeting_action_by_pos: dict[Position, object] = {}
+        # Which flavour of targeting is live — decides the preview terrain
+        # the board paints under the gold tint ("trap" → Void Rift,
+        # "spell" → Arcane Circle).
+        self._targeting_kind: str | None = None
+
+        # Terrain scars — squares where a Trap, Spell or Monster has finished
+        # resolving keep a fading Cracked Earth mark.  Everything here is pure
+        # presentation: the engine neither knows nor cares about scars, so the
+        # bookkeeping lives on this side, fed by diffing consecutive
+        # Observations and by scanning new events.  See _update_terrain_scars.
+        self._reset_terrain_scars()
 
         # Stage 6: two-step targeting for "piece" Spells (arcane_reposition):
         # 1st click picks the source piece, 2nd click picks the destination.
@@ -509,6 +575,9 @@ class AppController:
                 pygame.quit()
                 sys.exit()
             elif event.key == pygame.K_ESCAPE:
+                if self._card_zoom_id is not None:
+                    self._card_zoom_id = None
+                    return
                 if self._mercenary_picker is not None:
                     self._mercenary_picker = None
                     return
@@ -542,6 +611,10 @@ class AppController:
                 # T key: activate one of the player's own manual-trigger Traps
                 # (time_anchor) — Stage 6.
                 self._try_activate_trap()
+            elif event.key == pygame.K_s:
+                # S key: cycle the AI think-speed (Normal/Fast/Instant) —
+                # mirrors the sidebar "AI Speed" button.
+                self._toggle_ai_speed()
 
         elif event.type == pygame.MOUSEMOTION:
             self._mouse_pos = event.pos
@@ -561,9 +634,17 @@ class AppController:
                 self._player_picker._mouse_pos = event.pos
             self._sidebar.update_mouse(event.pos)
             self._card_viewer.update_mouse(event.pos)
+            self._ritual_bar.update_mouse(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+            # Stage 11: the full-screen card zoom is modal — it swallows the
+            # click either way, dismissing itself when the click lands
+            # outside the big card and doing nothing when it lands on it.
+            if self._card_zoom_id is not None:
+                if self._card_zoom.handle_click(mx, my) == "close":
+                    self._card_zoom_id = None
+                return
             if self._player_picker is not None:
                 result = self._player_picker.handle_click(mx, my)
                 if result == "cancel":
@@ -631,10 +712,18 @@ class AppController:
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Stage 6 (corrected): right-click sets the CardViewer's active
-            # card. Priority: a King-picker row > an "Active in this zone"
-            # list entry > a hand card > a board square (unit / Trap-or-
-            # zone area).
+            # card. Priority: the open card zoom > a King-picker row > a
+            # CardViewer card block (opens the zoom) > an "Active in this
+            # zone" list entry > a Ritual-strip chip > a hand card > a
+            # board square (unit / Trap-or-zone area).
             mx, my = event.pos
+
+            # The zoom is modal for right-clicks too, so a stray one can't
+            # quietly re-target the panel hidden underneath it.
+            if self._card_zoom_id is not None:
+                if self._card_zoom.handle_click(mx, my) == "close":
+                    self._card_zoom_id = None
+                return
 
             # Stage 10: right-click a row on the King picker (Coronation /
             # Succession target list, or a Building-cost choice) to inspect
@@ -681,6 +770,26 @@ class AppController:
                 self._inspect_unit_pos = None
                 return
 
+            # Stage 11: right-click the card already shown in the CardViewer
+            # (or the "Summons:" block stacked under a Ritual) to read it at
+            # full size — the 220 px panel truncates effects and description,
+            # the zoom shows all of both.
+            zoom_card_id = self._card_viewer.card_at(mx, my)
+            if zoom_card_id is not None:
+                self._card_zoom_id = zoom_card_id
+                return
+
+            # Stage 11: right-click a Ritual chip in the strip above the
+            # board to open it in the CardViewer. Chips whose identity the
+            # viewer isn't entitled to (a rival's SEALED/FORETOLD Ritual)
+            # report None and are simply not inspectable.
+            ritual_card_id = self._ritual_bar.ritual_at(mx, my)
+            if ritual_card_id is not None:
+                self._viewer_card_id = ritual_card_id
+                self._inspect_unit_pos = None
+                self._zone_active_entries = None
+                return
+
             obs = self._current_obs()
             if self._player_modes.get(obs.active_player) == "human":
                 hand_card_id = self._hand_view.card_from_click(mx, my, list(obs.own_hand))
@@ -723,6 +832,9 @@ class AppController:
             return
         if btn == "toggle_territory":
             self._toggle_territory()
+            return
+        if btn == "toggle_speed":
+            self._toggle_ai_speed()
             return
         if btn == "recompose":
             self._do_recompose()
@@ -1036,7 +1148,7 @@ class AppController:
                 (a.position, a) for a in legal
                 if isinstance(a, PlaceTrap) and a.card_id == card_id
             ]
-            self._enter_targeting_mode(card_id, card.name, matches)
+            self._enter_targeting_mode(card_id, card.name, matches, kind="trap")
             return
 
         if isinstance(card, SpellCard):
@@ -1078,6 +1190,7 @@ class AppController:
     def _cancel_targeting_mode(self) -> None:
         """Exit Trap-placement / Spell-area-targeting mode without firing."""
         self._targeting_card_id = None
+        self._targeting_kind = None
         self._targeting_action_by_pos = {}
 
     def _cancel_spell_piece_mode(self) -> None:
@@ -1085,6 +1198,118 @@ class AppController:
         self._spell_piece_card_id = None
         self._spell_piece_actions = []
         self._spell_piece_source = None
+
+    # ── Terrain scars ─────────────────────────────────────────────────────
+    #
+    # "After the effect of a Spell, Trap or Monster is done, the ground it
+    # touched turns to Cracked Earth."  The engine has no concept of this —
+    # it's a purely visual memory of the battlefield — so the UI keeps its
+    # own record, built from two cheap sources:
+    #
+    #   • diffing consecutive Observations  (a square effect that stopped
+    #     being listed has expired; a Monster piece_id that vanished from
+    #     the board is gone for good)
+    #   • scanning new events for TrapTriggered, which fires even when the
+    #     Trap survives with charges left and so can't be spotted by diffing
+    #
+    # Scars fade instead of accumulating forever: on a dark square Cracked
+    # Earth *is* the default ground, so a board eventually scarred edge to
+    # edge would quietly erase its own checker pattern.
+    _SCAR_LIFETIME_TURNS: int = 8   # turns a scar stays visible at all
+    _SCAR_FADE_TURNS: int = 4       # of those, how many it spends fading out
+
+    def _reset_terrain_scars(self) -> None:
+        """Clear all scar bookkeeping — on startup and after loading a save."""
+        self._scars: dict[Position, int] = {}          # square → turn scarred
+        self._prev_effect_squares: set[Position] = set()
+        self._prev_monster_squares: dict[str, Position] = {}
+        self._trap_footprints: dict[str, tuple[Position, ...]] = {}
+        # Start from the log's current end, not from zero: scars record what
+        # has happened since this board appeared on screen.  Replaying a
+        # loaded save's whole history would stamp every Trap the previous
+        # session ever sprung onto the board at once, all dated to the turn
+        # the file was opened.
+        self._scar_events_seen: int = len(self._game.state.event_log)
+
+    def _update_terrain_scars(self, obs) -> None:
+        """Fold this frame's board state into the scar record."""
+        from game.core.events import TrapPlaced, TrapTriggered
+        from game.mechanics.area import expand_area
+
+        turn = obs.turn_number
+
+        # 1. Square effects that have run their duration out.
+        effect_squares = {e.position for e in obs.board.square_effects}
+        for pos in self._prev_effect_squares - effect_squares:
+            self._scars[pos] = turn
+        self._prev_effect_squares = effect_squares
+
+        # 2. Traps that fired.  TrapTriggered carries only the instance id, and
+        #    a single-charge Trap is already off the board by the time we look,
+        #    so the footprint captured on previous frames is what we scar.
+        #    TrapPlaced is folded into the same pass so a Trap that is planted
+        #    AND sprung between two renders (several AI actions resolve inside
+        #    one frame) still has a footprint to scar by the time we reach its
+        #    TrapTriggered — events arrive in order, so the placement is always
+        #    seen first.
+        log = self._game.state.event_log
+        # A loaded save swaps the whole log out from under us.
+        if self._scar_events_seen > len(log):
+            self._scar_events_seen = 0
+        for ev in log[self._scar_events_seen:]:
+            if isinstance(ev, TrapPlaced):
+                self._trap_footprints.setdefault(
+                    ev.trap_instance_id,
+                    tuple(expand_area(ev.position, ev.radius)),
+                )
+            elif isinstance(ev, TrapTriggered):
+                for pos in self._trap_footprints.get(ev.trap_instance_id, ()):
+                    self._scars[pos] = turn
+        self._scar_events_seen = len(log)
+
+        # 3. Traps that left the board (spent their last charge, disarmed).
+        traps_now = {t.id: t for t in obs.board.trap_locations}
+        for trap_id, footprint in list(self._trap_footprints.items()):
+            if trap_id not in traps_now:
+                for pos in footprint:
+                    self._scars[pos] = turn
+                del self._trap_footprints[trap_id]
+        for trap_id, trap in traps_now.items():
+            self._trap_footprints[trap_id] = tuple(
+                expand_area(trap.position, trap.radius, trap.shape)
+            )
+
+        # 4. Monsters that left the board (destroyed, dismissed, expired).
+        #    Keyed by piece_id so a Monster merely *moving* doesn't scar.
+        monsters_now = {
+            u.piece_id: u.position
+            for u in obs.board.units
+            if u.monster_id is not None
+        }
+        for piece_id, pos in self._prev_monster_squares.items():
+            if piece_id not in monsters_now:
+                self._scars[pos] = turn
+        self._prev_monster_squares = monsters_now
+
+        # 5. Retire scars that have aged out.
+        cutoff = turn - self._SCAR_LIFETIME_TURNS
+        for pos, made in list(self._scars.items()):
+            if made <= cutoff:
+                del self._scars[pos]
+
+    def _scar_map(self, obs) -> "dict[Position, float]":
+        """Square → 0..1 scar intensity, full strength when fresh."""
+        turn = obs.turn_number
+        solid = self._SCAR_LIFETIME_TURNS - self._SCAR_FADE_TURNS
+        out: dict[Position, float] = {}
+        for pos, made in self._scars.items():
+            age = turn - made
+            if age <= solid:
+                out[pos] = 1.0
+            else:
+                remaining = self._SCAR_LIFETIME_TURNS - age
+                out[pos] = max(0.0, remaining / self._SCAR_FADE_TURNS)
+        return out
 
     def _compute_aura_colors(self, obs) -> "dict[Position, tuple[int, int, int]]":
         """
@@ -1388,12 +1613,16 @@ class AppController:
         card_id: str,
         card_name: str,
         matches: list[tuple[Position, object]],
+        kind: str = "spell",
     ) -> None:
         """
         Stage 6 — enter single-click targeting mode for a Trap or Spell.
 
         ``matches`` pairs every clickable square with the concrete Action
         that clicking it should fire (PlaceTrap or ActivateSpell).
+        ``kind`` is "trap" or "spell" and only affects presentation: the
+        board previews Trap squares as Void Rift and Spell squares as Arcane
+        Circle, so the two modes never look alike.
         """
         if not matches:
             self._show_toast(f"{card_name}: no valid targets right now.")
@@ -1401,6 +1630,7 @@ class AppController:
         self._cancel_summon()
         self._cancel_spell_piece_mode()
         self._targeting_card_id = card_id
+        self._targeting_kind = kind
         self._targeting_action_by_pos = dict(matches)
         self._show_toast(f"{card_name} — click a highlighted square  (ESC to cancel)")
 
@@ -1810,20 +2040,53 @@ class AppController:
         parts += [p.to_algebraic() for p in others]
         return "via " + ", ".join(parts)
 
+    _REVELATION_GLYPH: dict = {
+        RevelationState.SEALED: "◆",
+        RevelationState.FORETOLD: "◈",
+        RevelationState.REVEALED: "◉",
+    }
+
+    def _reveal_step_label(self, rstate: "Any") -> str:
+        """'Foretell (sealed → foretold)' — what one more step would do."""
+        if rstate.revelation == RevelationState.SEALED:
+            return "◈  Foretell  —  sealed → foretold"
+        return "◉  Reveal  —  foretold → revealed"
+
+    def _ritual_row_label(
+        self, rstate: "Any", can_reveal: bool, combo_count: int,
+    ) -> str:
+        """One Ritual's line in the picker: glyph, name, and what it offers."""
+        name = self._ritual_name(rstate.ritual_id)
+        glyph = self._REVELATION_GLYPH.get(rstate.revelation, "◆")
+        if rstate.activated:
+            return f"✓  {name}  ·  completed"
+        state_word = rstate.revelation.name.lower()
+        if combo_count:
+            return f"{glyph}  {name}  ·  ready to activate"
+        if can_reveal:
+            return f"{glyph}  {name}  ·  {state_word} — can reveal"
+        if rstate.revelation == RevelationState.REVEALED:
+            return f"{glyph}  {name}  ·  revealed — no sacrifice available"
+        return f"{glyph}  {name}  ·  {state_word} — revealed once already"
+
     def _do_ritual(self) -> None:
         """
         Sidebar button: open the Ritual picker.
 
         Always lists EVERY Ritual in the player's own pool (own_rituals is
         full information to its owner regardless of revelation state — see
-        core/observation.py) — not just the ones ready to fire. A Ritual
-        with no legal sacrifice combo right now, or already ``activated``,
-        renders as a disabled row (``_KingDialog`` already supports
-        key=None for this). Choosing a ready Ritual with exactly one
-        candidate combo commits immediately; more than one opens a second
-        picker to choose which combo (mirrors the King picker's multi-step
-        flow, but needs no board-click step — every candidate's
-        sacrifice_positions is already fully determined by the engine).
+        core/observation.py), annotated with its revelation state. A Ritual
+        that offers nothing right now — already ``activated``, or with no
+        legal step and no legal sacrifice — renders as a disabled row
+        (``_KingDialog`` already supports key=None for this).
+
+        Choosing a Ritual opens its action list (README §15): the one
+        voluntary revelation step it can take right now, and/or one row per
+        legal sacrifice combo. Both live in the same menu because they are
+        the same decision from the player's side — "what do I do with this
+        Ritual this turn" — and because a Ritual is only ever activatable
+        from REVEALED, so the two are steps of one ladder rather than
+        alternatives.
         """
         obs = self._current_obs()
         if obs.phase != Phase.PREPARATION:
@@ -1844,24 +2107,30 @@ class AppController:
             return
 
         legal = self._game.get_legal_actions(active)
-        ritual_actions = [a for a in legal if isinstance(a, ActivateRitual)]
-        ready_ids = {a.ritual_id for a in ritual_actions}
+        ritual_actions = [
+            a for a in legal if isinstance(a, (ActivateRitual, RevealRitual))
+        ]
+        revealable = {
+            a.ritual_id for a in ritual_actions if isinstance(a, RevealRitual)
+        }
+        combo_counts: dict[str, int] = {}
+        for a in ritual_actions:
+            if isinstance(a, ActivateRitual):
+                combo_counts[a.ritual_id] = combo_counts.get(a.ritual_id, 0) + 1
 
         rows: list[tuple[str, "Any"]] = []
         row_ritual_ids: list[str] = []
         for rstate in ps.ritual_pool:
-            name = self._ritual_name(rstate.ritual_id)
-            row_ritual_ids.append(rstate.ritual_id)
-            if rstate.activated:
-                rows.append((f"✓  {name}  (completed)", None))
-            elif rstate.ritual_id in ready_ids:
-                rows.append((f"🔮  {name}", rstate.ritual_id))
-            else:
-                rows.append((f"🔮  {name}  (not ready)", None))
+            rid = rstate.ritual_id
+            row_ritual_ids.append(rid)
+            can_reveal = rid in revealable
+            combos = combo_counts.get(rid, 0)
+            label = self._ritual_row_label(rstate, can_reveal, combos)
+            rows.append((label, rid if (can_reveal or combos) else None))
 
         self._ritual_picker = _KingDialog(
-            self._screen, self._font_small, "🔮  Ritual", rows,
-            accent=(200, 130, 230), border=(160, 90, 210),
+            self._screen, self._font_small, "🔮  Rituals", rows,
+            accent=(200, 130, 230), border=(160, 90, 210), width=400,
         )
         self._ritual_picker_mode = "choose_ritual"
         self._ritual_picker_actions = ritual_actions
@@ -1875,24 +2144,49 @@ class AppController:
         """Route a completed _ritual_picker click by the flow's current step."""
         if self._ritual_picker_mode == "choose_ritual":
             actions = [a for a in self._ritual_picker_actions if a.ritual_id == key]
-            if len(actions) == 1:
+            if not actions:
+                return
+            # One sacrifice combo and nothing else: commit straight away,
+            # as this flow always has. A RevealRitual never auto-commits,
+            # though — spending information is irreversible and the player
+            # asked for the choice, so it gets its own explicit row rather
+            # than firing off the back of a click on the Ritual's name.
+            if len(actions) == 1 and isinstance(actions[0], ActivateRitual):
                 self._ritual_picker = None
                 self._commit_ritual(actions[0])
                 return
-            rows = [(self._ritual_combo_label(a), i) for i, a in enumerate(actions)]
+            # Revelation step first — it is the prerequisite, so it reads as
+            # the top of the ladder rather than an afterthought under the
+            # sacrifice list.
+            actions.sort(key=lambda a: 0 if isinstance(a, RevealRitual) else 1)
+            rows = [
+                (
+                    self._reveal_step_label(
+                        self._own_ritual_state(a.player_id, a.ritual_id),
+                    )
+                    if isinstance(a, RevealRitual)
+                    else f"🔮  Activate  —  {self._ritual_combo_label(a)}",
+                    i,
+                )
+                for i, a in enumerate(actions)
+            ]
             self._ritual_picker_actions = actions
             self._ritual_picker = _KingDialog(
                 self._screen, self._font_small, f"🔮  {self._ritual_name(key)}", rows,
-                accent=(200, 130, 230), border=(160, 90, 210),
+                accent=(200, 130, 230), border=(160, 90, 210), width=400,
             )
-            self._ritual_picker_mode = "choose_combo"
+            self._ritual_picker_mode = "choose_action"
             return
 
-        if self._ritual_picker_mode == "choose_combo":
+        if self._ritual_picker_mode == "choose_action":
             self._ritual_picker = None
             self._commit_ritual(self._ritual_picker_actions[key])
 
-    def _commit_ritual(self, action: "ActivateRitual") -> None:
+    def _own_ritual_state(self, player_id: str, ritual_id: str) -> "Any":
+        ps = self._game.state.get_player(player_id)
+        return next((rs for rs in ps.ritual_pool if rs.ritual_id == ritual_id), None)
+
+    def _commit_ritual(self, action: "ActivateRitual | RevealRitual") -> None:
         self._cancel_ritual_mode()
         self._execute_and_advance(action, action.player_id)
 
@@ -2431,6 +2725,7 @@ class AppController:
 
         # Hot-swap the game instance and reset all UI state
         self._game = new_game
+        self._reset_terrain_scars()
         self._deselect()
         self._promotion_dialog = None
         self._toast_msg = ""
@@ -2481,6 +2776,71 @@ class AppController:
         max_candidates=8, max_nodes=8000, max_seconds=0.9,
     )
 
+    # AI speed tiers — sidebar "AI Speed" button / S key, ``_toggle_ai_speed``.
+    #
+    # A watched AI-vs-AI match was paying for two costs on *every single*
+    # CHESS/PREPARATION decision, for the whole match:
+    #
+    #   1. _AI_THINK_FRAMES — a fixed 0.5 s pause with no compute in it at
+    #      all, purely so a human spectator can register the previous move
+    #      before the next one lands. Profiling a full heuristic-vs-heuristic
+    #      match (game/sim.py, no rendering) showed real decision-making cost
+    #      2.4 s out of 48 s total — the other ~98% was exactly this kind of
+    #      per-decision overhead, and in the UI the 0.5 s pause is the bulk
+    #      of it: ~330 gated decisions/match × 0.5 s ≈ 165 s on its own.
+    #   2. The search budget itself (_UI_SEARCH_LIMITS / _UI_MC_LIMITS) —
+    #      real thinking time, not padding. A SearchBot chess decision
+    #      profiled at ~0.67 s on average (close to its 0.6 s ceiling), and
+    #      there are ~2 such decisions per turn for a full match.
+    #
+    # NORMAL leaves both exactly as tuned for a human watching a human-vs-AI
+    # game. FAST and INSTANT shrink both for AI-vs-AI spectating, where
+    # nobody needs the pause and a shallower search is a fair trade for a
+    # match that finishes in well under a minute instead of several.
+    _AI_SPEEDS: dict[str, dict] = {
+        "normal": dict(
+            think_frames=_AI_THINK_FRAMES,
+            search_limits=SearchLimits(max_depth=3, max_nodes=2500, max_seconds=0.6),
+            mc_limits=MonteCarloLimits(
+                samples=12, depth=2, chess_samples=8, chess_depth=2,
+                max_candidates=8, max_nodes=8000, max_seconds=0.9,
+            ),
+        ),
+        "fast": dict(
+            think_frames=6,   # 0.1 s
+            search_limits=SearchLimits(max_depth=3, max_nodes=1200, max_seconds=0.25),
+            mc_limits=MonteCarloLimits(
+                samples=8, depth=2, chess_samples=5, chess_depth=2,
+                max_candidates=6, max_nodes=4000, max_seconds=0.4,
+            ),
+        ),
+        "instant": dict(
+            think_frames=0,
+            search_limits=SearchLimits(max_depth=3, max_nodes=500, max_seconds=0.1),
+            mc_limits=MonteCarloLimits(
+                samples=5, depth=1, chess_samples=4, chess_depth=1,
+                max_candidates=4, max_nodes=1500, max_seconds=0.15,
+            ),
+        ),
+    }
+    _AI_SPEED_ORDER: tuple[str, ...] = ("normal", "fast", "instant")
+
+    def _speed_tier(self) -> dict:
+        return self._AI_SPEEDS[self._ai_speed]
+
+    def _toggle_ai_speed(self) -> None:
+        """Cycle Normal → Fast → Instant → Normal and rebuild both bots."""
+        i = self._AI_SPEED_ORDER.index(self._ai_speed)
+        self._ai_speed = self._AI_SPEED_ORDER[(i + 1) % len(self._AI_SPEED_ORDER)]
+        # Search budget is baked into a bot at construction time, so a
+        # tier change only takes effect on bots rebuilt after it — same
+        # trade-off _set_mode already makes when switching a side's
+        # controller (a rebuilt bot starts its anti-repetition memory
+        # fresh rather than carrying the old tier's bot's history).
+        for pid in ("white", "black"):
+            self._bots[pid] = self._make_bot(pid)
+        self._show_toast(f"AI speed: {self._ai_speed.capitalize()}")
+
     def _make_bot(self, player_id: str) -> PlayerController:
         """
         Build the controller currently selected for ``player_id``.
@@ -2494,6 +2854,7 @@ class AppController:
         """
         kind = self._ai_kinds.get(player_id, "random")
         seed = self._bot_seeds.get(player_id, 0)
+        tier = self._speed_tier()
         bot: PlayerController
         if kind == "personality":
             bot = PersonalityBot(
@@ -2502,20 +2863,20 @@ class AppController:
                     player_id, DEFAULT_PERSONALITY
                 ),
                 registry=self._registry,
-                limits=self._UI_SEARCH_LIMITS,
+                limits=tier["search_limits"],
             )
         elif kind == "montecarlo":
             bot = MonteCarloBot(
                 seed=seed,
                 registry=self._registry,
-                limits=self._UI_SEARCH_LIMITS,
-                mc_limits=self._UI_MC_LIMITS,
+                limits=tier["search_limits"],
+                mc_limits=tier["mc_limits"],
             )
         elif kind == "search":
             bot = SearchBot(
                 seed=seed,
                 registry=self._registry,
-                limits=self._UI_SEARCH_LIMITS,
+                limits=tier["search_limits"],
             )
         elif kind == "heuristic":
             bot = HeuristicBot(seed=seed, registry=self._registry)
@@ -2570,7 +2931,7 @@ class AppController:
         if mode == "ai":
             obs = self._current_obs()
             if obs.active_player == player_id and not self._game.is_over():
-                self._ai_think_countdown = _AI_THINK_FRAMES
+                self._ai_think_countdown = self._speed_tier()["think_frames"]
 
     # ── Player picker ─────────────────────────────────────────────────────
 
@@ -2619,10 +2980,15 @@ class AppController:
         self._show_black_hand = not self._show_black_hand
         new_h = _WIN_H_DEBUG if self._show_black_hand else WIN_H
         self._screen = pygame.display.set_mode((WIN_W, new_h))
-        # Rebind all views to the new surface
+        # Rebind all views to the new surface — a view left pointing at the
+        # old one draws into a Surface nothing ever blits.
         self._board_view._surface = self._screen
         self._sidebar._surface = self._screen
         self._hand_view._surface = self._screen
+        self._card_viewer._surface = self._screen
+        self._event_log_panel._surface = self._screen
+        self._ritual_bar._surface = self._screen
+        self._card_zoom._surface = self._screen
         label = "ON" if self._show_black_hand else "OFF"
         self._show_toast(f"Black hand view: {label}")
 
@@ -2765,14 +3131,20 @@ class AppController:
         if self._player_modes.get(active) != "ai":
             return
 
-        # Arm the countdown when it first becomes the AI's turn
-        if self._ai_think_countdown <= 0:
-            self._ai_think_countdown = _AI_THINK_FRAMES
-            return
+        # Arm the countdown when it first becomes the AI's turn. The
+        # "instant" speed tier sets think_frames to 0 to skip the pause
+        # entirely — it must also skip this whole arm/decrement dance
+        # (arming to 0 and returning, forever, would never let the AI
+        # move) and fall straight through to act below.
+        think_frames = self._speed_tier()["think_frames"]
+        if think_frames > 0:
+            if self._ai_think_countdown <= 0:
+                self._ai_think_countdown = think_frames
+                return
 
-        self._ai_think_countdown -= 1
-        if self._ai_think_countdown > 0:
-            return
+            self._ai_think_countdown -= 1
+            if self._ai_think_countdown > 0:
+                return
 
         # --- Think time expired: pick and execute an action ---
         legal = self._game.get_legal_actions(active)
@@ -2915,6 +3287,32 @@ class AppController:
         self._castle_dests = []
         self._siege_dests = []
 
+    def _viewer_obs(self, obs: "Observation") -> "Observation":
+        """
+        The Observation to render PRIVATE information from — hand cards,
+        and (Stage 11) the Ritual strip's "fully revealed" row.
+
+            • Active player is human       → their own view.
+            • Active player is an AI, the
+              other side is human          → the human's view (they're
+                                             waiting; let them keep
+                                             reading their own cards
+                                             rather than being shown the
+                                             bot's secrets).
+            • Both sides are AI            → white's view (spectator mode).
+
+        In a hotseat human-vs-human match this is simply "whoever is to
+        move", so the private half of the screen swaps sides every turn,
+        which is the whole point of the Ritual strip's two rows.
+        """
+        active = obs.active_player
+        if self._player_modes.get(active) == "human":
+            return obs   # already built for the active player
+        opponent = "black" if active == "white" else "white"
+        if self._player_modes.get(opponent) == "human":
+            return self._game.get_observation(opponent)
+        return self._game.get_observation("white")
+
     # ── Render ────────────────────────────────────────────────────────────
 
     def _render(self) -> None:
@@ -2960,6 +3358,22 @@ class AppController:
             # Stage 10: Succession piece-sacrifice mode — same gold-ring channel.
             board_summon_dests = list(self._king_sacrifice_positions)
 
+        # Targeting previews — the same squares already highlighted in gold
+        # above, but routed to the board so it can also swap their ground:
+        # Arcane Circle for "a Spell can land here", Void Rift for "a Trap
+        # can be planted here".  Both revert the instant the mode ends.
+        spell_preview: list[Position] = []
+        trap_preview: list[Position] = []
+        if self._targeting_card_id is not None:
+            if self._targeting_kind == "trap":
+                trap_preview = board_summon_dests
+            else:
+                spell_preview = board_summon_dests
+        elif self._spell_piece_card_id is not None:
+            spell_preview = board_summon_dests
+
+        self._update_terrain_scars(obs)
+
         self._board_view.draw(
             observation=obs,
             selected_pos=self._selected_pos,
@@ -2973,7 +3387,17 @@ class AppController:
             crowned_kings=self._compute_crowned_kings(obs),
             archetype_map=self._compute_archetype_map(obs),
             siege_dests=self._siege_dests,
+            spell_preview=spell_preview,
+            trap_preview=trap_preview,
+            scars=self._scar_map(obs),
         )
+
+        # Stage 11: the Ritual strip above the board. Drawn from the
+        # VIEWER's Observation (see _viewer_obs) so its "you" row shows a
+        # full pool and its "rival" row only what that side has leaked —
+        # the widget never sees anything the observation layer redacted.
+        viewer_obs = self._viewer_obs(obs)
+        self._ritual_bar.draw(viewer_obs, active_player=obs.active_player)
 
         # Stage 6: hover tooltip for Traps / active zone effects.
         hover_pos = self._board_view.pos_from_click(*self._mouse_pos)
@@ -3049,11 +3473,15 @@ class AppController:
         # — it opens a picker that always lists every owned Ritual, with
         # unready/completed ones rendered as disabled rows (see _do_ritual)
         # rather than hiding the button until something is actionable.
-        #   None = not in PREPARATION, or the player has no Ritual pool
-        #          at all (e.g. no registry) → don't draw at all.
+        #
+        # It also ignores ``prep_available``: RevealRitual (README §15.2)
+        # costs no preparation action, so the picker stays reachable after
+        # the player has already summoned, built or crowned this turn.
+        #   None = not in PREPARATION, not this human's turn, or the player
+        #          has no Ritual pool at all (e.g. no registry) → don't draw.
         #   True = the player owns at least one Ritual — always clickable.
         show_ritual: "bool | None" = None
-        if prep_available:
+        if obs.phase == Phase.PREPARATION and active_is_human:
             ps = self._game.state.get_player(active)
             if ps.ritual_pool:
                 show_ritual = True
@@ -3108,6 +3536,7 @@ class AppController:
             show_king_btn=show_king,
             show_ritual_btn=show_ritual,
             show_territory=self._show_territory,
+            ai_speed_label=self._ai_speed.capitalize(),
             activatable_entries=activatable_entries or None,
         )
         self._card_viewer.draw(
@@ -3120,24 +3549,10 @@ class AppController:
         self._event_log_panel.draw(self._game.state.event_log, registry=self._registry)
 
         # Hand strip:
-        # • Main row always shows the CURRENT HUMAN player's hand:
-        #     – If the active player is human → show their cards.
-        #     – If the active player is AI but the other player is human
-        #       → show that human's cards (they're waiting; let them look).
-        #     – Both AI → fall back to white (spectator mode).
+        # • Main row shows the viewer's hand — see _viewer_obs for which
+        #   side that is (the same rule the Ritual strip above uses).
         # • Debug row shows BLACK's raw hand only when the toggle is ON.
-
-        if active_is_human:
-            hand_obs = obs   # already built for active player
-        else:
-            # Active player is AI — find the human viewer (if any)
-            from game.core.observation import build_observation as _build_obs
-            opponent = "black" if active == "white" else "white"
-            if self._player_modes.get(opponent) == "human":
-                hand_obs = _build_obs(self._game.state, opponent)
-            else:
-                # Both AI — spectator mode: show white
-                hand_obs = _build_obs(self._game.state, "white")
+        hand_obs = viewer_obs
 
         # Debug row: black's hand when toggle is ON
         black_cards: list[str] | None = (
@@ -3210,6 +3625,12 @@ class AppController:
         # Toast notification (save/load feedback)
         if self._toast_ticks > 0:
             self._draw_toast()
+
+        # Stage 11: the full-screen card zoom is the topmost layer — it is
+        # a modal "read this properly" view, so it covers the pickers and
+        # the banner too, and every click goes to it until it's dismissed.
+        if self._card_zoom_id is not None:
+            self._card_zoom.draw(self._card_zoom_id)
 
         pygame.display.flip()
 
@@ -3612,11 +4033,18 @@ class _PlayerPicker:
     """
 
     _W = 470
-    _ROW_H = 40
     _HEAD_H = 22
     _PADDING = 14
     _CANCEL_H = 28
-    _GAP = 3
+
+    # Row height and gap are computed, not fixed: the roster grows as the
+    # game gains controllers, and the window is only 746 px tall. These are
+    # the comfortable values and the tightest ones still worth showing —
+    # ``_fit()`` walks from the first toward the second until the dialog
+    # fits, so adding a play style shrinks the rows instead of running off
+    # the bottom of the screen.
+    _GAP_ROOMY, _GAP_TIGHT = 3, 1
+    _ROW_PAD_ROOMY, _ROW_PAD_TIGHT = 8, 2
 
     _BG = (26, 22, 32)
     _ACCENT = (206, 162, 230)
@@ -3654,19 +4082,47 @@ class _PlayerPicker:
 
         line_h = font.render("Ag", True, (0, 0, 0)).get_height()
         self._line_h = line_h
-        self._detail_h = self._PADDING + (self._detail_lines + 1) * (line_h + 2)
-        h = (self._PADDING
-             + line_h + 10                                    # title
-             + len(roster) * (self._ROW_H + self._GAP)
-             + (self._HEAD_H + self._GAP if self._heading_before else 0)
-             + 6 + self._detail_h
-             + 8 + self._CANCEL_H
-             + self._PADDING)
         sw, sh = surface.get_width(), surface.get_height()
+        h = self._fit(len(roster), line_h, sh - 8)
         self._rect = pygame.Rect((sw - self._W) // 2, max((sh - h) // 2, 4),
                                  self._W, h)
         self._row_rects: list[pygame.Rect] = []
         self._cancel_rect: "pygame.Rect | None" = None
+
+    def _fit(self, rows: int, line_h: int, available: int) -> int:
+        """
+        Choose row metrics that fit ``rows`` rows into ``available`` pixels,
+        and return the dialog height.
+
+        Tries the roomy spacing first and tightens in steps; if even the
+        tight spacing overflows, the detail panel gives up lines last,
+        because a row the player cannot see is worse than a description
+        they have to hover twice for.
+        """
+        height = 0
+        for gap, row_pad in (
+            (self._GAP_ROOMY, self._ROW_PAD_ROOMY),
+            (self._GAP_ROOMY, self._ROW_PAD_TIGHT),
+            (self._GAP_TIGHT, self._ROW_PAD_TIGHT),
+        ):
+            self._gap, self._row_h = gap, line_h * 2 + row_pad
+            for lines in range(self._detail_lines, 0, -1):
+                # The draw loop clips to the panel, so sizing it for fewer
+                # lines IS dropping them — no separate counter needed.
+                self._detail_h = 10 + (lines + 1) * (line_h + 2) + 6
+                height = self._height(rows, line_h)
+                if height <= available:
+                    return height
+        return height   # nothing fits; __init__ clamps the top edge to 4
+
+    def _height(self, rows: int, line_h: int) -> int:
+        return (self._PADDING
+                + line_h + 10                                   # title
+                + rows * (self._row_h + self._gap)
+                + (self._HEAD_H + self._gap if self._heading_before else 0)
+                + 6 + self._detail_h
+                + 8 + self._CANCEL_H
+                + self._PADDING)
 
     # ── Input ────────────────────────────────────────────────────────────
 
@@ -3713,9 +4169,9 @@ class _PlayerPicker:
                     self._surface, (70, 58, 88),
                     (x + head.get_width() + 10, line_y), (x + inner_w, line_y),
                 )
-                y += self._HEAD_H + self._GAP
+                y += self._HEAD_H + self._gap
 
-            row = pygame.Rect(x, y, inner_w, self._ROW_H)
+            row = pygame.Rect(x, y, inner_w, self._row_h)
             self._row_rects.append(row)
             is_current = choice is self._current
             is_hover = row.collidepoint(self._mouse_pos)
@@ -3748,7 +4204,7 @@ class _PlayerPicker:
             )
             self._surface.blit(sub, (row.x + 26, row.y + 4 + name.get_height() + 1))
 
-            y += self._ROW_H + self._GAP
+            y += self._row_h + self._gap
 
         # ── Detail panel: what the hovered controller actually does ──────
         if hovered is not None:
@@ -3828,6 +4284,7 @@ class _KingDialog:
         rows: "list[tuple[str, Any]]",
         accent: tuple = (210, 180, 110),
         border: tuple = (170, 140, 70),
+        width: "int | None" = None,
     ) -> None:
         self._surface = surface
         self._font = font
@@ -3835,6 +4292,10 @@ class _KingDialog:
         self._rows = rows
         self._accent = accent
         self._border = border
+        # Per-dialog override of the 300 px default, for flows whose rows
+        # carry more than a card name (the Ritual picker prints a
+        # revelation state next to each entry).
+        self._W = width or type(self)._W
         self._mouse_pos: tuple[int, int] = (0, 0)
 
         h = (self._PADDING
@@ -3903,6 +4364,15 @@ class _KingDialog:
 
             color = self._accent if enabled else (85, 78, 65)
             lbl_surf = self._font.render(label, True, color)
+            # Trim rather than bleed past the row's right edge.
+            max_lbl_w = row_rect.width - 12
+            if lbl_surf.get_width() > max_lbl_w:
+                trimmed = label
+                while trimmed and self._font.render(
+                    trimmed + "…", True, color,
+                ).get_width() > max_lbl_w:
+                    trimmed = trimmed[:-1]
+                lbl_surf = self._font.render(trimmed + "…", True, color)
             ly = row_rect.y + (self._ROW_H - lbl_surf.get_height()) // 2
             self._surface.blit(lbl_surf, (row_rect.x + 6, ly))
 

@@ -15,3 +15,8 @@ env/
 # Runtime logs (rotated by the app's logger — regenerated every run)
 logs/*.log
 logs/*.log.*
+
+# AI Stage 6 (README §53) self-play corpora — generated data, reproducible
+# from the base seed with `python -m game.selfplay`.
+corpus/
+corpus-*/

@@ -139,10 +139,10 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
       on_summon  — arms a "req_reduction:available" status (unconsumed).
       activated  — (ACTIVATED_EFFECT_TYPES; fired via ActivateMonsterAbility
                    during CHESS) consumes that status and applies
-                   ``amount`` to ``ctx.extra["target"]`` (a ritual_id in the
-                   owner's own pool that isn't REVEALED yet), forcing that
-                   Ritual to REVEALED and bumping its RitualState.
-                   requirement_reduction — see mechanics/rituals.py
+                   ``amount`` to ``ctx.extra["target"]`` (any unfinished
+                   ritual_id in the owner's own pool), bumping that
+                   RitualState.requirement_reduction and driving it to
+                   REVEALED if it wasn't already — see mechanics/rituals.py
                    _effective_min_material / _effective_min_sacrifices /
                    _effective_pattern_nodes for how each condition type
                    spends it.
@@ -167,20 +167,20 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
         if owner is None:
             return
         ps = ctx.state.get_player(owner)
+        # Prefer a Ritual that still has revelation left to give — the free
+        # reveal is worth a turn of RevealRitual — but fall back to any
+        # unfinished Ritual. Since a Ritual must be REVEALED before it can
+        # be activated at all (core/rules.py), "all of mine are revealed" is
+        # a NORMAL late-game position, and the card must not be dead there.
+        pool = [rs for rs in ps.ritual_pool if not rs.activated]
         rstate = next(
-            (rs for rs in ps.ritual_pool
-             if not rs.activated and rs.revelation != RevelationState.REVEALED),
-            None,
+            (rs for rs in pool if rs.revelation != RevelationState.REVEALED),
+            next(iter(pool), None),
         )
         if rstate is None:
             return
         rstate.requirement_reduction += ctx.effect.params.get("amount", 1)
-        previous = rstate.revelation
-        rstate.revelation = RevelationState.REVEALED
-        ctx.events.append(RitualRevelationChanged(
-            player_id=owner, ritual_id=rstate.ritual_id,
-            old_state=previous, new_state=RevelationState.REVEALED,
-        ))
+        _force_revealed(ctx, owner, rstate)
         return
 
     if ctx.trigger != "activated":
@@ -194,17 +194,35 @@ def _ritual_requirement_reduction(ctx: "EffectContext") -> None:
         return
 
     rstate = get_ritual_state(ctx.state, ctx.unit.owner, ritual_id)
-    if rstate is None or rstate.activated or rstate.revelation == RevelationState.REVEALED:
+    if rstate is None or rstate.activated:
         return
 
     ctx.unit.remove_status("req_reduction:available")
     amount = ctx.effect.params.get("amount", 1)
     rstate.requirement_reduction += amount
+    _force_revealed(ctx, ctx.unit.owner, rstate)
+
+
+def _force_revealed(ctx: "EffectContext", owner: str, rstate) -> None:
+    """
+    Drive one Ritual straight to REVEALED, emitting RitualRevelationChanged
+    only if it actually moved.
+
+    Shared by both ritual_requirement_reduction branches. An ALREADY-revealed
+    target is fine and silent: since activation now requires REVEALED
+    (core/rules.py _execute_activate_ritual), the Rituals a player most wants
+    to discount are exactly the ones already at the top of the ladder — the
+    forced reveal is a rider on this effect, never a precondition for it.
+    """
+    from game.core.events import RitualRevelationChanged
+    from game.core.phases import RevelationState
 
     previous = rstate.revelation
+    if previous == RevelationState.REVEALED:
+        return
     rstate.revelation = RevelationState.REVEALED
     ctx.events.append(RitualRevelationChanged(
-        player_id=ctx.unit.owner, ritual_id=ritual_id,
+        player_id=owner, ritual_id=rstate.ritual_id,
         old_state=previous, new_state=RevelationState.REVEALED,
     ))
 

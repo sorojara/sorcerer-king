@@ -481,8 +481,13 @@ an adjacent-or-reachable Building square. It consumes the attacker's chess
 move for the turn, and the attacker does not relocate: the square stays
 impassable until the structure actually falls.
 
-A Building on a square where a unit is standing cannot be besieged. Deal
-with the garrison first.
+**A garrison does not shield a Building.** A siege targets the structure,
+not whoever is standing on it. Because a completed Building is impassable
+to the enemy, no attacker can ever step onto that square to remove a
+garrison — so treating a garrison as a defensive layer would make every
+Building permanently unbesiegeable simply by leaving the Builder Pawn
+where it already stands. Raze the structure; the garrison is left standing
+on the open square.
 
 ---
 
@@ -496,8 +501,13 @@ Every completed Building has an integrity pool derived from its size:
 | Medium | 2 |
 | Major | 3 |
 
-One successful hostile action removes one point. At zero, the Building
-collapses and its square opens up.
+A hostile action removes one point — **two** when the attacker is a Ritual
+Monster. Siege is the strategic payoff for completing a Ritual, so a
+Ritual Monster has to besiege harder than a card you merely drew: at one
+point per blow it hit no harder than a Pawn walking into a Siege Order
+mark, and strictly softer than Bane of Structures or Molten Colossus. Two
+drops a bare Fortress in a single action. At zero, the Building collapses
+and its square opens up.
 
 Layers of defence, in the order a blow meets them:
 
@@ -513,7 +523,11 @@ Layers of defence, in the order a blow meets them:
    structure is left standing on its final point.
 
 **Repair** (Royal Engineer, Worldforge Colossus) restores integrity at the
-owner's end of turn, capped at the Building's maximum.
+owner's end of turn, capped at the Building's maximum — but **not on a
+Building that was hit this round**. Nothing gets patched up while it is
+still being battered. Without that rule a single Royal Engineer's point
+per turn exactly cancelled a besieger's point per turn, and the Building
+simply never fell.
 
 Some effects bypass the attack rules entirely because they are not a unit
 attacking: a Demolition Charge is the ground under the Building
@@ -2503,6 +2517,149 @@ Potential later techniques:
 - information-set MCTS
 - rollout policies
 
+### Stage 4 completion notes
+
+Implemented as **determinization** — the second technique on that list, and
+the one that fits a controller which owns a *board* model rather than a
+full game simulator. `game/ai/determinize.py` samples the worlds;
+`game/ai/monte_carlo.py` searches them and averages the results.
+
+**A world.** A `Determinization` is one complete guess at what the observer
+cannot see: the opponent's hand, one Ritual per pool slot, one King per
+pool slot. It is drawn uniformly from the worlds that do not contradict the
+Observation. Every card publicly known to be the opponent's is removed from
+the pool first — their graveyard, the Monsters standing on their units, the
+Traps they have placed. The observer's *own* cards are deliberately not
+removed: each Main Deck is an independent sample from the shared pool
+(`Game._build_deck_from_registry`), so both players can hold the same card,
+and excluding it would be a wrong constraint rather than a cautious one.
+Rituals respect their revelation state (§15) — REVEALED is known outright,
+FORETOLD is narrowed to the roster entries matching the leaked archetype and
+required Vessel, SEALED is open. `false_prophecy`'s `ritual_bluff` fools the
+sampler exactly as it fools a human, which is the card working.
+
+**The decision.**
+
+```text
+score(action) = mean over sampled worlds w of
+                    search(position_after(action) | w)
+              + bias(action)
+```
+
+The part of a hidden hand that shows up on a *board* is the Monster it can
+summon, so that is what a world applies: the sampled hand is walked and the
+Monster that reaches the most useful vessel is put there — constrained the
+way the engine constrains a real Summon, including §13's own-Territory
+requirement, and capped at one because the engine allows one major
+preparation action per turn. The position is then searched with ordinary
+Stage 2 machinery. Averaging over worlds is the Monte Carlo; the search
+inside each one is what makes the average worth taking.
+
+**Which decisions are sampled.** PREPARATION is Stage 4's reason to exist —
+§47 handed every Summon, Ritual and Recompose back to the Stage 1 estimator
+precisely because searching them in a world where the opponent holds nothing
+would be worse than not searching them at all. Those are now judged by the
+board they leave behind. CHESS is sampled too, at a shallower per-world
+depth: the board is public, so what sampling adds there is narrower (the
+threat map of a Monster not summoned *yet*) and depth is worth more than
+breadth, which is why the two budgets are configured separately. Everything
+else — Final Duel, forced discards, pending follow-ups — falls through to
+Stage 2 and Stage 1 unchanged.
+
+One detail that is easy to get backwards: the turn does not pass at the end
+of PREPARATION. `EndPreparation` moves the same player on to CHESS, and the
+one preparation action is spent *before* the chess move, so a preparation
+candidate is searched with the bot itself still to move. A chess candidate
+hands the position to the opponent, exactly as Stage 2 does.
+
+**Biases.** Stage 1's action biases assume nothing has been searched, so
+reusing them here would charge twice for the same thing — the search already
+sees the Monster a Summon produces and the material a Ritual eats. What is
+left is the off-board remainder (`SampledBias`: a card leaving the hand, a
+Ritual slot spent for good). Anything the world model does *not* apply —
+Traps, Spells, Constructions, Coronations, Recompose, Mercenary — keeps its
+full Stage 1 estimate, because for those the search genuinely sees nothing.
+
+**Spending the budget.** Worlds are shared across candidates: every
+candidate is scored against the same world before the next is drawn, so the
+comparison that decides the move is paired and the noise cancels instead of
+accumulating. The field is then cut by successive halving (10 → 5 → 2 at the
+default fan-out), with survivors keeping their tallies, so the moves still
+in contention are the ones measured on the most worlds. The first world
+drawn is always the null one — "the opponent has nothing" — so the ranking
+stays anchored to the position as it actually is. A world that runs out of
+budget half-way is discarded whole rather than averaged in, and if not one
+world completes, the decision falls back to Stage 2.
+
+**Favorable.** Each world is also searched with no action taken. An action
+is *favorable* in a world when it comes out ahead of passing, and the
+fraction of worlds where it does is what `MonteCarloStats.favorable`
+reports — §49's "63 % favorable".
+
+**Honest limits.** This is Perfect-Information Monte Carlo and it inherits
+PIMC's two known faults: *strategy fusion* (each world is searched as if its
+hidden cards were face-up, so the bot credits itself with plans it could not
+actually choose between) and *non-locality* (the opponent is assumed to play
+the sampled world rather than to hide information). Sampling is uniform over
+consistent worlds; §48's belief model is what replaces that with a weighted
+draw, and §49's own list — MCTS, information-set MCTS — is what replaces
+PIMC itself.
+
+**Budgets.** `MonteCarloLimits(samples, depth, chess_samples, chess_depth,
+max_candidates, max_nodes, max_seconds, …)`. The pygame UI runs a tighter
+profile than a headless run, as it does for Stage 2: twelve worlds at two
+plies for PREPARATION, eight at two for CHESS, inside 0.9 s. Two plies is
+not the concession it looks like — §47's own measurement is that the Stage 2
+bot only *completes* depth 2 inside its interactive budget in a crowded
+midgame.
+
+Selectable per side from the pygame sidebar: each side's button now cycles
+**HUMAN → RANDOM AI → HEURISTIC AI → SEARCH AI → MONTE CARLO AI**. Headless:
+
+```bash
+python -m game.sim --matches 10 --white montecarlo --black search --mc-samples 16
+```
+
+#### Measured baseline
+
+Same protocol as §46 and §47 — 5 matches per pairing, 400 actions each,
+seeds 1000-1004 — with the two bots held to comparable per-decision
+wall-clock (`--search-seconds 0.6`, `--mc-seconds 0.9 --mc-chess-depth 2
+--mc-samples 12 --mc-chess-samples 8`, i.e. the interactive profile). Mean
+pieces captured per match, and matches won outright inside that budget:
+
+| pairing | white | black | wins |
+|---|---|---|---|
+| montecarlo (W) vs heuristic (B) | **13.4** | 10.4 | montecarlo 3 |
+| heuristic (W) vs montecarlo (B) | 10.2 | **12.0** | montecarlo 1 |
+| montecarlo (W) vs search (B) | **10.6** | 9.6 | search 1 |
+| search (W) vs montecarlo (B) | 8.4 | **10.2** | — |
+
+Against Stage 1 the result is clear and it is clear on both sides of the
+board: +3.0 pieces as White, +1.8 as Black, and four wins to nil across the
+ten matches. That is a wider margin than §47 measured for Stage 2 over the
+same opponent, which is the shape to expect — the decisions Stage 4 changes
+are the card decisions, and those are most of what separates two bots that
+play the same chess.
+
+Against Stage 2 it is a material edge without a win edge: +1.0 as White,
++1.8 as Black, but one win for SearchBot and none for MonteCarloBot. Read
+that as "no separation" rather than a loss — nine of those ten matches hit
+the 400-action cap undecided, so the win column has one sample in it. The
+honest summary is that Stage 4 is ahead of Stage 2 on material and level on
+results at this budget, and that a run long enough to decide most matches is
+what would actually settle it.
+
+Two costs are worth naming. Sampling is expensive: a `montecarlo vs search`
+match averaged 270 s against 109 s for `montecarlo vs heuristic`, and the
+per-decision budget is what caps the worlds drawn, not the sample count. And
+Stage 4 is spending that budget on breadth at the price of a ply — the
+interactive profile searches two plies per world where Stage 2 nominally
+searches three. The material numbers say the trade is paying for itself
+against Stage 1; against Stage 2 it is roughly a wash, and §48's belief
+model — weighting the worlds instead of drawing them uniformly — is the
+thing that would make each world worth more than it currently is.
+
 ---
 
 # 50. AI Stage 5 — Final Duel AI
@@ -2607,6 +2764,207 @@ This could later become the strongest general-purpose AI.
 
 ---
 
+## Chess Purist
+
+Priorities:
+
+```text
+chess play          everything
+material            high
+King safety         high
+Preparation         declined
+```
+
+Ignores the other Preparation mechanics and tries to win on chess alone.
+
+---
+
+## Rogue
+
+Priorities:
+
+```text
+early game          chess, and saving cards
+late game           every resource at once
+switch              as the endgame arrives
+```
+
+Hoards its resources while the game is still being built, then spends all
+of them once it decides the endgame has started.
+
+---
+
+### §51 implementation notes
+
+Two files:
+
+- `game/ai/personality.py` — the five play styles. A `Personality` is a
+  pair of multiplier tables: one over `EvalWeights` (how the *position* is
+  judged) and one over `ActionBias` (which *systems* the bot reaches for).
+  `weights()` and `biases()` turn a style into the two objects the bots
+  already read.
+- `game/ai/personality_bot.py` — `PersonalityBot`, the controller. It
+  subclasses `SearchBot`, so §51 changes what the bot *wants* and nothing
+  about how hard it thinks — that is §52's job. A Conqueror and an
+  Architect calculate chess equally well and simply disagree about which
+  position they were aiming for.
+
+**A personality is a tilt, not a monomania.** This is the design
+constraint the whole module is built around. A Ritualist that never
+summons a Monster is not a Ritualist — it is a broken bot that loses to
+everything and teaches the player nothing. So a play style can only *scale*
+the defaults, and the scaling is clamped twice:
+
+- every evaluation weight stays inside `[0.6, 3.0] ×` its default, so no
+  §46 category is ever switched off. An Assassin that "values material
+  lower" (§51) still takes a free Queen — lower means 0.6×, never 0×;
+- the **staple actions** — Summon, Construction, Ritual, Spell, Trap,
+  Coronation, Castle — additionally cannot fall below `0.6 ×` their
+  default bias and cannot go non-positive. Whatever the style, the bot
+  keeps summoning, keeps building, and keeps taking a free Coronation.
+
+Inheriting the Stage 2 search is the third guarantee: the chess is
+untouched, so no play style can tune itself out of playing. Where a style
+would otherwise be tempted to skip a system it needs, the tilt goes the
+other way on purpose — the Ritualist's `SUMMON` bias is *raised* to 1.35×,
+because a Ritual eats bodies and a Ritualist that will not summon has one
+plan and no game.
+
+`tests/test_personality_bots.py` asserts both halves: the numeric
+guardrails, and the behavioural consequence — for every style, in a real
+opening position, a Summon and a Construction still outscore passing.
+
+**Abstention: the one way past the floor.** The Chess Purist's whole idea
+is to *not* play the card game, which the floor above exists to prevent.
+Rather than weaken the floor for everyone, a style declares what it
+declines in `Personality.abstains`, and those biases are set to
+`ABSTAIN_BIAS` outright. The distinction is the point: a style cannot
+*drift* into refusing to play by tuning a multiplier down, it has to say so
+in one auditable place — and a test asserts the Purist is the only style
+that says it.
+
+The exemption is safe here in a way it would not be for the others,
+because chess is a complete game on its own. A Ritualist that stops
+summoning has one plan and no game; a Purist that stops summoning is
+`SearchBot`, which §47 already measured as a competent opponent. It is
+giving up real advantages — Monsters make pieces stronger — and that is
+the trade the player picked. Coronation is deliberately *not* abstained: a
+King is a chess piece, and §17 makes crowning one free.
+
+**Adaptive styles, part two.** The Rogue is written the same way the
+Opportunist is — as a blend — but over two private *stances* rather than
+over the other archetypes. `_STANCES` is what a blend may name: the play
+styles, plus stances like `rogue_hoard` / `rogue_spend` that nobody picks
+off a menu. `endgame_pressure()` scores how far into the endgame the board
+is, in `[0, 1]`, and the Rogue blends hoarding into spending by it.
+
+That pressure is built only from signals that do not go backwards —
+material still on the board, the turn number, the deck draining, Rituals
+coming out from under their seals. A King in check is deliberately *not*
+one of them: it flickers, and a Rogue that dumped its hand on a check and
+then wished it hadn't is the failure this style has to avoid. Monotonic
+signals mean the commitment is effectively one-way without needing a latch
+to enforce it. And it is a ramp rather than a switch, so the hand starts
+opening as the endgame approaches instead of flipping at a threshold
+nobody can see.
+
+**The Opportunist** (§51: "priorities dynamically change") is a *blend* of
+the other four rather than a table of its own. `opportunist_mix()` reads
+the Observation and votes: behind on material it leans Architect, with its
+own Ritual REVEALED it leans Ritualist, with the enemy King hemmed in or
+the opponent's Ritual revealed it leans Assassin, ahead on material it
+leans Conqueror. Every component starts at 1.0 and is capped at 4.0, so
+the strongest signal on the board still leaves each other style ~14% of
+the vote — the Opportunist adapts, it does not convert. The mix is
+recomputed once per **turn**, not per decision, so one turn's Summon,
+Ritual and chess move are all decided by the same personality instead of
+drifting mid-turn. Information rules (§44) are untouched: the re-mix reads
+the same Observation the bot is already deciding from, and nothing else.
+
+Selectable per side from the pygame sidebar. The selector used to cycle one
+step per click; with four AI stages, five play styles and the human on the
+roster that meant walking a ten-entry loop blind, so the button now opens a
+**player picker** listing all of them at once:
+
+```text
+Random        (Idiot)     Picks a legal action at random.
+Heuristic     (Easy)      Scores every legal action once.
+Search        (Medium)    Searches the board a few moves ahead.
+Monte Carlo   (Hard)      Guesses your hand, then searches.
+── Personalities ──
+Conqueror                 Aggressive positional attacker.
+Architect                 Builds, holds ground, and outlasts you.
+Ritualist                 Sacrifices material to complete Rituals.
+Assassin                  Hunts the King to force the Final Duel.
+Opportunist               Re-reads the board and re-mixes the other four.
+Chess Purist              Wins at chess. Declines the card game.
+Rogue                     Hoards its cards, then spends everything late.
+Human                     You play this side yourself.
+```
+
+The two halves of the list are the two halves of the AI design: the top
+group is §52 difficulty — how hard the bot thinks — and the group under the
+heading is §51 play style — what it thinks *about*. A bare name carries
+neither ("Monte Carlo" does not read as *hard*, "Assassin" does not read as
+*goes for your King while losing*), so every row carries a difficulty word
+or a one-line description, and the hovered row's behaviour — a §51 priority
+table, or how the stage actually plays — is spelled out underneath.
+
+`_PLAYER_ROSTER` is the single source of truth for that list and for the
+sidebar button's own label, so adding a controller is one entry and nothing
+else. Row height and spacing are computed rather than fixed — twelve rows
+plus a detail panel do not fit a 746 px window at comfortable spacing, so
+the dialog tightens its rows to fit and drops detail lines last, on the
+principle that a row the player cannot see is worse than a description
+they have to hover twice for. Opening the picker commits nothing and freezes the match while it is
+open; Cancel, ESC and clicking away all leave the side untouched. Once
+chosen, the button shows the style rather than the stage ("♛ RITUALIST AI").
+Headless:
+
+```bash
+python -m game.sim --matches 10 --white personality --white-personality ritualist --black heuristic
+```
+
+#### Measured: every style still plays the whole game
+
+The guardrails are only worth having if they show up on the board. 3
+matches per style as White against HeuristicBot, 300 actions each, depth-2
+budget. **The White side's own numbers**, per match — `player_mean(attr,
+"white")`, not the match average, which would fold the opponent's play into
+every row:
+
+| style | Vessels summoned | Buildings built | Rituals completed | cards played |
+|---|---|---|---|---|
+| Conqueror | 4.7 | 4.7 | 0.0 | 27.7 |
+| Architect | 2.7 | 5.0 | 0.3 | 26.7 |
+| Ritualist | 5.0 | 4.7 | 0.3 | 26.3 |
+| Assassin | 6.0 | 4.0 | 0.3 | 25.3 |
+| Opportunist | 5.3 | 4.3 | 0.7 | 23.7 |
+| Rogue | 2.7 | 4.3 | 0.7 | 26.0 |
+| **Chess Purist** | **0.0** | **0.0** | **0.0** | **0.0** |
+| *(plain SearchBot)* | *5.7* | *5.0* | *1.0* | *25.3* |
+
+For the six styles that did not declare an abstention, no column has a zero
+in it. The Ritualist builds as many Buildings as the Conqueror does and is
+among the heaviest summoners — which is the point: it needs the bodies. The
+Architect summons the fewest, because its Pawns are worth more standing as
+builders than spent as Vessels, and that is a tilt showing up as a play
+style rather than as a missing system.
+
+The Chess Purist's row of zeros is not a bug; it is the abstention working,
+and it is the reason abstention had to be a declaration rather than
+something a multiplier could reach. Its `cards played` of 0.0 against
+SearchBot's 25.3 is the whole difference between the two, since everything
+else about them is the same search.
+
+The columns are too close together to call this a personality *strength*
+measurement, and it is not meant to be one — §51 is about play style, §52
+is about strength. What it measures is the constraint the module is built
+around: whatever the style, the bot still plays every system on the board
+unless it said outright that it does not.
+
+---
+
 # 52. AI Difficulty
 
 Difficulty should primarily affect reasoning quality.
@@ -2687,6 +3045,728 @@ Possible future approaches:
 - offline model training from simulation data
 
 This is an advanced phase, not part of the initial PoC.
+
+---
+
+### §53 groundwork notes
+
+Not the machine learning. §53 is emphatic that it should not be started
+yet — "machine learning should come later", "do not begin with RL" — and
+that stands. What is built here is what the section says to build first,
+because §53 is the only part of the AI roadmap that opens with a list of
+preconditions rather than a design:
+
+> First stabilize: game rules, legal actions, balance, evaluation,
+> complete matches, simulation speed.
+>
+> Once the engine can run many headless games — 10,000+, 100,000+
+> matches — self-play becomes useful.
+
+Measured against its own gate, the engine failed both halves of that
+sentence. A RandomBot self-play match took **134 seconds**, and **half of
+them never produced a result at all**. Ten thousand matches — the smaller
+of the two numbers §53 names — was eight days of a four-core machine, and
+half of what came out would have carried no label for anything to learn
+from or measure.
+
+Four pieces of work closed that. None is a learning algorithm; all of them
+are what a learning algorithm would otherwise have starved on.
+
+#### 83 % of the engine's life was spent copying the board
+
+`chess/movement.py` `get_legal_moves` answered "does this move leave my own
+King in check?" the obvious way: `deepcopy` the board, play the move on the
+copy, ask. Once per candidate destination, for every piece, every time
+anything asked for a legal action — and `get_legal_actions` asks for the
+whole army.
+
+A profile of 600 headless steps: **348 s total, 287 s of it inside
+`copy.deepcopy`, 15.9 million calls.** Legal-action generation was 85 % of
+the step loop and the deep copy was 83 % of the entire program. Nothing
+else was within an order of magnitude, and it got worse as a match went on —
+throughput fell from 31 steps/s in the opening to 11.5 by turn 160, because
+a board carrying more Monsters is a more expensive board to copy.
+
+It is now make/unmake (`_leaves_king_in_check`). The copy-based version
+performed exactly three mutations — vacate the source square, vacate the
+en-passant victim's square, occupy the target — and all three are plain
+`SquareState.unit` assignments, so saving those three slots, asking the
+question, and putting them back reproduces the identical board. Nothing
+reached from the check test mutates: `is_in_check` and
+`get_pseudo_legal_moves` only read.
+
+"Identical" is the claim the optimization lives or dies on, so it is tested
+as one rather than asserted. `TestCheckFilterEquivalence` keeps the original
+deep-copy implementation as the reference answer and compares the two for
+every unit of every position of a real self-played game — 200+ positions
+per run, including the Monster-altered movement and the pinned pieces
+nobody thinks to write a fixture for — checking after each comparison that
+the board came back unchanged. En passant, the one case where the captured
+piece is not on the target square, gets its own position.
+
+The same match, the same seed, the same 1556 steps: **134.0 s → 12.6 s.**
+The test suite went from 538 s to 105 s on the way past.
+
+#### Half of every self-play sample had no result
+
+Twelve RandomBot matches: six reached a winner, six ran out the harness's
+4000-step abort. §53's list wants "complete matches", and a corpus where
+half the games have no outcome is half a corpus — every use in §53's own
+list, from "estimate card strength" to "policy/value networks", needs to
+know who won.
+
+Instrumenting the runaways found **three unrelated causes**, two of them
+rules bugs that had been sitting in the engine unnoticed because no bot
+had been left alone with them for long enough.
+
+**A Monster ability could be fired forever.** The worst offender spent 3370
+`ActivateMonsterAbility` actions on a single board position that repeated
+3362 times. Activating an ability does not consume the chess move and
+several abilities stay legal after use, so the same one can be fired
+indefinitely without the turn ever advancing. §46 had already met this
+exact pathology — "173 activations and 3 moves in a 200-action sample" —
+and fixed it *inside the bot*, with a per-turn memory in `HeuristicBot`.
+The rules never had the cap. RandomBot does not self-limit, so it stalled;
+and a human at the pygame board could have done the same thing.
+
+The cap now lives where it belongs: once per turn per `(unit, ability)`,
+keyed on the piece ID so moving the unit does not buy a second activation,
+recorded in `PlayerState.abilities_used_this_turn` and cleared by
+`reset_turn_flags` alongside the other per-turn flags. `get_legal_actions`
+stops offering a spent ability and `RulesEngine` refuses one built by hand,
+so the rule holds against a caller that never consults the action list. The
+bots' own memories are now belt-and-braces rather than the only thing
+standing there. That match: 4000 steps and no result → **733 steps and a
+decisive winner**.
+
+**A pending decision could become unresolvable.** blade_dancer's
+after-capture reposition raises a REPOSITION `PendingDecision` about a
+specific piece on a specific square, and CHESS then offers *nothing but*
+that reposition until it is resolved. If the piece is captured or moved in
+between — a Trap firing on the same square will do it — every option points
+at an empty square, every attempt is refused, the decision is never
+cleared, and the player is locked out of their own turn for the rest of the
+match. It showed up as 3791 `RepositionUnit` attempts against "No piece at
+a6". A decision about a piece that is not there has nothing left to decide,
+so `_reposition_is_stale` now detects it: `get_legal_actions` declines to
+offer it and falls through to ordinary play, and `execute` drops it. This
+one survived the first two fixes and was still stranding two matches in
+forty.
+
+**And nothing bounded a match.** §31's endings are all *events* — a King
+captured, a checkmate, a stalemate, a Duel won — and none is guaranteed to
+arrive. Checkmate and stalemate hand off to the Final Duel rather than
+ending the game, Royal Escape sends a survived Duel back to the board, and
+underneath it all there is no threefold repetition and no fifty-move rule.
+Two sides that shuffle can decline every ending indefinitely, and the
+sample's remaining runaways did: 316, 508, 522 and 530 turns.
+
+`MatchLimits` (in `core/state.py`, per-`Game`, overridable through
+`Game.new(limits=...)`) is the floor chess has always had, extended to the
+systems this game adds:
+
+- **repetition** — the same piece placement with the same side to move,
+  three times. Hands and decks are deliberately *not* in the key: they
+  cycle every turn, so folding them in would mean no position ever recurred
+  and the rule could never fire.
+- **no progress** — 80 plies with nothing irreversible happening. A capture
+  cannot be undone, a Pawn cannot walk back, and a completed Building, an
+  accumulated Ritual and a crowned King all stay done, so each of them
+  counts as progress. This is the fifty-move rule with the kingdom
+  included.
+- **turn ceiling** — 300, as a backstop behind both.
+
+§57 lists numbers like these as deliberately open, so they are data rather
+than constants buried in the engine.
+
+A match stopped by one of them is a **draw** — `winner` stays None, the
+phase goes to GAME_OVER, and `GameOver.reason` names which limit fired.
+This is the one place the game admits a drawn match, and it is worth being
+explicit about why it is a draw rather than an adjudication. §31 routes
+every ending through the Final Duel precisely so a match is decided by the
+kingdom each player managed to preserve; awarding a stagnation to whoever
+happens to lead on material would decide it by a rule the design never
+made, and would quietly teach anything trained on the corpus that material
+is the tiebreak. A draw records what actually happened: neither player got
+there.
+
+Telemetry follows. `decided` / `drawn` / `unfinished` now partition a run,
+so "the rules produced a draw" and "the harness gave up" stop being the
+same number.
+
+Eighty matches across both bots after all three fixes: **eighty results,
+zero unfinished.**
+
+#### The corpus runner
+
+`game/selfplay.py`. `game.sim` already plays a match and gathers §42
+telemetry; what it could not do is survive the scale §53 asks for.
+`run_matches` is a single-process loop that accumulates in memory and
+returns nothing until the last match lands, so a run long enough to matter
+is also long enough to be interrupted — and an interrupted run was a total
+loss.
+
+    parallel    one worker per core; matches are independent and the GIL is not.
+    sharded     each worker appends to its own JSONL file.
+    streaming   one line per match, flushed as it completes.
+    resumable   a seed already on disk is not replayed.
+
+Rerunning an interrupted command finishes the run instead of restarting it,
+and raising `--matches` extends a corpus rather than rebuilding it. Seeds
+are dealt round-robin rather than sliced contiguously, because match cost
+varies by a factor of five with the seed and dealing stops the long ones
+stacking into the last chunk.
+
+Two files come out:
+
+    matches-NNNN.jsonl     one line per match — seed, who played, how it
+                           ended, and its full §42 telemetry.
+    decisions-NNNN.jsonl   one line per decision (--trajectories) — the
+                           position as §46's evaluator saw it, how many
+                           actions were available, and which was chosen.
+
+The decision row is deliberately not a serialized Observation. An
+Observation is a deep object and there are hundreds of decisions per match;
+written out whole it would make a corpus expensive to produce, expensive to
+read, and still not in the shape a model wants. §46's
+`evaluation_breakdown` is already a fixed-width, named feature vector over
+exactly the systems this game is about — material, king safety, board
+control, Monsters, Pawn economy, Buildings, territory, Rituals, cards, hand
+quality, Royal Support, Duel probability — so that is what a row carries.
+
+`iter_examples()` joins decisions to the outcome of the match they came
+from and labels each from the acting player's side: `+1` won, `-1` lost,
+`0` drawn. Decisions whose match has no recorded outcome are dropped rather
+than labelled with a guess. That is §53's "offline model training from
+simulation data", one function call from the corpus on disk.
+
+```bash
+python -m game.selfplay --matches 10000 --out corpus/ --white heuristic --black heuristic
+python -m game.selfplay --matches 2000  --out corpus/ --white search --black search --trajectories
+python -m game.selfplay --out corpus/ --summary-only
+```
+
+#### Weights that can leave the process
+
+`game/ai/weights.py`. §53 lists "optimize heuristic weights", and §46's
+evaluation was already written as data — `EvalWeights` is a flat dataclass
+of floats, `ActionBias` a flat table of them. What was missing was the way
+in and out: an optimizer runs *outside* the process that plays the match,
+so a candidate vector has to survive a file and a command line.
+
+`load_weights` / `save_weights` read and write JSON, either flat
+(`{"material": 1.2}`) or sectioned (`{"weights": {…}, "biases": {…}}`). A
+file may be partial — anything it does not mention keeps its default, so a
+search over three weights is a three-line file instead of a copy of the
+whole table that goes stale the next time a weight is added. `weights=` and
+`biases=` now run through `make_controller` to HeuristicBot, SearchBot and
+MonteCarloBot, and `--white-weights` / `--black-weights` reach them from
+the command line.
+
+These take **absolute values and apply no clamps**, which is the one place
+they deliberately differ from §51's `weights_from_tilt` and
+`ActionBiasSet`. Those take multipliers and clamp them, for a good reason:
+a play style that switched an evaluation category off would stop playing
+the game. Tuning is the opposite problem — an optimizer has to be free to
+propose the unreasonable, and silently clamping a proposal would mean
+scoring a different candidate than the one that was measured. Passing both
+a personality and a weight file to the same side is refused rather than
+resolved, since both set the same table.
+
+#### Measured: what §53's gate costs now
+
+Same seeds before and after, four cores:
+
+| | before | after |
+|---|---|---|
+| one RandomBot match, 1 core (seed 1000, 1556 steps) | 134.0 s | 12.6 s |
+| 40 RandomBot matches, 4 cores | — | 198 s |
+| 40 HeuristicBot matches, 4 cores | — | 147 s |
+| matches that reached a result | 6 / 12 | 80 / 80 |
+| full test suite | 538 s | 105 s |
+| **10,000 matches, 4 cores** | **~8.1 days** | **~10–14 hours** |
+| **100,000 matches, 4 cores** | **~81 days** | **~4–6 days** |
+
+RandomBot draws 45 % of its games and HeuristicBot 20 %, which is the
+right way round and worth reading as a first result rather than a defect —
+a bot that never plans is exactly the one that shuffles into a repetition,
+and the gap between the two is §46's evaluation showing up as the ability
+to actually finish a game. Mean match length tells the same story: 147
+turns for RandomBot, 70 for HeuristicBot. None of this was visible before,
+because the games that would have shown it were the ones being abandoned.
+
+10,000 matches is now an overnight run rather than a fortnight, and 100,000
+a long weekend rather than a quarter. §53's gate is met.
+
+#### What this does not do
+
+Three gaps, in the order they matter:
+
+- **§48's belief model is still unbuilt**, and §49's determinization still
+  says so in its own docstring — sampling is uniform over consistent
+  worlds. §55 puts the belief model before self-play; it is skipped here on
+  the argument that self-play is a good way to *produce* the priors it
+  needs, which is a real argument and also a convenient one.
+- **§50's Final Duel search is still unbuilt.** Duel decisions fall back to
+  §46's static bias table. The Duel's own round caps are what stop it
+  looping, not any judgement about how to play it.
+- **The next bottleneck is already visible.** With the deep copy gone,
+  `get_pseudo_legal_moves` is 76 % of the remaining runtime, nearly all of
+  it called from `is_in_check`, which generates every move of every enemy
+  piece to ask whether one of them lands on the King. Asking the question
+  from the King's square outward is the standard answer and is worth
+  roughly another 2–3×. It is not done here because this game's Monsters
+  alter movement patterns, so a reverse-attack test is not obviously
+  symmetric and would need its own equivalence proof — the same one
+  `TestCheckFilterEquivalence` exists to provide.
+
+And the learning itself, which is still where §53 says it should be: later.
+
+---
+
+### §53 corpus analysis
+
+With the gate met, the first thing worth doing with self-play is the thing
+§53 lists first — and it is not learning:
+
+> Potential goals:
+> - discover unexpected strategies
+> - evaluate balance
+> - estimate card strength
+> ...
+> - discover Ritual patterns
+> - identify abusive Building combinations
+> - identify dominant King succession paths
+
+Every one of those is a question about a pile of finished matches, and
+every one is answerable by counting. `game/analysis.py` is the counting.
+
+```bash
+python -m game.selfplay --matches 1000 --out corpus/heuristic-1k \
+    --white heuristic --black heuristic --trajectories
+python -m game.analysis --corpus corpus/heuristic-1k
+```
+
+#### Telemetry was counting cards without naming them
+
+§42's list is thorough about *how many* — cards played, cards remaining,
+Rituals completed, Buildings built — and silent about *which*. Every event
+already carried the id (`MonsterSummoned.card_id`,
+`BuildingCompleted.building_card_id`, `RitualActivated.ritual_id`); the
+recorder was throwing it away, because §42 never asked for it and §53 had
+not been started.
+
+`PlayerMatchStats` now also keeps `cards_played_by_id`,
+`cards_drawn_by_id`, `buildings_built_by_id`, `rituals_completed_by_id` —
+and `deck_card_ids`, captured by `MatchTelemetry.record_opening` before the
+first event, because the deal happens in `Game.new` and nothing downstream
+could reconstruct it.
+
+#### The deal is the denominator
+
+That last field is the whole methodology, and it is worth spelling out
+because the obvious alternative is wrong in a way that looks fine.
+
+The tempting way to rate a card is *how often does the side that plays it
+win*. That number is close to meaningless: a bot plays a card because §46's
+evaluation liked the position it was in, so the card's win rate is
+contaminated by every reason the player was already winning. It measures
+the bot's taste, not the card.
+
+Each player's 20-card deck is instead sampled at random from the shared
+pool, independently of anything either side does — `Game.
+_build_deck_from_registry` picks it before the first move. That is a
+randomised assignment, and it is the only reason a self-play corpus can
+support a causal claim at all. So the primary number is conditioned on
+**the card being in the deck**: *players dealt this card scored X, players
+not dealt it scored Y.* The play-rate is reported beside it as a
+description of the bot, which is the only honest thing it can be.
+
+The sections that follow — Rituals, Buildings, Kings — are labelled
+**correlational** in the report itself, because a Building is chosen and a
+Ritual is achieved. A Building pair that wins may simply be the pair a
+winning player had time to finish, and the report says so rather than
+letting the reader assume the card-strength method extends to it.
+
+`tests/test_ai_stage6_analysis.py` plants a card that is inert except that
+the winner happens to play it, and asserts the metric refuses to rank it —
+a test the contaminated version fails and the means-only version passes.
+
+#### Reading the report
+
+Every rate carries its sample size and standard error; every comparison
+carries how many standard errors the difference clears. Effects that do not
+clear two are reported as noise rather than quietly ranked, and both
+thresholds move from the command line so a reader can check how much of a
+finding survives being asked for more evidence.
+
+A drawn match scores ½ for both sides, the convention chess ratings use.
+Draws are 20 % of HeuristicBot self-play, and dropping them would discard
+exactly the matches where a card most plausibly failed to break a deadlock.
+
+One statistical trap is worth naming because the naive formula gets it
+backwards: when both groups have zero spread, the standard error is zero,
+and `|Δ| / 0` was being reported as zero significance. Perfect separation
+is the *most* certain a comparison can be, not the least. It now reports a
+capped maximum — capped rather than infinite so the JSON report stays valid
+JSON.
+
+#### First finding: two cards that could never be played
+
+The corpus earned its keep on the first run, and not in the way the goal
+list advertises. Two Spells sat at a **0 % play rate across ~100 deck
+appearances each**, while scoring measurably below average — which is
+exactly what carrying a dead card in a 20-card deck does to you.
+
+    knightfall          Δ-0.104  (2.2σ)   play rate 0 %
+    evacuation_order                      play rate 0 %
+
+Neither was a balance problem. Both were unplayable.
+
+`_reposition_unit` (mechanics/effects/movement.py) implements four modes,
+selected by the params each card declares, and its docstring describes all
+four. `get_legal_actions` enumerated only one of them — the plain
+`max_distance` box:
+
+- **knightfall** declares `piece_types: [knight]` and
+  `movement_pattern: knight`. The enumeration ignored both, so it offered
+  Pawns and adjacent squares. Every offer came back
+  *"This Spell can only target: knight."*
+- **evacuation_order** declares `target: own_king` and exists to move the
+  King one square. The enumeration's blanket "never the King" rule — right
+  for every other reposition card — skipped the only piece this one can
+  target, so it had no legal action at all, ever.
+
+Both handlers were correct and had been all along; only the offer was
+wrong. A card whose effect is implemented perfectly is still dead if
+nothing ever proposes a legal way to play it, and no test caught it because
+every test drove the handler directly rather than asking what the action
+generator would offer.
+
+The enumeration now reads the same params the handler validates against,
+and the invariant is stated as a test in
+`tests/test_ai_stage6_selfplay.py`: **an offered action is one the rules
+accept.** In live self-play the two cards went from 0 % to 45 % and 70 %
+play rates. In the 1,000-match corpus below they are ordinary cards:
+`knightfall` −0.038 (1.3σ), `evacuation_order` −0.031 (1.0σ), both now
+noise, and the corpus's "never played" list is empty.
+
+This is the shape of finding §53 promises and the reason it lists
+"estimate card strength" as a *goal* rather than a technique. Nobody was
+going to notice by playing: two cards out of a 117-card pool, each drawn
+about a third of the time, quietly doing nothing. It took a thousand
+matches counting who held what.
+
+#### Measured: 1,000 HeuristicBot self-play matches
+
+`--matches 1000 --white heuristic --black heuristic --seed 100000`, four
+workers, 51 minutes, 999 finished and one crash (below). 1,998
+player-observations, 557,297 decision rows.
+
+**Balance is better than it had any right to be.** First-player advantage
+is +0.005 ±0.020 — 0.2σ, indistinguishable from nothing across two
+thousand observations. §57 lists "first-player balance" as an open
+question; on this evidence there is no problem to solve. Archetypes span
+0.478 to 0.516, every one of them inside two standard errors of even.
+Buildings — singly and in pairs — produce nothing above the noise floor at
+all.
+
+    draw rate      17.4 %
+    match length   mean 60.9, median 50, p10 32, p90 104
+    ended by       final_duel_victory 825, repetition 118,
+                   no_progress 55, turn_limit 1
+
+**Two cards are not balanced at all.**
+
+| card | dealt | not dealt | Δ | σ |
+|---|---|---|---|---|
+| `seal_of_lockdown` | **0.826** (215W/16D/39L) | 0.449 | +0.377 | 15.5 |
+| `dread_tide` | 0.709 (158W/51D/50L) | 0.469 | +0.239 | 8.9 |
+| everything else | — | — | ≤ 0.104 | ≤ 3.9 |
+
+A player who is *dealt* `seal_of_lockdown` — not one who plays it well, one
+who is handed it by the shuffle — wins 80 % of their decided matches. The
+gap between it and the third-strongest card in the pool is larger than the
+gap between the third-strongest and the weakest. Whatever else the balance
+numbers say, one card in 117 is deciding a quarter of all matches by
+itself, and no amount of play skill on the other side is visible against
+it.
+
+`dread_tide` is the same shape, less extreme.
+
+Nothing else clears +0.11. The pool below those two looks healthy.
+
+**One card the bot won't touch.** `vessel_reclaimer` has a 15 % play rate
+where every other significant card sits between 82 % and 98 %, and it
+scores −0.060 (2.2σ) when dealt. Those two facts together do not say the
+card is weak — they say the card is a dead slot *in this bot's hands*,
+which is a §46 finding as much as a card finding. Whether a human would
+play it is exactly the kind of question self-play cannot answer.
+
+Except it turned out not to be about that card at all. Grouping every
+Monster by the Vessels it can ride explains almost the whole spread, and
+`game.analysis` now reports it as its own section:
+
+| supported Vessels | cards | play rate |
+|---|---|---|
+| any group including `pawn` | 26 | 93–95 % |
+| `bishop/knight`, `knight/rook`, `queen/rook`, `bishop/rook` | 19 | 28–43 % |
+| `bishop/queen` | 6 | 13–17 % |
+| `queen` only | 1 | 4 % |
+
+`vessel_reclaimer` at 14.6 % is not an outlier — it is the middle of its
+own group. A player has eight Pawns, two Bishops and one Queen, so Vessel
+availability decides how often a Monster can be played at all, nearly
+independently of what the Monster does. A Queen-only Monster is a dead
+card in hand nineteen games in twenty however good it is when it lands.
+
+That is a property of the pool rather than of any card in it, and it is
+not something to fix without deciding first whether it is intended — a
+restrictive Vessel is a legitimate cost, and six cards priced identically
+at 15 % may be exactly the design. It is recorded rather than acted on.
+
+**Rituals split.** `vow_of_desperation` +0.115 (4.6σ), `sevenfold_circle`
+−0.117 (3.3σ). Completing any Ritual at all is worth +0.039 (1.6σ) — real
+but not yet established, and worth re-measuring on a larger corpus.
+
+**Kings spread by about a tenth.** `grave_crowned_king` 0.549 at the top,
+`dragon_high_king` 0.457 at the bottom, with the other four between. Only
+the first clears 2σ on its own.
+
+**And a design observation nobody asked for.** All 825 decisive matches
+ended `final_duel_victory` — every single one. Not one was decided by
+anything else. §31 describes the Final Duel as the payoff for the match
+state; in practice it is not a payoff, it is the *only* win condition, and
+the 918 duels triggered across 999 matches say most games reach it more
+than once (Royal Escape sends the survivor back to the board). Whether
+that is the intended shape of the game is a design question, but it is now
+a design question with a number attached.
+
+#### The corpus also crashed a match
+
+One seed in a thousand died with `ValueError: No unit at source square
+h2` — and the bug under it is a chess rule, not a card.
+
+En passant was detected by asking only "is this Pawn landing on the
+en-passant square?" A *straight push* can satisfy that too. White
+double-pushes h2→h4, which sets the en-passant square to h3; tunnel_mole's
+burrow later puts a White Pawn back on h2; White pushes h2→h3. Target
+equals the en-passant square, so the engine computed the captured square
+as one rank behind the target — h2, the mover's own square — removed the
+moving Pawn, and then crashed trying to move a piece that was no longer
+there.
+
+En passant is a capture, so the file always changes. That test is the fix,
+along with the matching one from the other side: the square behind the
+target has to actually hold an enemy Pawn. Both are now in
+`tests/test_ai_stage6_selfplay.py`, together with the real en passant that
+must keep working.
+
+A human could have hit this. It needed a Pawn to leave and return to the
+square its own double-push had vacated, which is why nobody had — and why
+a thousand matches found it in an afternoon.
+
+#### Acting on it: two cards changed, and the same 1,000 matches re-run
+
+Both changes follow a rule the game had already written down somewhere
+else, which is the only kind of balance change worth making from a
+measurement — a number tells you *something* is wrong, not what the right
+answer is, and "make it 0.7× as good" is a guess dressed up as a decision.
+
+**`seal_of_lockdown`: the King is exempt.** The mechanism was not that the
+card was strong, it was that the card could *end the game*. `seal_zone`
+gives a sealed enemy unit zero legal destinations, and "zero legal
+destinations" is precisely the input checkmate and stalemate detection
+reads. A seal laid over the enemy King manufactured a terminal position on
+demand: with a check that is checkmate (SIEGE), without one it is
+stalemate (LAST_STAND), and either way the sealing player chose the moment
+the Final Duel began — the moment that decides the match. Sealing a King's
+3×3 took it from two legal moves to none.
+
+The exemption is not a special case invented for this card. `damage_unit`
+already says "Kings are never damaged", and every other effect that
+removes a piece steps around the King. A Spell was never meant to be able
+to end the game outright; this was the one that could. The card still
+paralyses everything else in its zone, which is what it was for.
+
+**`dread_tide`: radius 2 → 1.** A 5×5 is 39 % of the board, and this was
+the pool's only mass-removal card. It was also the only spatial Spell above
+radius 1 in the entire pool — every other one is 0 or 1 — so this is a
+return to the game's own ceiling rather than a new ceiling imposed on it.
+
+**Re-measured on the same seed**, so both corpora deal the same cards to
+the same players and the only difference between them is the rule change:
+
+| | before | after |
+|---|---|---|
+| `seal_of_lockdown` score when dealt | 0.826 | 0.659 |
+| `seal_of_lockdown` Δ | +0.377 (15.5σ) | +0.184 (7.3σ) |
+| `dread_tide` score when dealt | 0.709 | 0.646 |
+| `dread_tide` Δ | +0.239 (8.9σ) | +0.168 (6.5σ) |
+| `siphon_of_power` (untouched control) | +0.104 (3.9σ) | +0.112 (4.4σ) |
+| **strongest ÷ third-strongest card** | **3.63×** | **1.65×** |
+
+The last row is the one that matters. Before, one card in 117 was worth
+three and a half times the third-best card in the pool; now the top of the
+curve looks like a curve. The untouched control moved by 0.008, which is
+what "the rest of the pool was not disturbed" looks like.
+
+#### The nerf had a side effect, and it is the more interesting result
+
+| | before | after |
+|---|---|---|
+| draw rate | 17.4 % | **25.0 %** |
+| mean match length | 60.9 turns | 69.7 turns |
+| decisive matches | 825 | 750 |
+| duels by SIEGE (checkmate) | 108 | 70 |
+
+A quarter of matches now end on a §53 termination limit rather than a
+result. The seal was not only winning games for whoever held it — it was
+*ending* them, for both players, and removing it took eight turns of
+stalling out of the average match along with 40 % of the checkmates.
+
+This lands on the structural finding above rather than on either card. The
+Final Duel is the only win condition the engine has — `state.winner` is
+assigned in exactly two places and both are the Duel — and reaching one
+requires successfully attacking a King. Strip out the card that was forcing
+that to happen and HeuristicBot visibly struggles to force it any other
+way: more repetitions, longer games, fewer checkmates.
+
+So the honest reading of the first balance pass is not "two cards were too
+strong". It is **the game's decisiveness was leaning on a card that could
+end it, and underneath that card the engine does not have many ways to
+close a match out**. That is a design question, not a tuning one, and it is
+the question the next corpus should be aimed at rather than another
+multiplier on another card.
+
+`dread_tide` at +0.168 and `seal_of_lockdown` at +0.184 are now within
+striking distance of `siphon_of_power` at +0.112, and further trimming
+would buy a point of balance at the cost of another point of draw rate.
+Stopping here is a judgement, and it is recorded here so the next person
+can disagree with it on the same evidence.
+
+#### Third finding: the bot was crowning a King at random
+
+Asking why a quarter of matches now end in a draw sent the corpus at the
+question "what does a stuck player have left to try", and one of the
+answers came back empty:
+
+    king_successions: {0: 3998}          every player, every match
+
+Every player crowns exactly one King and never succeeds to another. §17–§19
+describe a whole system — escalating costs, retired Kings that cannot
+return, a three-card pool to choose from — and §53 lists "identify dominant
+King succession paths" as a goal. No path in 3,998 player-matches ever had
+a second King on it.
+
+It was not a rules gap this time. `ChangeKing` is offered at **19.2 % of
+decision points** and refused by nobody. It was two flat constants in §46's
+scorer:
+
+- `ChangeKing` returned `ActionBias.SUCCESSION` — a bare −1.5 — and nothing
+  else. No upside term of any kind. `END_PREPARATION` is 0.0, so no
+  Succession could ever outscore passing; the action was unreachable by
+  arithmetic, not by judgement.
+- `CoronateKing` returned a flat `CORONATION` of 5.0, so the bot crowned
+  whichever of its three Kings the action list happened to offer first.
+
+The second is the one that mattered, and it is the more embarrassing.
+Measured: **the first Coronation matched the player's own archetype 1 time
+in 12.** The King Pool is built to guarantee the player's home King is in
+it (mechanics/kings.py), and the bot was crowning past it five times in
+six.
+
+Underneath both: the evaluator did not look at Kings *at all*. Thirteen
+categories in `evaluation_breakdown`, not one of them about which King was
+wearing the crown. So `king_policy` is now a fourteenth — a King is worth
+having, worth more when its `archetype_support` matches the deck it is
+supporting, and worth a little per passive policy effect it carries.
+Deliberately coarse: most King effects are documented stubs, so scoring
+them individually would be scoring the documentation.
+
+Judging fit needs to know the deck's archetype, and two attempts at
+inferring it both failed in the same instructive way. Reading the board's
+Monsters returns nothing for the whole opening — which is exactly when the
+first Coronation happens. Adding the hand's votes gets a tie or a blank
+most of the time, five cards being five cards. The archetype was sitting in
+`PlayerState.archetype` the entire time, assigned at setup and marked
+"not exposed via Observation"; that note was written when nothing needed
+it. Telling a player their own deck's archetype leaks nothing — it is the
+deck they are holding — so `Observation.own_archetype` now carries it, to
+its owner and to nobody else.
+
+Result: **the crowned King matches the player's archetype 12 times out of
+12.**
+
+And Succession stayed at zero — which is now the *right* answer rather than
+an arithmetic accident. Crown your home King and every remaining candidate
+in the pool is a downgrade, so paying a Pawn to swap is correctly refused.
+The scoring is a real comparison now (`gained − retired − cost`), and
+`king_policy_fit` is set at 2.5 against a friction floor of 2.0 precisely so
+that fixing a genuine mismatch is worth a Pawn and is not worth a Knight.
+
+Which leaves a design question where a bug used to be: **Succession is
+machinery for a decision the game never presents.** The pool hands you the
+King you want, nothing during a match changes which King you want, and so
+the escalating costs of §19 price an option nobody has a reason to take.
+Either something should be able to make your King the wrong one, or the
+pool should not be guaranteed to contain the right one. Both are §57-shaped
+questions and neither is a tuning knob.
+
+#### Weight tuning
+
+`game/tuning.py`. §53 asks for "optimize heuristic weights" and
+"evolutionary tuning"; `game.ai.weights` made a weight vector portable and
+this is the search over them.
+
+A `(1+λ)` evolution strategy — one incumbent, λ mutants per generation,
+each played head-to-head against it, promotion only for a challenger that
+beats it by more than the noise. No population to maintain and no crossover
+to justify, because a single fitness evaluation costs minutes of real match
+play and the shape that fits that budget is one clear question per
+generation.
+
+Three things in it are worth more than the search algorithm:
+
+**Paired, colour-balanced evaluation.** Every candidate plays the same
+seeds as its rivals, and plays each seed once as White and once as Black.
+Same deals, same openings, both sides of the first-player edge — so what
+survives is the weights. This is the same trick the balance re-measurement
+above leaned on, and variance, not speed, is the binding constraint on a
+search like this.
+
+**A promotion bar that is honest about noise.** Hill-climbing on noise is
+the default failure mode here: over 80 games a candidate needs roughly 8
+points of score to be distinguishable, and a search that promotes anything
+less is a random walk with extra steps. Promotion requires 2σ of
+improvement, and every generation records the margin it needed alongside
+the one it got.
+
+Writing the test for that bar caught a bug in it. The rule required
+`stderr > 0`, so a candidate that won *every* game — zero variance, the
+strongest evidence a sample can carry — would never have been promoted. It
+is the same trap `game.analysis` had in `Split.sigmas`, made twice in one
+week by the same hand, which is a decent argument for the tests being
+where they are.
+
+**Mutation bounds wider than §51's.** Play styles are clamped to
+`[0.6, 3.0]×` so a personality cannot tune itself out of playing; a search
+gets `[0.1, 5.0]×`, because an optimizer has to be free to propose the
+unreasonable — that is how it finds out a weight was wrong. Radius fields
+are held fixed by default: a radius changes what the evaluation *looks at*
+rather than how much it cares, which is a structural change hiding inside a
+numeric one.
+
+```bash
+python -m game.tuning --generations 20 --population 6 --matches 40 \
+    --export tuned.json
+python -m game.selfplay --matches 400 --out corpus/tuned \
+    --white heuristic --white-weights tuned.json --black heuristic
+```
+
+Checkpointed per generation and resumable, for the same reason the corpus
+runner is: a twenty-generation run is hours, and it should not be
+all-or-nothing.
 
 ---
 

@@ -36,6 +36,7 @@ from game.core.phases import (
     FinalDuelType,
     KingCardStatus,
     Phase,
+    PieceType,
     RevelationState,
 )
 
@@ -188,6 +189,16 @@ class BuildingInstance:
     # can_attack_building). Ticks on the OWNER's own EndTurn.
     vulnerable_turns: int = 0
     vulnerable_amount: int = 1
+    # True from the moment a hostile action lands until the owner's next
+    # EndTurn resolves. royal_engineer-style ``repair_building`` skips a
+    # Building carrying this flag: a structure under active bombardment
+    # cannot be patched up the same round it was hit. Without it, +1
+    # repair per turn exactly cancelled 1 damage per turn, so a single
+    # royal_engineer made a Building unkillable by any attacker that was
+    # not a one-shot. Cleared in mechanics/buildings.py
+    # tick_building_timers, which runs after repair_buildings on the
+    # owner's own EndTurn.
+    damaged_this_round: bool = False
 
 
 @dataclass
@@ -381,9 +392,11 @@ class PlayerState:
     retired_kings: list[str] = field(default_factory=list)
     # Stage 10: the archetype randomly assigned to this player at setup —
     # guarantees their King Pool contains that archetype's "home" King (see
-    # mechanics/kings.py assign_random_king_pool). Internal bookkeeping only,
-    # not exposed via Observation (own_king_pool already reveals card IDs to
-    # the owner; the archetype label adds nothing an opponent could exploit).
+    # mechanics/kings.py assign_random_king_pool). Exposed to its OWN owner
+    # via Observation.own_archetype (AI Stage 6 — a King policy has to be
+    # judged against the deck it is meant to support); never to the
+    # opponent, and it was already argued to be unexploitable even if it
+    # were, since own_king_pool reveals those card IDs to the owner anyway.
     archetype: str | None = None
 
     ritual_pool: list[RitualState] = field(default_factory=list)
@@ -414,6 +427,23 @@ class PlayerState:
     # mourning_queen's ``death_trigger_draw`` (limit_per_turn: 1) — only the
     # FIRST allied Monster destroyed on this player's turn draws a card.
     death_trigger_draw_used_this_turn: bool = False
+    # Stage 11 (README §15.2) — RevealRitual is free (it does not consume the
+    # preparation action), so the only thing keeping revelation *progressive*
+    # is this per-turn cap: one voluntary step per turn. Without it a player
+    # could take a Ritual from SEALED to summoned in a single turn and the
+    # opponent would never see it coming, which is the whole mechanic.
+    ritual_reveal_used_this_turn: bool = False
+    # Stage 6 (README §53) — activated Monster abilities already fired this
+    # turn, as ``(piece_id, ability_id)`` pairs.  Activating an ability does
+    # not consume the chess move and several abilities (``inspect_top_deck``,
+    # ``burrow``) stay legal after use, so without a cap the same ability can
+    # be re-fired forever and the turn never ends.  README §46 already
+    # measured that pathology ("173 activations and 3 moves in a 200-action
+    # sample") and capped it *inside the bots* — this is the same cap where
+    # it belongs, in the rules, so a human at the UI and a bot that forgets
+    # to self-limit are held to it too.  Keyed on the piece ID rather than
+    # the square so moving the unit does not buy a second activation.
+    abilities_used_this_turn: set[tuple[str, str]] = field(default_factory=set)
 
     # rally_the_kingdom's ``royal_support_bonus`` — while
     # ``royal_support_bonus_turns`` > 0, every piece of this player's that
@@ -442,6 +472,8 @@ class PlayerState:
         self.chess_move_used = False
         self.king_recycle_used_this_turn = False
         self.death_trigger_draw_used_this_turn = False
+        self.ritual_reveal_used_this_turn = False
+        self.abilities_used_this_turn.clear()
 
     def is_in_check(self) -> bool:
         """
@@ -459,6 +491,45 @@ class PlayerState:
 # ─────────────────────────────────────────────────────────────────────────────
 # GameState
 # ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class MatchLimits:
+    """
+    AI Stage 6 (README §53) — the ceilings that guarantee a match ends.
+
+    Nothing in §31's win conditions bounds a match: checkmate and stalemate
+    both hand off to the Final Duel rather than ending the game, Royal
+    Escape sends a survived Duel back to the board, and there is no
+    threefold-repetition or fifty-move rule underneath.  Self-play measured
+    the consequence — half of a 12-match RandomBot sample never reached a
+    result at all, which is exactly the half that carries no label for
+    anything downstream to learn from or measure.
+
+    README §57 keeps numbers like these deliberately open ("these should
+    remain configurable during the PoC"), so they live here as data rather
+    than as constants buried in the engine, and ``Game.new(limits=...)``
+    takes any other set.
+
+    ``repetition_limit``  — how many times one position (piece placement +
+        side to move) may recur before the match is called.  3 is chess's
+        own threefold rule.
+    ``no_progress_plies`` — plies allowed with no *irreversible* change:
+        no capture, no pawn move, no Building completed, no Ritual
+        progress, no Coronation.  Chess's fifty-move rule counted the same
+        way; the game's extra systems are folded into the signature so
+        building a kingdom counts as progress even when the pieces stand
+        still.
+    ``max_turns``         — the backstop, for a match that manages to keep
+        making progress forever.
+
+    A match stopped by any of these ends drawn (``winner is None``) with
+    the rule named in ``GameOver.reason``.
+    """
+
+    repetition_limit: int = 3
+    no_progress_plies: int = 80
+    max_turns: int = 300
+
 
 @dataclass
 class GameState:
@@ -515,6 +586,18 @@ class GameState:
     rng_seed: int = 0
     event_log: list = field(default_factory=list)  # list[Event] — avoids circular import
 
+    # ── Stage 6 (README §53): termination bookkeeping ────────────────────
+    # Kept on the state (like move_history above) so a copy of the state is
+    # a complete description of the match — but see RulesEngine.
+    # _check_stagnation for why an AI search copy cannot be fooled by it.
+    limits: MatchLimits = field(default_factory=MatchLimits)
+    #: position key → how many times it has been seen at a turn boundary.
+    position_counts: dict[int, int] = field(default_factory=dict, repr=False)
+    #: plies since the progress signature last changed.
+    no_progress_plies: int = 0
+    #: last progress signature seen, or None before the first turn ends.
+    last_progress_key: int | None = field(default=None, repr=False)
+
     # Stage 6: one MoveSnapshot per player, keyed by player_id — their own
     # most recent MovePiece.  Powers time_anchor's cancel_move effect.
     move_history: "dict[str, MoveSnapshot | None]" = field(default_factory=dict)
@@ -531,6 +614,59 @@ class GameState:
 
     def is_game_over(self) -> bool:
         return self.winner is not None or self.phase == Phase.GAME_OVER
+
+    # ── Stage 6 (README §53): termination signatures ─────────────────────
+
+    def position_key(self) -> int:
+        """
+        Identity of the current position for repetition purposes: where every
+        unit stands, what it is, and whose turn it is.
+
+        Deliberately *not* the whole state.  Hands and decks cycle every
+        turn, so folding them in would mean no position ever recurred and
+        the repetition rule would never fire.  What this asks is the same
+        question chess asks — "have we been exactly here before, with the
+        same player to move?" — over a board that also carries Monsters.
+        """
+        return hash((
+            tuple(sorted(
+                (pos.file, pos.rank, unit.piece.id, unit.monster_id or "")
+                for pos, unit in self.board.all_units()
+            )),
+            self.active_player,
+        ))
+
+    def progress_key(self) -> int:
+        """
+        Identity of everything that only moves one way.
+
+        A capture cannot be undone, a Pawn cannot walk back, a completed
+        Building and an accumulated Ritual and a crowned King all stay
+        done.  While this signature holds still, the match is not getting
+        closer to any of its endings, however much the pieces shuffle —
+        which is what ``MatchLimits.no_progress_plies`` counts.
+        """
+        return hash((
+            len(self.board.all_units()),
+            tuple(sorted(
+                (pos.file, pos.rank)
+                for pos, unit in self.board.all_units()
+                if unit.piece.piece_type == PieceType.PAWN
+            )),
+            tuple(sorted(
+                (b.id, b.status.value) for b in self.buildings
+            )),
+            tuple(sorted(
+                (pid, rs.ritual_id, rs.progress, rs.revelation.value, rs.activated)
+                for pid, ps in self.players.items()
+                for rs in ps.ritual_pool
+            )),
+            tuple(sorted(
+                (pid, ks.king_card_id, ks.status.value)
+                for pid, ps in self.players.items()
+                for ks in ps.king_pool
+            )),
+        ))
 
     def is_final_duel_active(self) -> bool:
         return self.duel is not None and self.phase == Phase.FINAL_DUEL

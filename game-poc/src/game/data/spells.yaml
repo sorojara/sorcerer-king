@@ -479,8 +479,13 @@
 - id: dread_tide
   name: Dread Tide
   spell_type: spatial
+  # radius 2 (a 5x5, 39 % of the board) made this the only mass-removal in
+  # the pool and the second-largest effect README §53's corpus found:
+  # +0.239 score at 8.9σ when merely dealt. It was also the only spell
+  # above radius 1 in the entire pool — every other spatial card is 0 or 1
+  # — so this is a return to the game's own ceiling rather than a new one.
   target_type: position
-  radius: 2
+  radius: 1
   effects:
     - type: damage_unit
       params:
@@ -488,7 +493,7 @@
         amount: 1
         push_from_center: 1
   description: >
-    Deal 1 damage to all enemy units in a 5x5 area around the target
+    Deal 1 damage to all enemy units in a 3x3 area around the target
     square, and push the survivors 1 square directly away from the centre.
 
 - id: seal_of_lockdown
@@ -502,7 +507,8 @@
         duration_turns: 2
   description: >
     Seal a 3x3 zone. Enemy units inside cannot move, cannot capture, and
-    cannot be targeted by effects. Lasts 2 turns.
+    cannot be targeted by effects. An enemy King inside the zone is
+    unaffected. Lasts 2 turns.
 
 - id: stolen_moment
   name: Stolen Moment

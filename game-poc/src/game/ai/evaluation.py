@@ -141,6 +141,22 @@ class EvalWeights:
     royal_support: float = 0.35             # per own unit escorting the King
     royal_support_radius: int = 2
 
+    # King policy (README §16-§20).  Until Stage 6 the evaluator did not
+    # look at Kings at all, which is why ChangeKing was scored as a bare
+    # negative constant and Succession fired 0 times in 3,998 measured
+    # player-matches — see heuristic_bot._score_change_king.
+    king_policy_active: float = 0.8         # having *a* crowned King at all
+    king_policy_fit: float = 2.5            # its archetype matches your board
+    king_policy_effect: float = 0.25        # per passive policy effect it carries
+    # 2.5 is chosen against the friction, not picked for feel. Succession
+    # costs ActionBias.SUCCESSION (1.5) plus the sacrifice, and the cheapest
+    # legal sacrifice is a Pawn at 0.5 — so friction bottoms out at 2.0.
+    # Below 2.0 the fit bonus can never justify a swap and the system stays
+    # unreachable, which is the bug this whole term exists to fix. At 2.5,
+    # correcting a genuine archetype mismatch is worth a Pawn (2.5 > 2.0)
+    # and is not worth a Knight (2.5 < 1.5 + 1.5). The exact magnitude is a
+    # tuning target — game.tuning is pointed at exactly this kind of number.
+
     duel_pressure: float = 0.8              # attacker-side Final Duel readiness
     duel_exposure: float = 0.8              # defender-side Final Duel risk
 
@@ -427,7 +443,106 @@ def evaluation_breakdown(
         "hand_quality": hand_quality_score,
         "royal_support": royal_support,
         "duel_probability": duel,
+        "king_policy": king_policy_value(
+            getattr(obs, "own_active_king", None), obs, w, registry
+        ),
     }
+
+
+def board_archetype(obs: "Observation", registry: "CardRegistry | None") -> "str | None":
+    """
+    The archetype this player is playing, read from their hand *and* their
+    summoned Monsters.
+
+    ``Observation.own_archetype`` answers this outright when it is set, and
+    the voting below is the fallback for a registry-less or archetype-less
+    game (most unit tests).  Both earlier attempts at inference are kept
+    because they are still the right answer in that case, and both are
+    worth recording as *not* good enough on their own: the board alone is
+    blank for the whole opening, which is exactly when the first Coronation
+    happens, and a five-card hand ties or abstains most of the time.
+
+    Both halves are the player's own information — their hand is theirs,
+    and Monster identities on the board are public (README §35) — so this
+    reads nothing §44 forbids and does not need the assigned
+    ``PlayerState.archetype`` label, which the Observation deliberately
+    does not carry.
+
+    Ties and empty hands return None; a King is then judged on its effects
+    alone.
+    """
+    assigned = getattr(obs, "own_archetype", None)
+    if assigned:
+        return assigned
+
+    if registry is None:
+        return None
+    from game.cards.card import MonsterCard
+
+    counts: dict[str, int] = {}
+
+    def vote(card_id: "str | None") -> None:
+        if not card_id:
+            return
+        try:
+            card = registry.get(card_id)
+        except KeyError:
+            return
+        archetype = getattr(card, "archetype", None)
+        if isinstance(card, MonsterCard) and archetype:
+            counts[archetype] = counts.get(archetype, 0) + 1
+
+    for card_id in getattr(obs, "own_hand", ()) or ():
+        vote(card_id)
+    for info in obs.board.units:
+        if info.owner == obs.player_id:
+            vote(info.monster_id)
+
+    if not counts:
+        return None
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None          # a tie is not a commitment
+    return ranked[0][0]
+
+
+def king_policy_value(
+    king_card_id: "str | None",
+    obs: "Observation",
+    weights: EvalWeights = DEFAULT_WEIGHTS,
+    registry: "CardRegistry | None" = None,
+    archetype: "str | None" = None,
+) -> float:
+    """
+    What one King is worth to *this* position.
+
+    Three terms, in decreasing confidence: a crowned King at all beats no
+    King; a King whose ``archetype_support`` matches what the player has
+    actually summoned beats one that does not; and a King carrying more
+    passive policy effects beats one carrying fewer.
+
+    Deliberately coarse.  Most King effects are documented stubs
+    (cards/card.py KingCard), so scoring them individually would be
+    scoring the documentation rather than the game.  What this has to be
+    is *directional* — enough that a better-matched King can outweigh the
+    piece Succession costs — not precise.
+    """
+    if king_card_id is None or registry is None:
+        return 0.0
+    try:
+        card = registry.get(king_card_id)
+    except KeyError:
+        return 0.0
+
+    support = getattr(card, "archetype_support", ()) or ()
+    effects = getattr(card, "effects", ()) or ()
+
+    value = weights.king_policy_active
+    if archetype is None:
+        archetype = board_archetype(obs, registry)
+    if archetype is not None and archetype in support:
+        value += weights.king_policy_fit
+    return value + weights.king_policy_effect * len(effects)
 
 
 def hand_quality(

@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 import pygame
 
@@ -87,7 +87,9 @@ from game.ui.colors import (
     TERRITORY_BORDER_ENEMY,
     TERRITORY_BORDER_OWN,
     TERRITORY_TINT_ENEMY,
+    TERRITORY_TINT_ENEMY_SOFT,
     TERRITORY_TINT_OWN,
+    TERRITORY_TINT_OWN_SOFT,
     TRAP_LABEL_BG,
     TRAP_MARKER_ENEMY,
     TRAP_MARKER_ENEMY_ACTIVE,
@@ -95,12 +97,19 @@ from game.ui.colors import (
     TRAP_MARKER_OWN_ACTIVE,
     WHITE_PIECE,
     WHITE_PIECE_SHADOW,
+    SCAR_TINT,
     ZONE_TINT_ENEMY,
     ZONE_TINT_ENEMY_ACTIVE,
+    ZONE_TINT_ENEMY_ACTIVE_SOFT,
+    ZONE_TINT_ENEMY_SOFT,
     ZONE_TINT_OWN,
     ZONE_TINT_OWN_ACTIVE,
+    ZONE_TINT_OWN_ACTIVE_SOFT,
+    ZONE_TINT_OWN_SOFT,
     ZONE_TINT_SPELL_ENEMY,
+    ZONE_TINT_SPELL_ENEMY_SOFT,
     ZONE_TINT_SPELL_OWN,
+    ZONE_TINT_SPELL_OWN_SOFT,
 )
 
 if TYPE_CHECKING:
@@ -117,7 +126,11 @@ SQUARE_SIZE: int = 80       # pixels per square
 # hit-testing, tooltips) stays correct without threading an offset through
 # every call site.
 BOARD_OFFSET_X: int = 220   # left edge of board on the surface
-BOARD_OFFSET_Y: int = 0     # top edge of board on the surface
+# Stage 11: the Ritual strip (ui/ritual_bar.py) is pinned above the board,
+# so the squares start below it. Same mirroring rationale as OFFSET_X —
+# ritual_bar.BAR_HEIGHT reads this constant rather than the other way
+# round, keeping the geometry all in one place.
+BOARD_OFFSET_Y: int = 132   # top edge of board on the surface
 BOARD_PIXEL_SIZE: int = SQUARE_SIZE * 8  # 640 px
 
 # Unicode piece glyphs: piece_type_value → (white_glyph, black_glyph)
@@ -156,6 +169,62 @@ _ASSETS_STONE_PLAINS_X: int  = 81   # light square
 _ASSETS_STONE_PLAINS_W: int  = 73
 _ASSETS_CRACKED_EARTH_X: int = 155  # dark square
 _ASSETS_CRACKED_EARTH_W: int = 73
+
+# ── Terrain tile atlas ──────────────────────────────────────────────────────
+# Beyond the two base squares above, the sheet carries a full terrain set that
+# the board swaps in to show *what is happening on a square* — instead of
+# relying on a coloured wash alone.  Crops below are tight content bboxes
+# measured by scanning the sheet for non-magenta runs (each art cell already
+# includes its own dark rounded frame, so no padding is wanted).
+#
+#   Tiles panel, row 3  (y=184..246):
+#       Ancient Ruins x=11 | Mountain x=83 | Battlefield x=157
+#       Arcane Circle x=231 | Void Rift x=305
+#   Special Terrain row (y=399..451):
+#       Difficult x=11 | Impassable x=71 | Trap x=132
+#       Scorched x=192 | Frozen x=256 | Corrupted x=316
+#
+# Keys are the names used throughout the renderer; values are (x, y, w, h),
+# inset 2 px from those content bboxes: the outermost pixel ring of each cell
+# is anti-aliased against the magenta backdrop (R-G still ~50-95 there, below
+# _pil_kill_pink's threshold once blended), and scaling it up to SQUARE_SIZE
+# turns that ring into a visible pink hairline around the tile.
+_TILE_ATLAS: dict[str, tuple[int, int, int, int]] = {
+    # Base squares — unchanged crops, still the board's default checker.
+    "stone_plains":  (_ASSETS_STONE_PLAINS_X,  _ASSETS_TILE_Y,
+                      _ASSETS_STONE_PLAINS_W,  _ASSETS_TILE_H),
+    "cracked_earth": (_ASSETS_CRACKED_EARTH_X, _ASSETS_TILE_Y,
+                      _ASSETS_CRACKED_EARTH_W, _ASSETS_TILE_H),
+    # Targeting previews — shown only while a card is held, never persisted.
+    "arcane_circle": (233, 186, 65, 59),   # where a Spell may be cast
+    "void_rift":     (307, 186, 64, 59),   # where a Trap may be planted
+    # Special Terrain — an effect is live on this square right now.
+    "difficult":     ( 13, 401, 52, 49),
+    "impassable":    ( 73, 401, 53, 49),
+    "trap":          (134, 401, 52, 49),
+    "scorched":      (194, 401, 55, 49),
+    "frozen":        (258, 401, 52, 49),
+    "corrupted":     (318, 401, 53, 49),
+}
+
+# Square effect type (Observation.board.square_effects) → terrain tile.
+# The tile carries the *nature* of the hazard; the zone tint over it still
+# carries ownership.  "temp_territory" is deliberately absent — Territory
+# already has its own dedicated tint + border treatment.
+SQUARE_EFFECT_TERRAIN: dict[str, str] = {
+    "frozen":    "frozen",      # iron_vanguard / cursed_ground's cousin
+    "scorched":  "scorched",    # ember_drake
+    "blocked":   "impassable",  # veil_of_stillness
+    "walled":    "impassable",
+    "cursed":    "corrupted",   # cursed_ground
+    "no_summon": "corrupted",
+    "cost_zone": "difficult",   # movement is dearer here
+}
+
+# The terrain a square is left with once whatever was happening on it has
+# finished resolving (README's "the land remembers"): scorched, frozen and
+# cursed ground all settle back into broken ground.
+SCAR_TERRAIN: str = "cracked_earth"
 
 # Basic (Neutral) piece crops — tight content bboxes measured from the sheet.
 # y=490, h=95 covers the maximum artwork height across all six pieces.
@@ -298,9 +367,16 @@ def _pil_kill_pink(a: "np.ndarray") -> None:
 
 class TileSpriteCache:
     """
-    Loads ``assets-3.png`` once via PIL and serves pre-scaled Stone Plains
-    (light) and Cracked Earth (dark) tile surfaces, ready to blit at
-    SQUARE_SIZE.
+    Loads ``assets-3.png`` once via PIL and serves pre-scaled terrain tile
+    surfaces at SQUARE_SIZE, keyed by the names in ``_TILE_ATLAS``.
+
+    ``get(is_light)`` keeps serving the two base squares (Stone Plains /
+    Cracked Earth); ``get_named(name)`` serves any atlas entry, so the board
+    can swap a square's ground for Arcane Circle, Void Rift, Trap, Frozen,
+    Scorched and friends without a second sheet or a second cache.
+
+    Tiles are built lazily on first request and memoised, so a board that
+    never triggers a Spell never pays to decode the Arcane Circle art.
 
     PIL is used so that the magenta background fringe introduced by LANCZOS
     scaling can be detected and zeroed via R-G channel difference before the
@@ -308,38 +384,48 @@ class TileSpriteCache:
     """
 
     def __init__(self, sheet_path: str | Path, target_size: int = SQUARE_SIZE) -> None:
-        self._light: pygame.Surface | None = None
-        self._dark: pygame.Surface | None = None
+        self._target = target_size
+        self._cache: dict[str, pygame.Surface | None] = {}
+        self._img: "Any" = None   # PIL RGBA Image
         try:
             from PIL import Image
-            import numpy as np
-            img = Image.open(str(sheet_path)).convert("RGBA")
-
-            def _crop_scale(x: int, w: int) -> pygame.Surface:
-                region = img.crop((x, _ASSETS_TILE_Y, x + w, _ASSETS_TILE_Y + _ASSETS_TILE_H))
-                a = np.array(region.convert("RGBA"), dtype=np.uint8)
-                _pil_kill_pink(a)
-                scaled = Image.fromarray(a, "RGBA").resize(
-                    (target_size, target_size), Image.LANCZOS
-                )
-                sa = np.array(scaled, dtype=np.uint8)
-                _pil_kill_pink(sa)
-                # Composite onto an opaque dark background so transparent edge
-                # pixels show the fallback colour rather than magenta.
-                bg = Image.new("RGBA", (target_size, target_size), (60, 50, 40, 255))
-                bg.paste(Image.fromarray(sa, "RGBA"), (0, 0),
-                         Image.fromarray(sa, "RGBA"))
-                mode = bg.mode
-                raw = bg.tobytes()
-                return pygame.image.fromstring(raw, (target_size, target_size), mode)
-
-            self._light = _crop_scale(_ASSETS_STONE_PLAINS_X, _ASSETS_STONE_PLAINS_W)
-            self._dark  = _crop_scale(_ASSETS_CRACKED_EARTH_X, _ASSETS_CRACKED_EARTH_W)
+            self._img = Image.open(str(sheet_path)).convert("RGBA")
         except Exception:
-            pass  # graceful fallback: caller checks for None
+            self._img = None  # graceful fallback: every get() returns None
 
-    def get(self, is_light: bool) -> pygame.Surface | None:
-        return self._light if is_light else self._dark
+    def _build(self, x: int, y: int, w: int, h: int) -> "pygame.Surface":
+        from PIL import Image
+        import numpy as np
+
+        t = self._target
+        region = self._img.crop((x, y, x + w, y + h))
+        a = np.array(region.convert("RGBA"), dtype=np.uint8)
+        _pil_kill_pink(a)
+        scaled = Image.fromarray(a, "RGBA").resize((t, t), Image.LANCZOS)
+        sa = np.array(scaled, dtype=np.uint8)
+        _pil_kill_pink(sa)
+        # Composite onto an opaque dark background so transparent edge
+        # pixels show the fallback colour rather than magenta.
+        bg = Image.new("RGBA", (t, t), (60, 50, 40, 255))
+        bg.paste(Image.fromarray(sa, "RGBA"), (0, 0), Image.fromarray(sa, "RGBA"))
+        return pygame.image.fromstring(bg.tobytes(), (t, t), bg.mode)
+
+    def get_named(self, name: str) -> "pygame.Surface | None":
+        """Return the atlas tile called ``name``, or None if unavailable."""
+        if name in self._cache:
+            return self._cache[name]
+        rect = _TILE_ATLAS.get(name)
+        surf: pygame.Surface | None = None
+        if rect is not None and self._img is not None:
+            try:
+                surf = self._build(*rect)
+            except Exception:
+                surf = None
+        self._cache[name] = surf
+        return surf
+
+    def get(self, is_light: bool) -> "pygame.Surface | None":
+        return self.get_named("stone_plains" if is_light else "cracked_earth")
 
 
 class PieceSpriteCache:
@@ -554,6 +640,9 @@ class BoardView:
         crowned_kings: "dict[Position, str] | None" = None,
         archetype_map: "dict[Position, str] | None" = None,
         siege_dests: list[Position] | None = None,
+        spell_preview: "Iterable[Position] | None" = None,
+        trap_preview: "Iterable[Position] | None" = None,
+        scars: "dict[Position, float] | None" = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -594,10 +683,27 @@ class BoardView:
                               (AttackBuilding). Drawn as a red ring on top of
                               the Building rather than a legal-move dot,
                               because clicking one does not move the piece.
+        spell_preview       : squares a held Spell could be cast on. Their
+                              ground is TEMPORARILY swapped for the Arcane
+                              Circle tile (the gold targeting tint stays on
+                              top) — nothing is persisted, the tile reverts
+                              the moment targeting mode ends.
+        trap_preview        : same idea for a held Trap, using the Void Rift
+                              tile so "where can I plant this" never looks
+                              like "where can I cast this".
+        scars               : Position → 0..1 intensity for ground where a
+                              Trap / Spell / Monster has FINISHED resolving.
+                              Those squares get the Cracked Earth tile plus a
+                              soot wash scaled by the intensity, so the board
+                              carries a fading record of what happened on it.
+                              AppController owns the bookkeeping (it is the
+                              only side that sees events); this module just
+                              draws what it is handed.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos,
-                           show_territory)
+                           show_territory, spell_preview or (), trap_preview or (),
+                           scars or {})
         self._draw_coordinates()
         self._draw_traps(observation)
         # ── Stage 8+: building floor + back drawn BEFORE the chess piece ──────
@@ -640,6 +746,9 @@ class BoardView:
         summon_vessel_dests: list[Position] | None = None,
         inspect_pos: Position | None = None,
         show_territory: bool = True,
+        spell_preview: "Iterable[Position]" = (),
+        trap_preview: "Iterable[Position]" = (),
+        scars: "dict[Position, float] | None" = None,
     ) -> None:
         """Draw base square colors, then overlays for selection/legal/check/summon/inspect."""
         # Build a quick lookup: position → unit for check-king detection
@@ -683,6 +792,40 @@ class BoardView:
             is_own = eff.owner == obs.player_id
             (own_spell_squares if is_own else enemy_spell_squares).add(eff.position)
 
+        # ── Terrain substitution ─────────────────────────────────────────
+        # A square's ground tile says WHAT is happening on it; the tint above
+        # says WHOSE it is.  Highest priority wins, and only one tile can win:
+        #
+        #   1. Spell targeting preview  → Arcane Circle  (transient)
+        #   2. Trap  targeting preview  → Void Rift      (transient)
+        #   3. A Trap's own square      → Trap
+        #   4. A live square effect     → its Special Terrain
+        #   5. A resolved-effect scar   → Cracked Earth
+        #
+        # Previews outrank everything because they only exist while the player
+        # is actively holding a card and hunting for a legal square — that is
+        # the one moment where the answer to "where can this go?" matters more
+        # than the board's standing state.
+        terrain_by_pos: dict[Position, str] = {}
+        for pos in spell_preview:
+            terrain_by_pos[pos] = "arcane_circle"
+        for pos in trap_preview:
+            terrain_by_pos.setdefault(pos, "void_rift")
+        for trap in obs.board.trap_locations:
+            terrain_by_pos.setdefault(trap.position, "trap")
+        for eff in obs.board.square_effects:
+            terrain = SQUARE_EFFECT_TERRAIN.get(eff.effect_type)
+            if terrain is not None:
+                terrain_by_pos.setdefault(eff.position, terrain)
+        # Scars are the lowest priority — anything currently live on the
+        # square supersedes the memory of what used to be there.
+        scars = scars or {}
+        scar_shown: dict[Position, float] = {}
+        for pos, intensity in scars.items():
+            if pos not in terrain_by_pos:
+                terrain_by_pos[pos] = SCAR_TERRAIN
+                scar_shown[pos] = intensity
+
         # Stage 9: Territory — the lowest-priority zone tint (README §8).
         # Computed either way (cheap — just two tuples off the Observation)
         # so the toggle button can flip visibility with no extra state here.
@@ -696,26 +839,52 @@ class BoardView:
                 color = LIGHT_SQUARE if is_light else DARK_SQUARE
                 sx, sy = _sq_to_screen(pos, self._flip)
                 rect = pygame.Rect(sx, sy, SQUARE_SIZE, SQUARE_SIZE)
-                # Use stone-plains / cracked-earth tile sprites when available,
-                # falling back to flat colors if the cache is absent.
-                tile_surf = (
-                    self._tile_sprites.get(is_light)
-                    if self._tile_sprites is not None
-                    else None
-                )
+                # Ground tile: the substituted terrain when this square has
+                # one, else the stone-plains / cracked-earth checker.  A
+                # missing sprite (no PIL, unreadable sheet) falls back to the
+                # flat colors, and an unknown terrain name falls back to the
+                # base tile rather than leaving a hole.
+                terrain = terrain_by_pos.get(pos)
+                tile_surf = None
+                if self._tile_sprites is not None:
+                    if terrain is not None:
+                        tile_surf = self._tile_sprites.get_named(terrain)
+                    if tile_surf is None:
+                        tile_surf = self._tile_sprites.get(is_light)
                 if tile_surf is not None:
                     self._surface.blit(tile_surf, (sx, sy))
                 else:
                     pygame.draw.rect(self._surface, color, rect)
 
+                # Soot wash over a scar, so it reads on light AND dark squares
+                # (Cracked Earth is already the dark square's own ground).
+                # Fades as the scar ages out — see AppController._scar_map.
+                scar_level = scar_shown.get(pos)
+                if scar_level:
+                    r, g, b, a = SCAR_TINT
+                    self._overlay.fill((r, g, b, int(a * min(1.0, scar_level))))
+                    self._surface.blit(self._overlay, (sx, sy))
+
+                # Was this square's ground replaced by Special Terrain?  If so
+                # the zone tint below drops to its SOFT variant — the artwork
+                # is already carrying the message and a full-strength wash
+                # would only bury it.
+                on_terrain = terrain is not None and terrain != SCAR_TERRAIN
+                # Any tile swap at all — scars included — lightens the
+                # Territory wash below, since that one is broad enough to
+                # bury whatever the swapped tile was trying to say.
+                painted = terrain is not None
+
                 # Stage 9: Territory tint — drawn first so every other zone
                 # tint below still stacks visibly on top of it. A contested
                 # square (both players' Territory) shows both tints blended.
                 if pos in own_territory:
-                    self._overlay.fill(TERRITORY_TINT_OWN)
+                    self._overlay.fill(TERRITORY_TINT_OWN_SOFT if painted
+                                       else TERRITORY_TINT_OWN)
                     self._surface.blit(self._overlay, (sx, sy))
                 if pos in enemy_territory:
-                    self._overlay.fill(TERRITORY_TINT_ENEMY)
+                    self._overlay.fill(TERRITORY_TINT_ENEMY_SOFT if painted
+                                       else TERRITORY_TINT_ENEMY)
                     self._surface.blit(self._overlay, (sx, sy))
 
                 # Stage 6: zone tints — drawn before selection/check so those
@@ -723,22 +892,28 @@ class BoardView:
                 # spell zone > dormant trap.  Own tint beats enemy tint when
                 # both would apply to the same square.
                 if pos in own_trap_active_squares:
-                    self._overlay.fill(ZONE_TINT_OWN_ACTIVE)
+                    self._overlay.fill(ZONE_TINT_OWN_ACTIVE_SOFT if on_terrain
+                                       else ZONE_TINT_OWN_ACTIVE)
                     self._surface.blit(self._overlay, (sx, sy))
                 elif pos in enemy_trap_active_squares:
-                    self._overlay.fill(ZONE_TINT_ENEMY_ACTIVE)
+                    self._overlay.fill(ZONE_TINT_ENEMY_ACTIVE_SOFT if on_terrain
+                                       else ZONE_TINT_ENEMY_ACTIVE)
                     self._surface.blit(self._overlay, (sx, sy))
                 elif pos in own_spell_squares:
-                    self._overlay.fill(ZONE_TINT_SPELL_OWN)
+                    self._overlay.fill(ZONE_TINT_SPELL_OWN_SOFT if on_terrain
+                                       else ZONE_TINT_SPELL_OWN)
                     self._surface.blit(self._overlay, (sx, sy))
                 elif pos in enemy_spell_squares:
-                    self._overlay.fill(ZONE_TINT_SPELL_ENEMY)
+                    self._overlay.fill(ZONE_TINT_SPELL_ENEMY_SOFT if on_terrain
+                                       else ZONE_TINT_SPELL_ENEMY)
                     self._surface.blit(self._overlay, (sx, sy))
                 elif pos in own_trap_squares:
-                    self._overlay.fill(ZONE_TINT_OWN)
+                    self._overlay.fill(ZONE_TINT_OWN_SOFT if on_terrain
+                                       else ZONE_TINT_OWN)
                     self._surface.blit(self._overlay, (sx, sy))
                 elif pos in enemy_trap_squares:
-                    self._overlay.fill(ZONE_TINT_ENEMY)
+                    self._overlay.fill(ZONE_TINT_ENEMY_SOFT if on_terrain
+                                       else ZONE_TINT_ENEMY)
                     self._surface.blit(self._overlay, (sx, sy))
 
                 # Check highlight (king square)

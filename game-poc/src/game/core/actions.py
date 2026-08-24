@@ -19,6 +19,7 @@ v0.1 action set (locked for Stage 0):
     ActivateTrap        — manually trigger a placed Trap (if allowed)
     StartConstruction   — begin building a structure via a Pawn
     ActivateRitual      — attempt a Ritual summon
+    RevealRitual        — voluntarily advance one Ritual one revelation step
     CoronateKing        — reveal and activate the first King card (free)
     ChangeKing          — Succession: switch to a different King card
     DeclareRecompose    — commit to Recompose (RNG fires after this)
@@ -86,13 +87,17 @@ class AttackBuilding(Action):
     a siege is a bombardment, not an occupation, so the Building's square
     stays impassable until the structure actually falls.
 
-    ``target`` must hold a COMPLETE Building owned by the opponent, on a
-    square with no unit standing on it, reachable by the attacker's normal
-    movement pattern (the Building itself is what blocks the landing).
+    ``target`` must hold a COMPLETE Building owned by the opponent,
+    reachable by the attacker's normal movement pattern (the Building
+    itself is what blocks the landing). A unit standing on the Building
+    does NOT shield it — the siege targets the structure, and the square
+    being impassable to the enemy means a garrison could never be captured
+    off it anyway (see rules.py._execute_attack_building).
 
     Only these units may attack a Building
     (mechanics.buildings.can_attack_building):
-        • a Ritual Monster (MonsterCard.ritual_only) — the headline rule;
+        • a Ritual Monster (MonsterCard.ritual_only) — the headline rule,
+          and the one that hits for RITUAL_SIEGE_DAMAGE rather than 1;
         • a Monster whose card carries ``building_damage_bonus``
           (obsidian_dragon, sovereign_of_embers);
         • ANY unit, if the Building is currently marked by a Spell's
@@ -191,11 +196,33 @@ class ActivateRitual(Action):
     Attempt a Ritual summon.
     ``ritual_id`` identifies the Ritual in the player's pool.
     ``sacrifice_positions`` are the board squares of the pieces being consumed.
+    The Ritual must already be REVEALED (README §15 — "attempting a Ritual"
+    is the last step of progressive revelation, not a way to skip it; see
+    RevealRitual).
     Consumes the preparation action.
     """
 
     ritual_id: str
     sacrifice_positions: list[Position] = field(default_factory=list)
+
+
+@dataclass
+class RevealRitual(Action):
+    """
+    README §15.2 — spend information deliberately: advance one of your OWN
+    Rituals by exactly one revelation step (SEALED→FORETOLD or
+    FORETOLD→REVEALED). Never skips a step, mirroring every involuntary
+    trigger in §15.1.
+
+    Free — it does NOT consume the preparation action, because the payment
+    is the information itself, not the tempo. Capped at one step per turn
+    per player, so a Ritual can never go from SEALED to summoned inside a
+    single turn: the opponent always gets warning before the payoff.
+
+    ``ritual_id`` identifies the Ritual in the player's own pool.
+    """
+
+    ritual_id: str
 
 
 @dataclass
@@ -422,6 +449,7 @@ STAGE0_ACTIONS = (
     ActivateTrap,
     StartConstruction,
     ActivateRitual,
+    RevealRitual,
     CoronateKing,
     ChangeKing,
     DeclareRecompose,

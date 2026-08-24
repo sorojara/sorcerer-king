@@ -11,8 +11,13 @@ Draws the sidebar panel that shows:
   • Promotion selection dialog (on-board overlay)
   • Controls hint strip at the bottom
 
-Also owns the on-board promotion dialog: a row of four piece-choice
-buttons overlaid on the board when a pawn reaches the back rank.
+Also owns:
+  • CardViewer — the left sidebar's one-card detail panel.
+  • CardZoomOverlay — the full-screen blow-up of a single card, opened by
+    right-clicking a card block in the CardViewer and dismissed by
+    clicking outside it.
+  • PromotionDialog — a row of four piece-choice buttons overlaid on the
+    board when a pawn reaches the back rank.
 """
 
 from __future__ import annotations
@@ -84,6 +89,7 @@ class SidebarOverlay:
         self._btn_black_mode: pygame.Rect | None = None
         self._btn_black_hand: pygame.Rect | None = None
         self._btn_territory: pygame.Rect | None = None
+        self._btn_speed: pygame.Rect | None = None
         self._btn_recompose: pygame.Rect | None = None
         self._btn_mercenary: pygame.Rect | None = None
         self._btn_mercenary_enabled: bool = False
@@ -109,6 +115,7 @@ class SidebarOverlay:
             'toggle_black'      — Toggle black player mode
             'toggle_black_hand' — Toggle black-hand debug view
             'toggle_territory'  — Stage 9: Toggle the Territory board tint
+            'toggle_speed'      — Cycle the AI think-speed (Normal/Fast/Instant)
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
             'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
             'build'             — Stage 8: Open the Building Pool picker (PREPARATION only)
@@ -132,6 +139,8 @@ class SidebarOverlay:
             return "toggle_black_hand"
         if self._btn_territory and self._btn_territory.collidepoint(mx, my):
             return "toggle_territory"
+        if self._btn_speed and self._btn_speed.collidepoint(mx, my):
+            return "toggle_speed"
         if self._btn_recompose and self._btn_recompose.collidepoint(mx, my):
             return "recompose"
         # Mercenary: only fire if enabled (the button rect exists but may be
@@ -191,6 +200,7 @@ class SidebarOverlay:
         show_king_btn: "bool | None" = None,
         show_ritual_btn: "bool | None" = None,
         show_territory: bool = True,
+        ai_speed_label: str = "Normal",
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
         """
@@ -225,6 +235,13 @@ class SidebarOverlay:
                                   Territory board tint, shown as the toggle
                                   button's label (always drawn, unlike the
                                   tri-state buttons above).
+        ``ai_speed_label``      — Current AI think-speed tier ("Normal" /
+                                  "Fast" / "Instant"), shown on the speed
+                                  toggle button. Normal keeps the visual
+                                  think-pause a human wants when watching;
+                                  Fast/Instant shrink it (and the search
+                                  budget) so a spectated AI-vs-AI match
+                                  doesn't drag — see AppController._AI_SPEEDS.
         ``activatable_entries`` — Stage 6: (label, token) pairs for every currently
                                  activatable Trap/Monster-ability "in the field".
                                  One clickable row per entry; ``handle_click``
@@ -324,6 +341,22 @@ class SidebarOverlay:
         ts = self._font_small.render(terr_label, True, terr_color)
         self._surface.blit(ts, (self._btn_territory.x + (btn_w - ts.get_width()) // 2,
                                 self._btn_territory.y + (self.BTN_H - ts.get_height()) // 2))
+        y += self.BTN_H + 4
+
+        # AI speed toggle — cycles Normal → Fast → Instant. Normal is the
+        # only tier coloured like an "off" state; Fast/Instant use the accent
+        # colour so it reads as "sped up", matching the ON/OFF colour logic
+        # the toggles above use.
+        speed_label = f"⚡ AI Speed: {ai_speed_label}"
+        speed_color = HUD_LABEL if ai_speed_label == "Normal" else HUD_ACCENT
+        self._btn_speed = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+        hover_speed = self._btn_speed.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, DIALOG_HOVER if hover_speed else DIALOG_BG,
+                         self._btn_speed, border_radius=4)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, self._btn_speed, 1, border_radius=4)
+        sps = self._font_small.render(speed_label, True, speed_color)
+        self._surface.blit(sps, (self._btn_speed.x + (btn_w - sps.get_width()) // 2,
+                                 self._btn_speed.y + (self.BTN_H - sps.get_height()) // 2))
         y += self.BTN_H + 8
 
         y = self._draw_divider(y)
@@ -645,6 +678,12 @@ class CardViewer:
         # Cached rects — populated each draw() call.
         self._ability_btn_rects: list[tuple[str, pygame.Rect]] = []
         self._zone_entry_rects: list[tuple[str, pygame.Rect]] = []
+        # (card_id, rect) for every full card block drawn in the panel — the
+        # inspected card plus, for a Ritual, the Monster it summons. A
+        # RIGHT-click inside one blows that card up full-screen (see
+        # CardZoomOverlay); this panel is narrow enough that the card text
+        # has to be truncated, so "read it properly" needs its own view.
+        self._card_block_rects: list[tuple[str, pygame.Rect]] = []
         # Stage 11: scroll state. The content below the fixed "Card Viewer"
         # header can run taller than the panel (e.g. a Ritual stacked with
         # its summoned Monster's full block) — _scroll_y is a pixel offset
@@ -680,6 +719,18 @@ class CardViewer:
         for ability_id, rect in self._ability_btn_rects:
             if rect.collidepoint(mx, my):
                 return ability_id
+        return None
+
+    def card_at(self, mx: int, my: int) -> str | None:
+        """
+        RIGHT-click hit-test for the card blocks themselves. Returns the
+        card_id of the block under the pixel — the inspected card, or the
+        "Summons:" block stacked under a Ritual — so the caller can open
+        it in the full-screen CardZoomOverlay.
+        """
+        for card_id, rect in self._card_block_rects:
+            if rect.collidepoint(mx, my):
+                return card_id
         return None
 
     def zone_entry_from_click(self, mx: int, my: int) -> str | None:
@@ -748,6 +799,7 @@ class CardViewer:
             y -= self._scroll_y
 
             self._ability_btn_rects = []
+            self._card_block_rects = []
 
             card = None
             if card_id is not None and self._registry is not None and card_id in self._registry:
@@ -763,7 +815,11 @@ class CardViewer:
                     y += hint.get_height() + 2
                 y += 6
             else:
+                block_top = y
                 y = self._draw_card_block(x, y, card, ability_ids or [], unit_statuses)
+                self._card_block_rects.append((
+                    card.id, pygame.Rect(0, block_top, self._width, y - block_top),
+                ))
 
                 # Stage 11: a Ritual's own block is followed immediately by
                 # a second, stacked block for the Monster it summons — the
@@ -784,7 +840,12 @@ class CardViewer:
                             summon_header = self._font_small.render("Summons:", True, HUD_LABEL)
                             self._surface.blit(summon_header, (x, y))
                             y += summon_header.get_height() + 4
+                            summon_top = y
                             y = self._draw_card_block(x, y, summon_card, [], ())
+                            self._card_block_rects.append((
+                                summon_card.id,
+                                pygame.Rect(0, summon_top, self._width, y - summon_top),
+                            ))
 
             self._zone_entry_rects = []
             if zone_entries:
@@ -834,6 +895,14 @@ class CardViewer:
             self._zone_entry_rects = [
                 (cid, r) for cid, r in self._zone_entry_rects
                 if content_top <= r.top and r.bottom <= h
+            ]
+            # A card block is usually taller than the panel, so it only has
+            # to OVERLAP the visible window to stay clickable (unlike the
+            # buttons above, which must be fully on-screen to be safe).
+            visible = pygame.Rect(0, content_top, self._width, max(0, h - content_top))
+            self._card_block_rects = [
+                (cid, r.clip(visible)) for cid, r in self._card_block_rects
+                if r.colliderect(visible)
             ]
         finally:
             self._surface.set_clip(prev_clip)
@@ -1058,6 +1127,373 @@ class CardViewer:
                 self._ability_btn_rects.append((ability_id, btn_rect))
                 y += self.BTN_H + 3
 
+        return y
+
+
+class CardZoomOverlay:
+    """
+    Full-screen, modal blow-up of ONE card — opened by right-clicking a
+    card block in the CardViewer, dismissed by clicking anywhere outside
+    the big card (or Escape).
+
+    The left CardViewer is only ~220 px wide, so it has to truncate: four
+    effects maximum, six description lines, a 200 px-tall thumbnail. This
+    overlay exists purely so a card can be *read* — large artwork, the
+    full effect list, the whole description, plus the type-specific data
+    the sidebar has no room for (a Monster's vessels, a Ritual's
+    condition and payoff, a Trap's trigger and charges).
+
+    Pure rendering + hit-testing; it owns no selection state. The
+    AppController holds the card_id being zoomed and clears it when
+    ``handle_click`` reports "close".
+    """
+
+    MAX_W: int = 980          # widest the panel is drawn WITH artwork
+    MAX_W_TEXT: int = 620     # widest it is drawn when the card has no art
+    MARGIN: int = 20          # minimum gap to the window edge
+    HINT_H: int = 20          # strip under the panel for the dismiss hint
+    PADDING: int = 18         # inner padding of the panel
+    COL_GAP: int = 18         # gap between the art column and the text column
+    ART_MAX_FRACTION: float = 0.58  # most of the panel width the art may take
+    ART_FRACTION: float = 0.46      # art's share of the height, single-column
+
+    _BADGES: dict = {
+        "monster":  ("MONSTER",  (215, 110, 110)),
+        "spell":    ("SPELL",    ( 95, 155, 235)),
+        "trap":     ("TRAP",     (175, 115, 235)),
+        "building": ("BUILDING", (200, 165,  95)),
+        "king":     ("KING",     (225, 195, 120)),
+        "ritual":   ("RITUAL",   (195, 105, 225)),
+    }
+
+    def __init__(
+        self,
+        surface: pygame.Surface,
+        font_title: Any,
+        font_body: Any,
+        font_small: Any,
+        registry: "object | None" = None,
+        images_dir: "Any | None" = None,
+    ) -> None:
+        self._surface = surface
+        self._font_title = font_title
+        self._font_body = font_body
+        self._font_small = font_small
+        self._registry = registry
+        self._images_dir = images_dir
+        self._image_cache: "dict[str, Any]" = {}
+        # The panel rect from the last draw() — everything OUTSIDE it is
+        # the dismiss zone.
+        self._rect: "pygame.Rect | None" = None
+
+    # ── Interaction ────────────────────────────────────────────────────────
+
+    def handle_click(self, mx: int, my: int) -> str | None:
+        """
+        Return "close" when the click landed outside the big card (the
+        documented way to dismiss it), else None — a click on the card
+        itself does nothing, so the player can't lose it by mis-aiming.
+        """
+        if self._rect is None or not self._rect.collidepoint(mx, my):
+            return "close"
+        return None
+
+    # ── Rendering ──────────────────────────────────────────────────────────
+
+    def draw(self, card_id: str) -> None:
+        card = None
+        if self._registry is not None and card_id is not None:
+            try:
+                if card_id in self._registry:
+                    card = self._registry.get(card_id)
+            except Exception:
+                card = None
+        if card is None:
+            self._rect = None
+            return
+
+        sw, sh = self._surface.get_size()
+
+        # Dim everything behind the card so the eye goes straight to it.
+        scrim = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        scrim.fill((0, 0, 0, 205))
+        self._surface.blit(scrim, (0, 0))
+
+        # The card artwork in this game IS the printed card — name, cost,
+        # requirements and rules text are all inside the image — so when
+        # there is one it gets the panel's full height and the written
+        # detail moves into a second column beside it. A card with no image
+        # falls back to a narrower, single-column text panel.
+        img = self._get_image(card)
+        widest = self.MAX_W if img is not None else self.MAX_W_TEXT
+        panel_w = min(widest, sw - self.MARGIN * 2)
+        panel_h = sh - self.MARGIN * 2 - self.HINT_H
+        panel = pygame.Rect(
+            (sw - panel_w) // 2, (sh - panel_h - self.HINT_H) // 2, panel_w, panel_h,
+        )
+        self._rect = panel
+
+        pygame.draw.rect(self._surface, SIDEBAR_BG, panel, border_radius=10)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, panel, 2, border_radius=10)
+
+        prev_clip = self._surface.get_clip()
+        self._surface.set_clip(panel)
+        try:
+            self._draw_body(panel, card, img)
+        finally:
+            self._surface.set_clip(prev_clip)
+
+        hint = self._font_small.render(
+            "click anywhere outside to close", True, HUD_LABEL,
+        )
+        self._surface.blit(hint, (
+            panel.centerx - hint.get_width() // 2, panel.bottom + 4,
+        ))
+
+    def _draw_body(
+        self, panel: pygame.Rect, card: "AnyCard", img: "pygame.Surface | None",
+    ) -> None:
+        from game.cards.card import CardType
+
+        x = panel.x + self.PADDING
+        inner_w = panel.w - self.PADDING * 2
+        y = panel.y + self.PADDING
+        avail_h = panel.h - self.PADDING * 2
+
+        # ── Artwork ───────────────────────────────────────────────────────
+        if img is not None:
+            # Fill the panel's height, then cap the width so the text column
+            # keeps a usable share of the panel.
+            iw, ih = img.get_size()
+            art_h = avail_h
+            art_w = max(1, int(iw * art_h / max(1, ih)))
+            max_art_w = int(panel.w * self.ART_MAX_FRACTION)
+            if art_w > max_art_w:
+                art_w = max_art_w
+                art_h = max(1, int(ih * art_w / max(1, iw)))
+            self._draw_art(x, y, art_w, art_h, img)
+            x += art_w + self.COL_GAP
+            inner_w = panel.right - self.PADDING - x
+        else:
+            art_h = int(panel.h * self.ART_FRACTION)
+            self._draw_art(x, y, inner_w, art_h, None)
+            y += art_h + 12
+
+        # ── Name + type badge ─────────────────────────────────────────────
+        badge_key = card.card_type.value
+        badge_text, badge_color = self._BADGES.get(
+            badge_key, (badge_key.upper(), HUD_LABEL),
+        )
+        name_surf = self._font_title.render(card.name, True, HUD_TEXT)
+        if name_surf.get_width() > inner_w:
+            name_surf = self._font_body.render(card.name, True, HUD_TEXT)
+        self._surface.blit(name_surf, (x, y))
+        y += name_surf.get_height() + 4
+
+        subtitle = self._subtitle(card, CardType)
+        line = badge_text + (f"   ·   {subtitle}" if subtitle else "")
+        badge_surf = self._font_small.render(line, True, badge_color)
+        self._surface.blit(badge_surf, (x, y))
+        y += badge_surf.get_height() + 8
+
+        pygame.draw.line(
+            self._surface, DIALOG_BORDER, (x, y), (x + inner_w, y), 1,
+        )
+        y += 10
+
+        # ── Type-specific facts the narrow sidebar has no room for ────────
+        for label, value in self._detail_rows(card, CardType):
+            lab = self._font_small.render(f"{label}:", True, HUD_LABEL)
+            self._surface.blit(lab, (x, y))
+            y = self._wrap(
+                value, self._font_small, HUD_TEXT,
+                x + 110, y, inner_w - 110,
+            ) + 2
+
+        # ── Full effect list (the sidebar caps it at four) ────────────────
+        effects = getattr(card, "effects", ())
+        if effects:
+            y += 6
+            head = self._font_small.render("Effects", True, (150, 210, 150))
+            self._surface.blit(head, (x, y))
+            y += head.get_height() + 3
+            for eff in effects:
+                text = f"• {eff.type.replace('_', ' ')}"
+                params = getattr(eff, "params", None) or {}
+                if params:
+                    text += "  (" + ", ".join(
+                        f"{k}={v}" for k, v in params.items()
+                    ) + ")"
+                y = self._wrap(
+                    text, self._font_small, (170, 210, 170), x + 6, y, inner_w - 6,
+                ) + 1
+
+        # ── Full description (the sidebar caps it at six lines) ───────────
+        desc = (getattr(card, "description", "") or "").strip()
+        if desc:
+            y += 8
+            head = self._font_small.render("Description", True, HUD_LABEL)
+            self._surface.blit(head, (x, y))
+            y += head.get_height() + 3
+            self._wrap(desc, self._font_body, HUD_TEXT, x, y, inner_w)
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _subtitle(self, card: "AnyCard", CardType: Any) -> str:
+        if card.card_type == CardType.MONSTER:
+            return getattr(card, "archetype", "") or ""
+        if card.card_type == CardType.SPELL:
+            st = getattr(card, "spell_type", None)
+            return st.value if st else ""
+        if card.card_type == CardType.TRAP:
+            tr = getattr(card, "trigger", None)
+            return tr.value.replace("_", " ") if tr else ""
+        if card.card_type == CardType.KING:
+            return getattr(card, "title", "") or ""
+        if card.card_type == CardType.RITUAL:
+            return getattr(card, "condition_type", "") or ""
+        if card.card_type == CardType.BUILDING:
+            size = getattr(card, "size", None)
+            return size.value if size else ""
+        return ""
+
+    def _detail_rows(self, card: "AnyCard", CardType: Any) -> list[tuple[str, str]]:
+        """The per-type key/value facts worth showing at full size."""
+        rows: list[tuple[str, str]] = []
+        ct = card.card_type
+        if ct == CardType.MONSTER:
+            vessels = getattr(card, "supported_vessels", ())
+            if vessels:
+                rows.append(("Vessels", ", ".join(vessels)))
+            if getattr(card, "duel_ability", None):
+                rows.append(("Duel", str(card.duel_ability).replace("_", " ")))
+            if getattr(card, "ritual_only", False):
+                rows.append(("Source", "Ritual summon only"))
+        elif ct == CardType.SPELL:
+            rows.append(("Target", str(getattr(card, "target_type", "—"))))
+            rows.append((
+                "Area", f"radius {getattr(card, 'radius', 0)}"
+                        f" ({getattr(card, 'shape', 'square')})",
+            ))
+        elif ct == CardType.TRAP:
+            rows.append((
+                "Area", f"radius {getattr(card, 'radius', 0)}"
+                        f" ({getattr(card, 'shape', 'square')})",
+            ))
+            charges = getattr(card, "charges", 1)
+            rows.append(("Charges", "unlimited" if charges is None else str(charges)))
+        elif ct == CardType.BUILDING:
+            rows.append(("Cost", f"{getattr(card, 'cost', '?')} pts"))
+            rows.append(("Build time", f"{getattr(card, 'construction_turns', '?')} turns"))
+            rows.append(("Radius", str(getattr(card, "radius", "?"))))
+        elif ct == CardType.KING:
+            support = getattr(card, "archetype_support", ())
+            if support:
+                rows.append(("Supports", ", ".join(support)))
+            if getattr(card, "duel_ability", None):
+                rows.append(("Duel", str(card.duel_ability).replace("_", " ")))
+        elif ct == CardType.RITUAL:
+            rows.append(("Condition", str(getattr(card, "condition_type", "—"))))
+            vessel = getattr(card, "required_vessel", None)
+            rows.append(("Vessel", vessel or "any non-King piece"))
+            cond = getattr(card, "condition_type", "")
+            if cond == "material":
+                rows.append(("Material", str(getattr(card, "min_material", 0))))
+            elif cond == "state":
+                checks = getattr(card, "state_checks", ())
+                if checks:
+                    rows.append((
+                        "Requires", ", ".join(c.replace("_", " ") for c in checks),
+                    ))
+            elif cond == "formation":
+                rows.append(("Pattern", self._pattern_text(card)))
+            rows.append(("Sacrifices", str(getattr(card, "min_sacrifices", 1))))
+            rows.append(("Reveal at", f"{getattr(card, 'reveal_progress_threshold', 0)} progress"))
+            summon = getattr(card, "summon_monster_id", "")
+            if summon:
+                rows.append(("Summons", self._card_name(summon)))
+        return rows
+
+    def _pattern_text(self, card: "AnyCard") -> str:
+        parts = []
+        for node in getattr(card, "pattern", ()) or ():
+            off = node.get("offset", [0, 0])
+            piece = node.get("piece_type", "?")
+            tag = " (vessel)" if node.get("anchor") else ""
+            parts.append(f"{piece}@{off[0]:+d},{off[1]:+d}{tag}")
+        return "; ".join(parts) or "—"
+
+    def _card_name(self, card_id: str) -> str:
+        if self._registry is not None:
+            try:
+                if card_id in self._registry:
+                    return self._registry.get(card_id).name
+            except Exception:
+                pass
+        return card_id
+
+    def _draw_art(
+        self, x: int, y: int, w: int, h: int, img: "pygame.Surface | None",
+    ) -> int:
+        box = pygame.Rect(x, y, w, h)
+        pygame.draw.rect(self._surface, DIALOG_BG, box, border_radius=6)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, box, 1, border_radius=6)
+
+        if img is not None:
+            iw, ih = img.get_size()
+            if iw > 0 and ih > 0:
+                scale = min((w - 10) / iw, (h - 10) / ih)
+                nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+                scaled = pygame.transform.smoothscale(img, (nw, nh))
+                self._surface.blit(scaled, (x + (w - nw) // 2, y + (h - nh) // 2))
+        else:
+            msg = self._font_body.render("No Image Available", True, HUD_LABEL)
+            self._surface.blit(msg, (
+                box.centerx - msg.get_width() // 2,
+                box.centery - msg.get_height() // 2,
+            ))
+        return y + h
+
+    def _get_image(self, card: "AnyCard") -> "pygame.Surface | None":
+        path = getattr(card, "image_path", "") or ""
+        if not path or self._images_dir is None:
+            return None
+        if path in self._image_cache:
+            return self._image_cache[path]
+        surf = None
+        try:
+            full_path = self._images_dir / path
+            if full_path.is_file():
+                surf = pygame.image.load(str(full_path)).convert_alpha()
+        except Exception:
+            surf = None
+        self._image_cache[path] = surf
+        return surf
+
+    def _wrap(
+        self,
+        text: str,
+        font: Any,
+        color: tuple[int, int, int],
+        x: int,
+        y: int,
+        max_w: int,
+    ) -> int:
+        """Word-wrap ``text`` at ``max_w`` with no line cap; return the next y."""
+        line: list[str] = []
+        for word in text.split():
+            probe = " ".join(line + [word])
+            if line and font.render(probe, True, color).get_width() > max_w:
+                surf = font.render(" ".join(line), True, color)
+                self._surface.blit(surf, (x, y))
+                y += surf.get_height() + 1
+                line = [word]
+            else:
+                line.append(word)
+        if line:
+            surf = font.render(" ".join(line), True, color)
+            self._surface.blit(surf, (x, y))
+            y += surf.get_height() + 1
         return y
 
 

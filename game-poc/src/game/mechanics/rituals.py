@@ -18,28 +18,33 @@ RitualState list):
           of 3" model.
 
     ActivateRitual (core/rules.py._execute_activate_ritual)
-        → validate_ritual() checks the proposed sacrifice against the
-          Ritual's condition (formation / material / state — see below),
-          execute_ritual() removes the pure-sacrifice pieces, transforms
+        → the Ritual must ALREADY be REVEALED — a summon happens off the top
+          rung of the revelation ladder, never instead of climbing it, so
+          the opponent has had at least one turn to answer it. Then
+          validate_ritual() checks the proposed sacrifice against the
+          Ritual's condition (formation / material / state — see below) and
+          execute_ritual() removes the pure-sacrifice pieces and transforms
           the Vessel (the LAST sacrifice_positions entry) into the summoned
-          Monster, and forces the Ritual to REVEALED (its identity is now
-          physically on the board — there's nothing left to hide).
+          Monster.
 
     Revelation triggers (README §15.1), all advancing exactly ONE step
     (SEALED→FORETOLD or FORETOLD→REVEALED, never skipping a step):
+        • RevealRitual (README §15.2) — the owner's own deliberate step,
+          free but capped at one per turn
+          (PlayerState.ritual_reveal_used_this_turn). This is the path a
+          player uses to make a Ritual activatable at all; every trigger
+          below is something that happens TO them.
         • ritual_progress_boost (ritual_acolyte) — advance_ritual_progress(),
           called from core/rules.py._execute_end_turn.
         • "being checked" — on_check_detected(), called from
           core/rules.py._update_check_status.
         • "losing the Queen" — on_piece_lost(), called from
           core/rules.py._execute_move_piece's capture path.
-        • Voluntary reveal-for-value (README §15.2) — omen_reader's
+        • Card-driven reveal-for-value — omen_reader's
           ritual_reveal_tradeoff (mechanics/effects/ritual.py) and
           raven_scout's reveal_hidden_info targeting an ENEMY Ritual
           (mechanics/effects/information.py) both call
           promote_one_step()/reveal_random_sealed() here directly.
-        • Successfully completing a Ritual (see above) forces REVEALED
-          regardless of its prior state.
 
 Condition families (README §14.1) — the PoC folds "Control Ritual" and
 "Tactical Ritual" into "state" (a small named-predicate set), since both
@@ -324,23 +329,28 @@ def _material_candidate_ok(
 #
 #   FLAG predicates — plain names (queen_lost, king_in_check,
 #   ritual_revealed, vessel_inside_enemy_territory). Each takes
-#   (state, player_id, positions, registry) → bool. ``positions`` is the
-#   candidate ActivateRitual.sacrifice_positions being evaluated (the
+#   (state, player_id, positions, registry, **_) → bool. ``positions`` is
+#   the candidate ActivateRitual.sacrifice_positions being evaluated (the
 #   Vessel is positions[-1]) — needed by the positional checks
 #   (vessel_inside_enemy_territory); the non-positional flags ignore it.
 #
 #   THRESHOLD predicates — "<metric>_at_least_N" / "<metric>_at_most_N" /
 #   "<metric>_within_N", parsed by _THRESHOLD_RE. Each metric function has
-#   the same (state, player_id, positions, registry) signature and returns
-#   an int (or None if the underlying system doesn't exist yet — see
-#   enemy_royal_support below — which makes the check permanently False,
-#   never raising, matching the codebase's STUB convention).
+#   the same signature and returns an int (or None if the underlying system
+#   doesn't exist yet — see enemy_royal_support below — which makes the
+#   check permanently False, never raising, matching the codebase's STUB
+#   convention).
+#
+#   Both shapes are also handed ``ritual=`` (the RitualCard being
+#   attempted); the trailing ``**_`` lets the ones that don't care ignore
+#   it, and lets the dispatcher grow more context later without a
+#   fourteen-function signature churn.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _THRESHOLD_RE = re.compile(r"^(.+)_(at_least|at_most|within)_(\d+)$")
 
 
-def _flag_queen_lost(state, player_id, positions, registry) -> bool:
+def _flag_queen_lost(state, player_id, positions, registry, **_) -> bool:
     """README §14.1 State Ritual example: "Queen has been destroyed"."""
     return not any(
         u.piece.piece_type == PieceType.QUEEN
@@ -348,20 +358,30 @@ def _flag_queen_lost(state, player_id, positions, registry) -> bool:
     )
 
 
-def _flag_king_in_check(state, player_id, positions, registry) -> bool:
+def _flag_king_in_check(state, player_id, positions, registry, **_) -> bool:
     """README §14.1 Tactical Ritual example: "King currently in check"."""
     return state.get_player(player_id).is_in_check()
 
 
-def _flag_ritual_revealed(state, player_id, positions, registry) -> bool:
-    """README §15.2 flavor: at least one of the owner's OWN Rituals is REVEALED."""
+def _flag_ritual_revealed(state, player_id, positions, registry, ritual=None, **_) -> bool:
+    """
+    README §15.2 flavor: the owner has already paid information elsewhere —
+    at least one of their OWN Rituals is REVEALED, not counting the one
+    being attempted.
+
+    The exclusion matters since activation itself requires REVEALED (see
+    core/rules.py _execute_activate_ritual): without it the check would be
+    satisfied by the very Ritual asking the question, and "you have spent
+    information on something else first" would cost nothing at all.
+    """
+    attempted_id = getattr(ritual, "id", None)
     return any(
-        rs.revelation == RevelationState.REVEALED
+        rs.revelation == RevelationState.REVEALED and rs.ritual_id != attempted_id
         for rs in state.get_player(player_id).ritual_pool
     )
 
 
-def _flag_vessel_inside_enemy_territory(state, player_id, positions, registry) -> bool:
+def _flag_vessel_inside_enemy_territory(state, player_id, positions, registry, **_) -> bool:
     """Assassin/beast flavor: the candidate Vessel stands in the OPPONENT's Territory."""
     if not positions or registry is None:
         return False
@@ -379,25 +399,25 @@ _FLAG_PREDICATES: dict = {
 }
 
 
-def _metric_hand_size(state, player_id, positions, registry) -> int:
+def _metric_hand_size(state, player_id, positions, registry, **_) -> int:
     return len(state.get_player(player_id).hand)
 
 
-def _metric_buildings(state, player_id, positions, registry) -> int:
+def _metric_buildings(state, player_id, positions, registry, **_) -> int:
     return sum(
         1 for b in state.buildings
         if b.owner == player_id and b.status == ConstructionStatus.COMPLETE
     )
 
 
-def _metric_friendly_territory_squares(state, player_id, positions, registry) -> int:
+def _metric_friendly_territory_squares(state, player_id, positions, registry, **_) -> int:
     if registry is None:
         return 0
     from game.mechanics.territory import territory_squares
     return len(territory_squares(state, player_id, registry))
 
 
-def _metric_pawns_built(state, player_id, positions, registry) -> int:
+def _metric_pawns_built(state, player_id, positions, registry, **_) -> int:
     """
     Proxy metric: own Pawns currently on the board that have already spent
     their once-per-match Builder right (UnitInstance.builder_available ==
@@ -411,7 +431,7 @@ def _metric_pawns_built(state, player_id, positions, registry) -> int:
     )
 
 
-def _metric_building_destroyed_or_completed(state, player_id, positions, registry) -> int:
+def _metric_building_destroyed_or_completed(state, player_id, positions, registry, **_) -> int:
     return sum(
         1 for b in state.buildings
         if b.owner == player_id
@@ -419,22 +439,22 @@ def _metric_building_destroyed_or_completed(state, player_id, positions, registr
     )
 
 
-def _metric_graveyard_cards(state, player_id, positions, registry) -> int:
+def _metric_graveyard_cards(state, player_id, positions, registry, **_) -> int:
     return len(state.get_player(player_id).graveyard)
 
 
-def _metric_allied_monsters_destroyed(state, player_id, positions, registry) -> int:
+def _metric_allied_monsters_destroyed(state, player_id, positions, registry, **_) -> int:
     """core/state.py PlayerState.monsters_lost_count — a lifetime counter
     incremented in core/rules.py wherever the player's own Monster is
     destroyed (MonsterDestroyed emission)."""
     return state.get_player(player_id).monsters_lost_count
 
 
-def _metric_pieces_remaining(state, player_id, positions, registry) -> int:
+def _metric_pieces_remaining(state, player_id, positions, registry, **_) -> int:
     return len(state.board.all_units_for(player_id))
 
 
-def _metric_enemy_king(state, player_id, positions, registry) -> int:
+def _metric_enemy_king(state, player_id, positions, registry, **_) -> int:
     """Chebyshev (king-move) distance from the candidate Vessel to the enemy King."""
     if not positions:
         return 999
@@ -446,7 +466,7 @@ def _metric_enemy_king(state, player_id, positions, registry) -> int:
     return max(abs(vessel_pos.file - king_pos.file), abs(vessel_pos.rank - king_pos.rank))
 
 
-def _metric_enemy_royal_support(state, player_id, positions, registry) -> "int | None":
+def _metric_enemy_royal_support(state, player_id, positions, registry, **_) -> "int | None":
     """
     Royal Support (README §27) doesn't exist until the Final Duel (Stage
     12+) — returns None so any "enemy_royal_support_..." check is always
@@ -477,7 +497,7 @@ def _state_matches(
     for check in ritual.state_checks:
         flag = _FLAG_PREDICATES.get(check)
         if flag is not None:
-            if not flag(state, player_id, positions, registry):
+            if not flag(state, player_id, positions, registry, ritual=ritual):
                 return False
             continue
 
@@ -488,7 +508,7 @@ def _state_matches(
         metric = _METRICS.get(metric_name)
         if metric is None:
             return False
-        value = metric(state, player_id, positions, registry)
+        value = metric(state, player_id, positions, registry, ritual=ritual)
         if value is None:
             return False  # underlying system doesn't exist yet (see e.g. enemy_royal_support)
         threshold = int(threshold_str)
@@ -720,9 +740,15 @@ def execute_ritual(
     """
     Remove every pure-sacrifice position, transform the Vessel (the last
     position) into ``ritual.summon_monster_id``, mark the Ritual activated
-    and force it REVEALED, and emit RitualActivated (+ RitualRevelationChanged
-    if it wasn't already REVEALED). Returns (vessel_position, vessel_unit)
-    so the caller can run on-summon effects for the new Monster.
+    and emit RitualActivated. Returns (vessel_position, vessel_unit) so the
+    caller can run on-summon effects for the new Monster.
+
+    Normal play always arrives here already REVEALED (core/rules.py gates
+    ActivateRitual on it), so the REVEALED assignment below is a no-op then.
+    It stays as a backstop for direct callers — registry-less unit tests and
+    any future effect that completes a Ritual outside the action path — and
+    still emits RitualRevelationChanged when it actually moves, so the
+    opponent's Observation can never be left behind the board.
 
     ``registry`` (optional) additionally applies blood_seer's
     sacrifice_bonus to another of the owner's Rituals — see below.

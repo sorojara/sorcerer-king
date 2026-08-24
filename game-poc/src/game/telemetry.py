@@ -130,6 +130,24 @@ class PlayerMatchStats:
     active_king: str | None = None
     kings_played: list[str] = field(default_factory=list)
 
+    # ── Card identity (README §53) ───────────────────────────────────────
+    # §42 counts cards; §53 wants to "estimate card strength", which needs
+    # to know *which* ones.  Every event already carries the id — only the
+    # recorder was throwing it away.
+    #
+    # ``deck_card_ids`` is the honest denominator.  Each player's 20-card
+    # deck is sampled at random from the shared pool (Game.
+    # _build_deck_from_registry), so "was this card in the deck" is a
+    # randomised assignment and the win rate conditioned on it estimates
+    # the card's contribution rather than how often bots like playing it.
+    # Conditioning on *played* instead measures the card and the bot's
+    # taste in cards together, which is a different and much weaker claim.
+    deck_card_ids: list[str] = field(default_factory=list)
+    cards_played_by_id: dict[str, int] = field(default_factory=dict)
+    cards_drawn_by_id: dict[str, int] = field(default_factory=dict)
+    buildings_built_by_id: dict[str, int] = field(default_factory=dict)
+    rituals_completed_by_id: dict[str, int] = field(default_factory=dict)
+
     # Cards
     cards_played: int = 0            # monsters + spells + traps actually resolved
     monsters_summoned: int = 0
@@ -320,7 +338,28 @@ class MatchTelemetry:
             self._players[player_id] = ps
         return ps
 
+    @staticmethod
+    def _bump(ledger: "dict[str, int]", card_id: "str | None") -> None:
+        """Count one use of ``card_id``, ignoring a missing id."""
+        if card_id:
+            ledger[card_id] = ledger.get(card_id, 0) + 1
+
     # ── Public recording API ──────────────────────────────────────────────
+
+    def record_opening(self, state: "GameState") -> None:
+        """
+        Snapshot what each player was dealt, before anything is played.
+
+        Called once, from ``Game.__init__``.  The deal is the randomisation
+        every card-strength number leans on, and it happens before the first
+        event, so nothing downstream could reconstruct it.
+        """
+        if not self.enabled:
+            return
+        for player_id, player in state.players.items():
+            ps = self._player(player_id)
+            if ps is not None:
+                ps.deck_card_ids = list(player.hand) + list(player.deck)
 
     def record_illegal(self, action: "Action", turn_number: int) -> None:
         """An action was rejected by the RulesEngine."""
@@ -383,6 +422,7 @@ class MatchTelemetry:
         if isinstance(event, E.CardDrawn):
             if (ps := self._player(event.player_id)) is not None:
                 ps.cards_drawn += 1
+                self._bump(ps.cards_drawn_by_id, event.card_id)
             return
 
         if isinstance(event, E.CardDiscarded):
@@ -394,6 +434,7 @@ class MatchTelemetry:
             if (ps := self._player(event.player_id)) is not None:
                 ps.monsters_summoned += 1
                 ps.cards_played += 1
+                self._bump(ps.cards_played_by_id, event.card_id)
                 if _is_pawn(event.vessel_piece_id):
                     ps.pawns_used_as_vessels += 1
             return
@@ -402,12 +443,14 @@ class MatchTelemetry:
             if (ps := self._player(event.player_id)) is not None:
                 ps.spells_activated += 1
                 ps.cards_played += 1
+                self._bump(ps.cards_played_by_id, event.card_id)
             return
 
         if isinstance(event, E.TrapPlaced):
             if (ps := self._player(event.player_id)) is not None:
                 ps.traps_placed += 1
                 ps.cards_played += 1
+                self._bump(ps.cards_played_by_id, event.card_id)
             return
 
         if isinstance(event, E.MonsterDestroyed):
@@ -452,6 +495,7 @@ class MatchTelemetry:
             self._building_owner[event.building_instance_id] = event.player_id
             if (ps := self._player(event.player_id)) is not None:
                 ps.buildings_built += 1
+                self._bump(ps.buildings_built_by_id, event.building_card_id)
             return
 
         if isinstance(event, E.BuildingDestroyed):
@@ -479,6 +523,7 @@ class MatchTelemetry:
         if isinstance(event, E.RitualActivated):
             if (ps := self._player(event.player_id)) is not None:
                 ps.rituals_completed += 1
+                self._bump(ps.rituals_completed_by_id, event.ritual_id)
                 ps.pawns_sacrificed += sum(
                     1 for pid in event.sacrificed_piece_ids if _is_pawn(pid)
                 )
@@ -712,6 +757,26 @@ class TelemetryAggregator:
         return [m for m in self.matches if m.winner is not None]
 
     @property
+    def drawn(self) -> list[MatchStats]:
+        """
+        Matches that finished with no winner — stopped by one of the README
+        §53 ``MatchLimits`` (repetition, no progress, turn ceiling).
+
+        Distinct from ``unfinished``, which is a match the *harness* gave up
+        on at ``max_steps``.  A draw is a result the rules produced and can
+        be learned from; an unfinished match is missing data.
+
+        ``decided`` / ``drawn`` / ``unfinished`` partition the run: every
+        match is in exactly one of them.
+        """
+        return [m for m in self.matches if m.winner is None and m.completed]
+
+    @property
+    def unfinished(self) -> list[MatchStats]:
+        """Matches abandoned before the rules produced any result."""
+        return [m for m in self.matches if m.winner is None and not m.completed]
+
+    @property
     def first_player_win_rate(self) -> float | None:
         decided = self.decided
         return _rate(sum(1 for m in decided if m.first_player_won), len(decided))
@@ -778,7 +843,12 @@ class TelemetryAggregator:
         return {
             "matches": len(self.matches),
             "decided": len(decided),
-            "unfinished": len(self.matches) - len(decided),
+            "drawn": len(self.drawn),
+            "unfinished": len(self.unfinished),
+            "end_reasons": dict(
+                Counter(m.end_reason for m in self.matches if m.end_reason)
+                .most_common()
+            ),
             "first_player_win_rate": self.first_player_win_rate,
             "wins_by_player": dict(
                 Counter(m.winner for m in decided)

@@ -52,6 +52,26 @@ class Position:
                 f"Position out of range: file={self.file}, rank={self.rank}"
             )
 
+    # Hand-rolled instead of the dataclass-generated versions: a profile of
+    # AI Stage 2's tree search (game/ai/search.py) showed Position's
+    # __eq__/__hash__ among the hottest functions in the whole engine —
+    # board.squares and every search node's unit map are dict[Position, …],
+    # so these run millions of times per decision. The generated versions
+    # build and hash a 2-tuple every call; file/rank are both 0–7, so
+    # file * 8 + rank is a perfect (collision-free) hash computed directly
+    # from the two ints, and __eq__ skips the tuple allocation entirely.
+    # Defining these in the class body suppresses dataclass's own
+    # generated __eq__/__hash__ (see the dataclasses docs on
+    # already-defined dunders) — the ``order=True`` comparison methods
+    # (__lt__ etc.) are untouched and still dataclass-generated.
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not Position:
+            return NotImplemented
+        return self.file == other.file and self.rank == other.rank
+
+    def __hash__(self) -> int:
+        return self.file * 8 + self.rank
+
     @staticmethod
     def from_algebraic(notation: str) -> "Position":
         """Convert e.g. 'e4' → Position(4, 3)."""

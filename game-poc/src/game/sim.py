@@ -53,11 +53,12 @@ from game.telemetry import MatchStats, TelemetryAggregator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from game.ai.controller import PlayerController
+    from game.ai.evaluation import EvalWeights
     from game.ai.monte_carlo import MonteCarloLimits
     from game.ai.search import SearchLimits
     from game.cards.card import CardRegistry
     from game.core.game import Game
-    from game.core.state import GameState
+    from game.core.state import GameState, MatchLimits
 
 _log = get_logger(__name__)
 
@@ -84,6 +85,8 @@ def make_controller(
     search_limits: "SearchLimits | None" = None,
     mc_limits: "MonteCarloLimits | None" = None,
     personality: str | None = None,
+    weights: "EvalWeights | None" = None,
+    biases: "object | None" = None,
 ) -> "PlayerController":
     """
     Build a controller by short name.
@@ -107,7 +110,20 @@ def make_controller(
     PersonalityBot, and MonteCarloBot's non-sampled phases); ``mc_limits``
     sets Stage 4's sampling budget.  Both are ignored by the bots that have
     no use for them, as is ``personality``.
+
+    ``weights`` / ``biases`` replace §46's evaluation table and action-bias
+    table — the tuning surface README §53 asks for ("optimize heuristic
+    weights"). Both are ignored by RandomBot, which scores nothing.
+    ``game.ai.weights.load_weights`` reads them off disk.  Passing weights
+    to a ``personality`` side overrides the play style's own table, which
+    is why the sim's CLI refuses that combination rather than silently
+    picking a winner.
     """
+    from game.ai.evaluation import DEFAULT_WEIGHTS
+    from game.ai.heuristic_bot import ActionBias as _ActionBias
+
+    eval_weights = weights if weights is not None else DEFAULT_WEIGHTS
+    bias_table = biases if biases is not None else _ActionBias
     kind = kind.lower()
     if kind == "random":
         from game.ai.random_bot import RandomBot
@@ -116,7 +132,10 @@ def make_controller(
     elif kind == "heuristic":
         from game.ai.heuristic_bot import HeuristicBot
 
-        bot = HeuristicBot(seed=seed, registry=registry)
+        bot = HeuristicBot(
+            seed=seed, registry=registry,
+            weights=eval_weights, biases=bias_table,
+        )
     elif kind == "search":
         from game.ai.search import SearchLimits as _SearchLimits
         from game.ai.search_bot import SearchBot
@@ -125,6 +144,8 @@ def make_controller(
             seed=seed,
             registry=registry,
             limits=search_limits or _SearchLimits(),
+            weights=eval_weights,
+            biases=bias_table,
         )
     elif kind == "montecarlo":
         from game.ai.monte_carlo import MonteCarloBot
@@ -136,6 +157,8 @@ def make_controller(
             registry=registry,
             limits=search_limits or _SearchLimits(),
             mc_limits=mc_limits or _MonteCarloLimits(),
+            weights=eval_weights,
+            biases=bias_table,
         )
     elif kind == "personality":
         from game.ai.personality import DEFAULT_PERSONALITY
@@ -231,6 +254,8 @@ def play_match(
     registry: "CardRegistry | None" = None,
     max_steps: int = DEFAULT_MAX_STEPS,
     on_step: "Callable[[str, object], None] | None" = None,
+    on_decision: "Callable[[str, object, list, object], None] | None" = None,
+    limits: "MatchLimits | None" = None,
 ) -> MatchStats:
     """
     Play one complete match and return its ``MatchStats``.
@@ -240,10 +265,19 @@ def play_match(
 
     Returns telemetry even when the match is abandoned at ``max_steps``
     (``MatchStats.completed`` is False in that case).
+
+    ``on_step(pid, action)`` sees each executed action.  ``on_decision(pid,
+    observation, legal_actions, action)`` sees the whole decision — the
+    Observation the controller was handed, everything it could have played,
+    and what it chose.  That is the row shape a policy or value model
+    trains on (README §53), and it is a hook rather than a flag because the
+    harness has no business deciding what a training corpus keeps.
+
+    ``limits`` overrides the README §53 termination ceilings.
     """
     from game.core.game import Game
 
-    game = Game.new(seed=seed, registry=registry)
+    game = Game.new(seed=seed, registry=registry, limits=limits)
 
     for pid, controller in controllers.items():
         controller.player_id = pid
@@ -264,11 +298,14 @@ def play_match(
             )
             break
 
+        observation = game.get_observation(pid) if on_decision is not None else None
         action = _execute_one(game, controllers[pid], pid, legal, seed)
         if action is None:
             break
         if on_step is not None:
             on_step(pid, action)
+        if on_decision is not None:
+            on_decision(pid, observation, legal, action)
 
     if steps >= max_steps:
         _log.warning("SIM  seed=%d hit max_steps=%d without finishing", seed, max_steps)

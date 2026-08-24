@@ -181,6 +181,15 @@ class Observation:
     own_hand: tuple[str, ...]       # card IDs in own hand
     own_deck_count: int             # number of cards remaining in own deck
     own_graveyard: tuple[str, ...]  # own discard pile (public)
+    # The archetype this player was assigned at setup — their own deck's
+    # identity, told to nobody else. Added for AI Stage 6 (README §53): the
+    # King pool is built around it (mechanics/kings.py), so it is what a
+    # King policy has to be judged against, and inferring it from a
+    # five-card opening hand does not work — it is a tie or a blank most of
+    # the time, which is exactly when the first Coronation happens.
+    # Disclosing a player's own archetype to themselves leaks nothing: it
+    # is the deck they are already holding.
+    own_archetype: str | None
 
     # ── Opponent public information ───────────────────────────────────────
     opponent_hand_count: int        # how many cards opponent holds (no IDs)
@@ -207,6 +216,13 @@ class Observation:
     # ── Ritual information ─────────────────────────────────────────────────
     own_rituals: tuple[Any, ...]              # tuple[RitualState, ...] — full info
     opponent_ritual_info: tuple[PublicRitualInfo, ...]
+    # README §15.2 — whether this player has already spent their one
+    # voluntary revelation step this turn (PlayerState.
+    # ritual_reveal_used_this_turn). Own turn state, so it crosses the
+    # privacy boundary only in the owner's direction; the opponent's copy is
+    # never exposed. Lets a view say "you can still advance a Ritual" without
+    # enumerating legal actions every frame.
+    own_ritual_reveal_used: bool
 
     # ── Phase / turn ───────────────────────────────────────────────────────
     phase: Phase
@@ -435,6 +451,7 @@ def build_observation(
         player_id=player_id,
         board=pub_board,
         own_hand=tuple(ps.hand),
+        own_archetype=ps.archetype,
         own_deck_count=len(ps.deck),
         own_graveyard=tuple(ps.graveyard),
         opponent_hand_count=len(opp.hand),
@@ -450,6 +467,7 @@ def build_observation(
         opponent_king_info=tuple(opp_king_info),
         own_rituals=_detached(ps.ritual_pool),
         opponent_ritual_info=tuple(opp_ritual_info),
+        own_ritual_reveal_used=ps.ritual_reveal_used_this_turn,
         phase=state.phase,
         turn_number=state.turn_number,
         active_player=state.active_player,

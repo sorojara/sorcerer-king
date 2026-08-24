@@ -78,18 +78,37 @@ def rng() -> DeterministicRNG:
     return DeterministicRNG(seed=42)
 
 
-def _make_player(pid: str, hand: list[str] | None = None, deck: list[str] | None = None) -> PlayerState:
+def _make_player(
+    pid: str,
+    hand: list[str] | None = None,
+    deck: list[str] | None = None,
+    revelation: RevelationState = RevelationState.REVEALED,
+) -> PlayerState:
     """
     Test helper — carries the FULL Ritual roster (not a random 3-of-N draw;
     see TestAssignRandomRitualPool for that) so any test can target any
     Ritual by id without extra setup.
+
+    ``revelation`` defaults to REVEALED because ActivateRitual requires it
+    (README §15 — a Ritual is summoned off the top of the revelation ladder;
+    see core/rules.py _execute_activate_ritual), and most tests here are
+    about the SACRIFICE rules, not the ladder. Tests that exercise the
+    ladder itself pass RevelationState.SEALED and climb it explicitly.
     """
     ps = PlayerState(player_id=pid)
     ps.hand = hand or []
     ps.deck = deck or []
     ps.king_pool = [KingCardState(king_card_id=f"{pid}-king-a", status=KingCardStatus.HIDDEN)]
-    ps.ritual_pool = [RitualState(ritual_id=rid) for rid in sorted(ALL_RITUAL_IDS)]
+    ps.ritual_pool = [
+        RitualState(ritual_id=rid, revelation=revelation)
+        for rid in sorted(ALL_RITUAL_IDS)
+    ]
     return ps
+
+
+def _sealed_player(pid: str, hand: list[str] | None = None, deck: list[str] | None = None) -> PlayerState:
+    """A player whose whole Ritual pool is still SEALED — see _make_player."""
+    return _make_player(pid, hand=hand, deck=deck, revelation=RevelationState.SEALED)
 
 
 def _place(board: BoardState, owner: str, ptype: PieceType, alg: str, pid: str) -> UnitInstance:
@@ -365,11 +384,11 @@ class TestStateRitual:
 
     def test_on_piece_lost_reveals_queen_loser_ritual(self, registry):
         board = BoardState()
-        white = _make_player("white")
+        white = _sealed_player("white")
         events = []
         on_piece_lost(GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.CHESS,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         ), "white", PieceType.QUEEN, events, registry)
 
         assert any(isinstance(e, RitualRevelationChanged) for e in events)
@@ -378,11 +397,11 @@ class TestStateRitual:
 
     def test_on_piece_lost_ignores_non_queen(self, registry):
         board = BoardState()
-        white = _make_player("white")
+        white = _sealed_player("white")
         events = []
         state = GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.CHESS,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         )
         on_piece_lost(state, "white", PieceType.PAWN, events, registry)
         assert events == []
@@ -395,11 +414,11 @@ class TestStateRitual:
 
 class TestRevelationTriggers:
     def test_promote_one_step_never_skips(self, registry):
-        white = _make_player("white")
+        white = _sealed_player("white")
         board = BoardState()
         state = GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.CHESS,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         )
         events = []
         assert promote_one_step(state, "white", "rite_of_the_wyrm", events) is True
@@ -417,8 +436,8 @@ class TestRevelationTriggers:
         _place(board, "black", PieceType.KING, "h8", "black-king")
         _place(board, "white", PieceType.KING, "a1", "white-king")
         _place(board, "white", PieceType.ROOK, "h1", "white-rook-1")
-        white = _make_player("white")
-        black = _make_player("black")
+        white = _sealed_player("white")
+        black = _sealed_player("black")
         state = _game_state(board, white, black, phase=Phase.CHESS)
         engine = RulesEngine(registry=registry)
 
@@ -433,10 +452,10 @@ class TestRevelationTriggers:
         board = BoardState()
         _place(board, "white", PieceType.BISHOP, "b1", "white-bishop-1")
         board.get_unit(Position.from_algebraic("b1")).monster_id = "ritual_acolyte"
-        white = _make_player("white")
+        white = _sealed_player("white")
         state = GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.END,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         )
 
         events = []
@@ -446,11 +465,11 @@ class TestRevelationTriggers:
         assert white.ritual_pool[0].progress == 0
 
     def test_reveal_random_sealed_picks_a_sealed_ritual(self, registry):
-        white = _make_player("white")
+        white = _sealed_player("white")
         board = BoardState()
         state = GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.CHESS,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         )
         events = []
         picked = reveal_random_sealed(state, "white", events, rng=DeterministicRNG(seed=1))
@@ -463,11 +482,16 @@ class TestRevelationTriggers:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRitualSupportMonsters:
-    def _setup(self, white_hand):
+    def _setup(self, white_hand, revelation=RevelationState.SEALED):
+        # SEALED by default: this class is about the cards that MOVE a
+        # Ritual up the revelation ladder, so there has to be a ladder left.
         board = BoardState()
         _place(board, "white", PieceType.BISHOP, "c1", "white-bishop-1")
-        white = _make_player("white", hand=white_hand, deck=["dark_magician", "apprentice_mage"])
-        black = _make_player("black")
+        white = _make_player(
+            "white", hand=white_hand,
+            deck=["dark_magician", "apprentice_mage"], revelation=revelation,
+        )
+        black = _make_player("black", revelation=revelation)
         state = _game_state(board, white, black)
         return state
 
@@ -487,8 +511,8 @@ class TestRitualSupportMonsters:
     def test_raven_scout_reveals_enemy_ritual(self, registry, rng):
         board = BoardState()
         _place(board, "white", PieceType.PAWN, "b1", "white-pawn-1")
-        white = _make_player("white", hand=["raven_scout"])
-        black = _make_player("black")
+        white = _sealed_player("white", hand=["raven_scout"])
+        black = _sealed_player("black")
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
 
@@ -608,10 +632,19 @@ class TestNewRituals:
         board = BoardState()
         _place(board, "white", PieceType.QUEEN, "d1", "white-queen-1")   # vessel
         _place(board, "white", PieceType.PAWN, "a2", "white-pawn-1")     # extra sacrifice
-        white = _make_player("white", hand=["a", "b", "c", "d", "e"])
-        # Simulate an already-REVEALED Ritual elsewhere in the pool.
-        white.ritual_pool[0].revelation = RevelationState.REVEALED
-        black = _make_player("black")
+        white = _sealed_player("white", hand=["a", "b", "c", "d", "e"])
+        # The Ritual being activated must be REVEALED (the activation gate)…
+        get_ritual_state_local = next(
+            rs for rs in white.ritual_pool if rs.ritual_id == "constellation_rite"
+        )
+        get_ritual_state_local.revelation = RevelationState.REVEALED
+        # …and its own condition additionally wants a DIFFERENT Ritual of
+        # yours already revealed, which is what this line simulates.
+        other = next(
+            rs for rs in white.ritual_pool if rs.ritual_id != "constellation_rite"
+        )
+        other.revelation = RevelationState.REVEALED
+        black = _sealed_player("black")
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
 
@@ -622,11 +655,19 @@ class TestNewRituals:
         assert state.board.get_unit(Position.from_algebraic("d1")).monster_id == "oracle_of_the_last_star"
 
     def test_constellation_rite_rejected_without_prior_reveal(self, registry, rng):
+        """
+        The Rite itself is REVEALED (so the activation gate is satisfied and
+        this test is really about the condition), but nothing ELSE is — and
+        ``ritual_revealed`` does not count the Ritual asking the question.
+        """
         board = BoardState()
         _place(board, "white", PieceType.QUEEN, "d1", "white-queen-1")
         _place(board, "white", PieceType.PAWN, "a2", "white-pawn-1")
-        white = _make_player("white", hand=["a", "b", "c", "d", "e"])  # no REVEALED ritual yet
-        black = _make_player("black")
+        white = _sealed_player("white", hand=["a", "b", "c", "d", "e"])
+        next(
+            rs for rs in white.ritual_pool if rs.ritual_id == "constellation_rite"
+        ).revelation = RevelationState.REVEALED
+        black = _sealed_player("black")
         state = _game_state(board, white, black)
         engine = RulesEngine(registry=registry)
 
@@ -863,10 +904,10 @@ class TestMonstersLostCountAndOncePerTurnReveal:
         board = BoardState()
         _place(board, "white", PieceType.QUEEN, "d1", "white-queen-1")
         board.get_unit(Position.from_algebraic("d1")).monster_id = "oracle_of_the_last_star"
-        white = _make_player("white", deck=["dark_magician"])
+        white = _sealed_player("white", deck=["dark_magician"])
         state = GameState(
             game_id="t", turn_number=1, active_player="white", phase=Phase.END,
-            board=board, players={"white": white, "black": _make_player("black")},
+            board=board, players={"white": white, "black": _sealed_player("black")},
         )
 
         events = []
