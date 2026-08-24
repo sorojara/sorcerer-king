@@ -144,6 +144,25 @@ HUD_ACCENT     = ( 80, 200, 120)  # active player indicator
 HUD_WARN       = (220, 100,  60)  # check warning
 HUD_DUEL       = (180,  80, 200)  # final duel indicator
 
+# Panel background gradient — a subtle top-to-bottom deepening applied to
+# the sidebar / card-viewer / event-log panels instead of the old flat
+# SIDEBAR_BG fill, so those panels read as a lit surface rather than a
+# solid color swatch. No new assets: just two RGB stops blended per-row
+# by ui/overlays.py's ``draw_panel_gradient``.
+PANEL_BG_TOP    = ( 34,  34,  46)
+PANEL_BG_BOTTOM = ( 24,  24,  33)
+
+# Section-header accent — the thin rule drawn under a panel's title
+# ("Players", "Event Log", "Card Viewer") to give it real hierarchy above
+# the plain HUD_LABEL rows beneath it.
+HEADER_ACCENT   = (150, 120,  70)  # muted bronze/gold, echoes ROYAL_BAR/gold family
+
+# Decorative frame traced around the board's outer edge — separates the
+# playing field from the surrounding HUD chrome the way a physical board
+# has a wooden rim. Two-tone: an outer dark groove, an inner bronze line.
+BOARD_FRAME_OUTER = ( 18,  16,  14)
+BOARD_FRAME_INNER = (150, 120,  70)
+
 # ── Promotion dialog ───────────────────────────────────────────────────────
 DIALOG_BG      = ( 40,  40,  55)
 DIALOG_BORDER  = (100, 100, 130)

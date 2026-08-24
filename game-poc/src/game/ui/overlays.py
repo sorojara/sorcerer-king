@@ -31,16 +31,20 @@ from game.ui.colors import (
     DIALOG_BG,
     DIALOG_BORDER,
     DIALOG_HOVER,
+    HEADER_ACCENT,
     HUD_ACCENT,
     HUD_DUEL,
     HUD_LABEL,
     HUD_TEXT,
     HUD_WARN,
+    PANEL_BG_BOTTOM,
+    PANEL_BG_TOP,
     SIDEBAR_BG,
     WHITE,
     BLACK,
 )
 from game.ui.board_view import BOARD_PIXEL_SIZE, SQUARE_SIZE
+from game.ui.font import load_title_font
 
 if TYPE_CHECKING:
     from game.core.observation import Observation
@@ -53,6 +57,61 @@ PROMOTION_PIECES = ["queen", "rook", "bishop", "knight"]
 # Piece glyphs reused from board_view (import at runtime to avoid circular)
 _PROMO_GLYPHS_WHITE = {"queen": "♕", "rook": "♖", "bishop": "♗", "knight": "♘"}
 _PROMO_GLYPHS_BLACK = {"queen": "♛", "rook": "♜", "bishop": "♝", "knight": "♞"}
+
+# ── Panel chrome shared by SidebarOverlay / CardViewer / EventLogPanel ──────
+# A bold-serif title font (loaded once per size and cached) gives panel
+# section headers and dramatic one-line banners ("CHECK!", "FINAL DUEL") a
+# heavier, more "storybook" weight than the plain sans body font, without
+# any new font asset — see ui/font.py's load_title_font.
+TITLE_HEADER_PX: int = 17   # section headers: "Players" / "Card Viewer" / "Event Log"
+TITLE_BANNER_PX: int = 34   # one-line dramatic banners: "CHECK!" / "FINAL DUEL"
+
+_title_font_cache: dict[int, Any] = {}
+
+
+def title_font(size: int) -> Any:
+    """Return a cached bold-serif FTFont at ``size`` px (see load_title_font)."""
+    f = _title_font_cache.get(size)
+    if f is None:
+        f = load_title_font(size)
+        _title_font_cache[size] = f
+    return f
+
+
+_gradient_cache: dict[tuple[int, int, tuple, tuple], "pygame.Surface"] = {}
+
+
+def draw_panel_gradient(
+    surface: "pygame.Surface",
+    rect: "pygame.Rect",
+    top: tuple[int, int, int] = PANEL_BG_TOP,
+    bottom: tuple[int, int, int] = PANEL_BG_BOTTOM,
+) -> None:
+    """
+    Fill ``rect`` with a subtle vertical gradient (``top`` → ``bottom``)
+    instead of a flat color, so HUD panels read as a lit surface rather
+    than a solid swatch. The gradient bitmap is built once per (size,
+    color) combination and reused every frame after that.
+    """
+    key = (rect.width, rect.height, top, bottom)
+    grad = _gradient_cache.get(key)
+    if grad is None:
+        w, h = max(1, rect.width), max(1, rect.height)
+        try:
+            import numpy as np
+            t = np.array(top, dtype=np.float32)
+            b = np.array(bottom, dtype=np.float32)
+            span = np.arange(h, dtype=np.float32)[:, None] / max(1, h - 1)
+            rows = (t[None, :] + (b - t)[None, :] * span).astype(np.uint8)
+            arr = np.repeat(rows[:, None, :], w, axis=1)
+            arr = np.transpose(arr, (1, 0, 2))  # (w, h, 3) for surfarray
+            grad = pygame.surfarray.make_surface(arr)
+        except Exception:
+            # numpy unavailable for some reason — flat fallback, still correct.
+            grad = pygame.Surface((w, h))
+            grad.fill(top)
+        _gradient_cache[key] = grad
+    surface.blit(grad, rect.topleft)
 
 
 class SidebarOverlay:
@@ -253,7 +312,7 @@ class SidebarOverlay:
 
         # Background
         rect = pygame.Rect(self._x, 0, self.SIDEBAR_WIDTH, self._surface.get_height())
-        pygame.draw.rect(self._surface, SIDEBAR_BG, rect)
+        draw_panel_gradient(self._surface, rect)
 
         y = self.PADDING
         y = self._draw_divider(y)
@@ -282,8 +341,7 @@ class SidebarOverlay:
         # One button per side. Clicking it opens the player picker, which
         # lists every controller: the AI stages by difficulty, the README
         # §51 play styles, and the human.
-        y = self._draw_line("Players", self._font_small, HUD_LABEL, y, center=False)
-        y += 4
+        y = self._draw_header("Players", y)
         btn_w = self.SIDEBAR_WIDTH - self.PADDING * 2
         btn_x = self._x + self.PADDING
         # White selector
@@ -318,7 +376,7 @@ class SidebarOverlay:
         y += self.BTN_H + 4
 
         # Black hand debug toggle
-        bh_label = "👁 Black Hand: ON" if show_black_hand else "👁 Black Hand: OFF"
+        bh_label = "◉ Black Hand: ON" if show_black_hand else "◉ Black Hand: OFF"
         bh_color = HUD_DUEL if show_black_hand else HUD_LABEL
         self._btn_black_hand = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
         hover_bh = self._btn_black_hand.collidepoint(self._mouse_pos)
@@ -331,7 +389,7 @@ class SidebarOverlay:
         y += self.BTN_H + 4
 
         # Stage 9: Territory overlay toggle
-        terr_label = "🗺 Territory: ON" if show_territory else "🗺 Territory: OFF"
+        terr_label = "▦ Territory: ON" if show_territory else "▦ Territory: OFF"
         terr_color = HUD_ACCENT if show_territory else HUD_LABEL
         self._btn_territory = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
         hover_terr = self._btn_territory.collidepoint(self._mouse_pos)
@@ -364,7 +422,7 @@ class SidebarOverlay:
 
         # Check warning
         if obs.own_in_check:
-            y = self._draw_line("⚠  CHECK!", self._font, HUD_WARN, y, center=True)
+            y = self._draw_line("⚠  CHECK!", title_font(TITLE_BANNER_PX), HUD_WARN, y, center=True)
             y += 8
         if obs.opponent_in_check:
             opp_name = ("black" if obs.active_player == "white" else "white").capitalize()
@@ -373,7 +431,7 @@ class SidebarOverlay:
 
         # Final Duel notice
         if obs.phase == Phase.FINAL_DUEL:
-            y = self._draw_line("⚔  FINAL DUEL", self._font, HUD_DUEL, y, center=True)
+            y = self._draw_line("⚔  FINAL DUEL", title_font(TITLE_BANNER_PX), HUD_DUEL, y, center=True)
             y += 8
 
         # Promotion pending notice
@@ -488,7 +546,7 @@ class SidebarOverlay:
         if show_build_btn is not None:
             bd_enabled = bool(show_build_btn)
             self._btn_build_enabled = bd_enabled
-            bd_label = "🏛  Build"
+            bd_label = "♜  Build"
             bd_color  = (120, 200, 140) if bd_enabled else (70, 90, 75)
             bd_border = (90, 160, 110) if bd_enabled else (55, 70, 60)
             y += self.BTN_H + 4
@@ -511,7 +569,7 @@ class SidebarOverlay:
         if show_king_btn is not None:
             kg_enabled = bool(show_king_btn)
             self._btn_king_enabled = kg_enabled
-            kg_label = "👑  King"
+            kg_label = "♚  King"
             kg_color  = (210, 180, 110) if kg_enabled else (80, 72, 55)
             kg_border = (170, 140, 70) if kg_enabled else (60, 55, 45)
             y += self.BTN_H + 4
@@ -534,7 +592,7 @@ class SidebarOverlay:
         if show_ritual_btn is not None:
             rt_enabled = bool(show_ritual_btn)
             self._btn_ritual_enabled = rt_enabled
-            rt_label = "🔮  Ritual"
+            rt_label = "✵  Ritual"
             rt_color  = (200, 130, 230) if rt_enabled else (80, 65, 90)
             rt_border = (160, 90, 210) if rt_enabled else (60, 50, 65)
             y += self.BTN_H + 4
@@ -598,6 +656,19 @@ class SidebarOverlay:
         )
         return y + 1
 
+    def _draw_header(self, text: str, y: int) -> int:
+        """Section title in the bold-serif title font, with a short
+        bronze accent rule underneath — gives panel sections real
+        hierarchy above the plain HUD_LABEL rows beneath them."""
+        surf = title_font(TITLE_HEADER_PX).render(text, True, HUD_TEXT)
+        x = self._x + self.PADDING
+        self._surface.blit(surf, (x, y))
+        y += surf.get_height() + 3
+        pygame.draw.line(
+            self._surface, HEADER_ACCENT, (x, y), (x + min(40, surf.get_width()), y), 2,
+        )
+        return y + 6
+
     def _draw_controls_hint(self) -> None:
         """Draw the Export/Import buttons at the bottom of the sidebar."""
         h = self._surface.get_height()
@@ -612,8 +683,8 @@ class SidebarOverlay:
         self._btn_import = pygame.Rect(btn_x, btn_y + self.BTN_H + 6, btn_w, self.BTN_H)
 
         for btn, label in (
-            (self._btn_export, "💾  Export state"),
-            (self._btn_import, "📂  Import state"),
+            (self._btn_export, "⇩  Export state"),
+            (self._btn_import, "⇧  Import state"),
         ):
             hover = btn.collidepoint(self._mouse_pos)
             bg = DIALOG_HOVER if hover else DIALOG_BG
@@ -777,7 +848,7 @@ class CardViewer:
         full_h = self._surface.get_height()
         h = content_height if content_height is not None else full_h
         rect = pygame.Rect(0, 0, self._width, h)
-        pygame.draw.rect(self._surface, SIDEBAR_BG, rect)
+        draw_panel_gradient(self._surface, rect)
         pygame.draw.line(self._surface, DIALOG_BORDER, (self._width, 0), (self._width, h), 1)
 
         prev_clip = self._surface.get_clip()
@@ -785,9 +856,13 @@ class CardViewer:
         try:
             x = self.PADDING
             y = self.PADDING
-            header = self._font_small.render("Card Viewer", True, HUD_LABEL)
+            header = title_font(TITLE_HEADER_PX).render("Card Viewer", True, HUD_TEXT)
             self._surface.blit(header, (x, y))
-            y += header.get_height() + 6
+            y += header.get_height() + 3
+            pygame.draw.line(
+                self._surface, HEADER_ACCENT, (x, y), (x + min(40, header.get_width()), y), 2,
+            )
+            y += 9
             y = self._draw_divider(y)
             y += 8
 

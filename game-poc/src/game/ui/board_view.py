@@ -59,6 +59,8 @@ from game.ui.colors import (
     ACTIVATABLE_DOT,
     BLACK_PIECE,
     BLACK_PIECE_SHADOW,
+    BOARD_FRAME_INNER,
+    BOARD_FRAME_OUTER,
     CASTLE_DOT,
     CHECK_TINT,
     COORD_DARK,
@@ -715,6 +717,35 @@ class BoardView:
         self._draw_building_front_and_banner(observation)
         # ── Stage 13: siege target rings, above everything on the square ─────
         self._draw_siege_targets(siege_dests or [])
+        # NOTE: the decorative rim (draw_frame) is deliberately NOT called
+        # here — the Ritual bar and side panels are drawn AFTER this method
+        # returns and would paint straight over it. AppController calls
+        # draw_frame() itself as the very last step of a frame instead, so
+        # it always ends up on top. See its docstring.
+
+    def draw_frame(self) -> None:
+        """
+        Decorative rim traced around the board's outer edge — separates the
+        playing field from the surrounding HUD chrome the way a physical
+        board has a wooden rim around its squares.
+
+        Deliberately a separate public method rather than part of
+        ``draw()``: the Ritual bar above the board and the side panels
+        beside it are drawn AFTER ``draw()`` returns (see AppController.
+        _render), and would paint straight over a rim drawn any earlier.
+        Call this once, last, after every other panel for the frame has
+        been drawn.
+        """
+        outer = pygame.Rect(
+            BOARD_OFFSET_X - 3, BOARD_OFFSET_Y - 3,
+            BOARD_PIXEL_SIZE + 6, BOARD_PIXEL_SIZE + 6,
+        )
+        pygame.draw.rect(self._surface, BOARD_FRAME_OUTER, outer, width=3)
+        inner = pygame.Rect(
+            BOARD_OFFSET_X - 1, BOARD_OFFSET_Y - 1,
+            BOARD_PIXEL_SIZE + 2, BOARD_PIXEL_SIZE + 2,
+        )
+        pygame.draw.rect(self._surface, BOARD_FRAME_INNER, inner, width=1)
 
     def _draw_siege_targets(self, siege_dests: list[Position]) -> None:
         """

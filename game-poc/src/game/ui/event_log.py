@@ -31,7 +31,8 @@ import pygame
 
 from game.chess.pieces import Position
 from game.core import events as ev
-from game.ui.colors import DIALOG_BORDER, HUD_LABEL, HUD_TEXT, SIDEBAR_BG
+from game.ui.colors import DIALOG_BORDER, HEADER_ACCENT, HUD_TEXT
+from game.ui.overlays import TITLE_HEADER_PX, draw_panel_gradient, title_font
 
 # Height in pixels reserved at the bottom of the left sidebar for the log.
 # CardViewer.draw() is told to stop drawing its own content above this
@@ -258,17 +259,17 @@ class EventLogPanel:
         surf_h = self._surface.get_height()
         y0 = surf_h - self._height
         rect = pygame.Rect(0, y0, self._width, self._height)
-        pygame.draw.rect(self._surface, SIDEBAR_BG, rect)
+        draw_panel_gradient(self._surface, rect)
         pygame.draw.line(self._surface, DIALOG_BORDER, (0, y0), (self._width, y0), 1)
         pygame.draw.line(self._surface, DIALOG_BORDER, (self._width, y0), (self._width, surf_h), 1)
 
         x = self.PADDING
         y = y0 + self.PADDING
-        header = self._font_small.render("Event Log", True, HUD_LABEL)
+        header = title_font(TITLE_HEADER_PX).render("Event Log", True, HUD_TEXT)
         self._surface.blit(header, (x, y))
-        y += header.get_height() + 4
-        pygame.draw.line(self._surface, DIALOG_BORDER, (x, y), (self._width - self.PADDING, y), 1)
-        y += 6
+        y += header.get_height() + 3
+        pygame.draw.line(self._surface, HEADER_ACCENT, (x, y), (x + min(40, header.get_width()), y), 2)
+        y += 9
 
         # FTFont has no get_height(); measure it off a rendered sample
         # (see ui/font.py's FTFont docstring).

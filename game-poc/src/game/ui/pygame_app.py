@@ -1848,9 +1848,9 @@ class AppController:
             for a in coronate_actions:
                 if a.king_card_id not in seen:
                     seen.append(a.king_card_id)
-            rows = [(f"👑  Crown: {self._king_card_name(kid)}", kid) for kid in seen]
+            rows = [(f"♚  Crown: {self._king_card_name(kid)}", kid) for kid in seen]
             self._king_picker = _KingDialog(
-                self._screen, self._font_small, "👑  Coronation", rows,
+                self._screen, self._font_small, "♚  Coronation", rows,
             )
             self._king_picker_mode = "coronate"
         elif change_actions:
@@ -1922,9 +1922,9 @@ class AppController:
         self._king_picker_actions = actions
         rows: list[tuple[str, "Any"]] = []
         if pure_piece:
-            rows.append(("🗡  Sacrifice a Piece", "piece"))
+            rows.append(("†  Sacrifice a Piece", "piece"))
         if pure_building:
-            rows.append(("🏛  Destroy a Building", "building"))
+            rows.append(("♜  Destroy a Building", "building"))
         if not rows:
             self._show_toast("No Succession cost available.")
             self._cancel_king_mode()
@@ -1975,7 +1975,7 @@ class AppController:
         for a in actions:
             if a.destroy_building_id not in seen:
                 seen.append(a.destroy_building_id)
-        rows = [(f"🏛  {self._building_display_name(bid)}", bid) for bid in seen]
+        rows = [(f"♜  {self._building_display_name(bid)}", bid) for bid in seen]
         self._king_picker = _KingDialog(
             self._screen, self._font_small, "Choose a Building", rows,
         )
@@ -2129,7 +2129,7 @@ class AppController:
             rows.append((label, rid if (can_reveal or combos) else None))
 
         self._ritual_picker = _KingDialog(
-            self._screen, self._font_small, "🔮  Rituals", rows,
+            self._screen, self._font_small, "✵  Rituals", rows,
             accent=(200, 130, 230), border=(160, 90, 210), width=400,
         )
         self._ritual_picker_mode = "choose_ritual"
@@ -2165,14 +2165,14 @@ class AppController:
                         self._own_ritual_state(a.player_id, a.ritual_id),
                     )
                     if isinstance(a, RevealRitual)
-                    else f"🔮  Activate  —  {self._ritual_combo_label(a)}",
+                    else f"✵  Activate  —  {self._ritual_combo_label(a)}",
                     i,
                 )
                 for i, a in enumerate(actions)
             ]
             self._ritual_picker_actions = actions
             self._ritual_picker = _KingDialog(
-                self._screen, self._font_small, f"🔮  {self._ritual_name(key)}", rows,
+                self._screen, self._font_small, f"✵  {self._ritual_name(key)}", rows,
                 accent=(200, 130, 230), border=(160, 90, 210), width=400,
             )
             self._ritual_picker_mode = "choose_action"
@@ -2359,7 +2359,7 @@ class AppController:
                 name = self._registry.get(trap.card_id).name
             except Exception:
                 pass
-            entries.append((f"🪤 {name}", trap.card_id))
+            entries.append((f"▩ {name}", trap.card_id))
 
         for eff in obs.board.square_effects:
             if eff.position != pos or eff.owner != obs.player_id or eff.card_id is None:
@@ -2372,7 +2372,7 @@ class AppController:
                 name = self._registry.get(eff.card_id).name
             except Exception:
                 pass
-            entries.append((f"✨ {name} ({eff.effect_type})", eff.card_id))
+            entries.append((f"✦ {name} ({eff.effect_type})", eff.card_id))
 
         return entries
 
@@ -2589,7 +2589,7 @@ class AppController:
         from game.core.events import GameOver, RoyalEscapeTriggered
         for ev in result.events:
             if isinstance(ev, RoyalEscapeTriggered):
-                self._show_toast(f"👑 {ev.defender}'s King escapes the Final Duel!")
+                self._show_toast(f"♚ {ev.defender}'s King escapes the Final Duel!")
             elif isinstance(ev, GameOver) and ev.reason == "final_duel_victory":
                 self._show_toast(f"⚔ {ev.winner} wins the Final Duel!")
 
@@ -2632,12 +2632,12 @@ class AppController:
             return None
 
         pool = duel.defender_support if acting == duel.defender else duel.attacker_support
-        icons = {"support": "🛡️", "building": "🏰", "king_policy": "👑"}
+        icons = {"support": "⚕", "building": "♜", "king_policy": "♚"}
         rows: list[tuple[str, Any]] = []
         for action in legal:
             item_id = action.parameters.get("item_id")
             if action.duel_action_type == "advance":
-                label = "🚶  Advance (pass)"
+                label = "→  Advance (pass)"
             elif action.duel_action_type == "strike":
                 label = "⚔️  Strike"
             else:
@@ -3578,6 +3578,11 @@ class AppController:
             mercenary_valid_ids=set(obs.pending_decision_options) if mercenary_mode else None,
         )
 
+        # Decorative board rim — drawn only now, after every structural
+        # panel (Ritual bar, both sidebars, hand strip) that would
+        # otherwise paint over it. See BoardView.draw_frame's docstring.
+        self._board_view.draw_frame()
+
         # Promotion dialog (on-board overlay)
         if self._promotion_dialog is not None:
             self._promotion_dialog.draw()
@@ -3969,7 +3974,7 @@ class _BuildPicker:
         x = self._rect.x + self._PADDING
         y = self._rect.y + self._PADDING
 
-        title = self._font.render("🏛  Building Pool", True, (140, 220, 160))
+        title = self._font.render("♜  Building Pool", True, (140, 220, 160))
         self._surface.blit(title, (x, y))
         y += title.get_height() + 8
 

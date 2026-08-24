@@ -46,6 +46,29 @@ _SYSTEM_FONT_PATHS: list[str] = [
     r"C:\Windows\Fonts\seguisym.ttf",
 ]
 
+# ── Title / display font search paths ───────────────────────────────────────
+# Used only for short, ASCII-only headers and banners (section titles like
+# "Players" / "Event Log", dramatic one-liners like "CHECK!" / "FINAL DUEL").
+# A bold serif gives those a heavier, more "storybook" weight than the plain
+# sans used for body/data text, without pulling in any new font asset — every
+# path below is a font already shipped with the OS.  Never used for anything
+# that needs the chess-glyph or wide-Unicode coverage _SYSTEM_FONT_PATHS was
+# chosen for; load_font() remains the font for everything else.
+_TITLE_FONT_PATHS: list[str] = [
+    # macOS
+    "/System/Library/Fonts/Supplemental/Herculanum.ttf",   # chiseled/display
+    "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+    "/Library/Fonts/Georgia Bold.ttf",
+    # Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
+    # Windows
+    r"C:\Windows\Fonts\georgiab.ttf",
+    r"C:\Windows\Fonts\timesbd.ttf",
+]
+
 
 class FTFont:
     """
@@ -98,3 +121,22 @@ def load_font(size: int) -> FTFont:
                 continue
     # Bundled fallback always present inside the pygame wheel
     return FTFont(_ft.Font(None, size))
+
+
+def load_title_font(size: int) -> FTFont:
+    """
+    Return a bold-serif ``FTFont`` at ``size`` pixels tall, for short
+    display headers only (see ``_TITLE_FONT_PATHS``).
+
+    Falls back to ``load_font(size)`` — the same sans used everywhere
+    else — if no serif face is found on this system, so callers never
+    need a second fallback path of their own.
+    """
+    for path in _TITLE_FONT_PATHS:
+        if os.path.exists(path):
+            try:
+                inner = _ft.Font(path, size)
+                return FTFont(inner)
+            except Exception:
+                continue
+    return load_font(size)
