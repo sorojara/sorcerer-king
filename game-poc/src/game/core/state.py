@@ -386,6 +386,11 @@ class PlayerState:
     # the deck-empty reshuffle recycles the graveyard — a banished card must
     # never come back, and nothing reveals it to its owner.
     banished: list[str] = field(default_factory=list)
+    # Endgame-pacing fix: Spell/Trap ids that have already made one trip to
+    # the graveyard. The SECOND trip banishes the card instead of returning
+    # it — see RulesEngine._bury_or_retire. Monster ids are never added
+    # here; their attrition already comes from losing their Vessel.
+    spent_once: set[str] = field(default_factory=set)
 
     king_pool: list[KingCardState] = field(default_factory=list)
     active_king: str | None = None

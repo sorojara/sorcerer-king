@@ -84,6 +84,7 @@ from game.core.actions import (
 from game.core.phases import HAND_SIZE_LIMIT
 from game.core.game import Game
 from game.core.phases import KingCardStatus, Phase, PieceType, RevelationState
+from game.core.rules import RulesEngine
 from game.mechanics.buildings import is_committed_builder
 from game.ui.archetype_colors import aura_color_for
 from game.ui.board_view import (
@@ -95,15 +96,27 @@ from game.ui.board_view import (
     PieceSpriteCache,
     TileSpriteCache,
 )
-from game.ui.colors import BLACK, TOOLTIP_TEXT, TOOLTIP_TITLE
+from game.ui.colors import (
+    BLACK,
+    ROYAL_AURA_GOLD,
+    ROYAL_AURA_VIOLET,
+    TOOLTIP_TEXT,
+    TOOLTIP_TITLE,
+    TRAP_MARKER_ENEMY,
+    TRAP_MARKER_OWN,
+    ZONE_TINT_SPELL_OWN,
+)
 from game.ui.font import FTFont, load_font
 from game.ui.hand_view import HandView
 from game.ui.event_log import LOG_HEIGHT, EventLogPanel
 from game.ui.overlays import (
+    ActivationPopup,
     CardViewer,
     CardZoomOverlay,
     PromotionDialog,
+    SidebarActivationOverlay,
     SidebarOverlay,
+    title_font,
 )
 from game.ui.ritual_bar import BAR_HEIGHT as _RITUAL_BAR_H, RitualBar
 from game.ui.state_io import export_state, import_state
@@ -396,6 +409,40 @@ class AppController:
             images_dir=_data_dir / "images",
         )
         self._card_zoom_id: "str | None" = None
+
+        # Stage 14: transient VFX (summon/spell/trap/ritual/coronation) +
+        # the optional "what just got activated" card popup. See
+        # _update_activation_effects for how these get populated every
+        # frame — a length-cursor scan of the event log, same pattern as
+        # _update_terrain_scars, so AI-triggered events are covered too.
+        self._board_animations: "list[dict]" = []
+        self._anim_events_seen: int = 0
+        self._trap_info_by_instance: "dict[str, tuple[Position, str]]" = {}
+        self._show_card_reveal: bool = True
+        self._activation_popup = ActivationPopup(
+            surface=self._screen,
+            font_title=title_font(26),
+            font_small=self._font_small,
+            registry=self._registry,
+            images_dir=_data_dir / "images",
+        )
+        # Stage 14b: "just activated" overlay floating over the left
+        # CardViewer sidebar — the companion to _activation_popup above.
+        # Fades out on its own after a couple of seconds, same as that
+        # one, but can also be dismissed early with a RIGHT-CLICK, which
+        # both dismisses it and opens the same card in the CardViewer
+        # proper (see _handle_event's MOUSEBUTTONDOWN/right branch).
+        # Pushed from the same events as _activation_popup, but this one
+        # is NOT gated by the "Card Reveal" toggle — it always shows
+        # regardless; only the board-center popup respects that toggle.
+        # See _push_card_reveal.
+        self._sidebar_activation_overlay = SidebarActivationOverlay(
+            surface=self._screen,
+            font_title=title_font(20),
+            font_small=self._font_small,
+            registry=self._registry,
+            images_dir=_data_dir / "images",
+        )
 
         # ── Player modes & bots ───────────────────────────────────────────
         # "human" → human input; "ai" → the bot named by _ai_kinds plays.
@@ -712,10 +759,11 @@ class AppController:
 
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Stage 6 (corrected): right-click sets the CardViewer's active
-            # card. Priority: the open card zoom > a King-picker row > a
-            # CardViewer card block (opens the zoom) > an "Active in this
-            # zone" list entry > a Ritual-strip chip > a hand card > a
-            # board square (unit / Trap-or-zone area).
+            # card. Priority: the open card zoom > the sidebar activation
+            # overlay (Stage 14b) > a King-picker row > a CardViewer card
+            # block (opens the zoom) > an "Active in this zone" list entry
+            # > a Ritual-strip chip > a hand card > a board square (unit /
+            # Trap-or-zone area).
             mx, my = event.pos
 
             # The zoom is modal for right-clicks too, so a stray one can't
@@ -723,6 +771,18 @@ class AppController:
             if self._card_zoom_id is not None:
                 if self._card_zoom.handle_click(mx, my) == "close":
                     self._card_zoom_id = None
+                return
+
+            # Stage 14b: right-click the persistent activation overlay
+            # floating over the CardViewer sidebar — dismiss it AND open
+            # the same card in the CardViewer proper, in one click.
+            if self._sidebar_activation_overlay.hit_test(mx, my):
+                overlay_card_id = self._sidebar_activation_overlay.current_card_id()
+                self._sidebar_activation_overlay.dismiss()
+                if overlay_card_id is not None:
+                    self._viewer_card_id = overlay_card_id
+                    self._inspect_unit_pos = None
+                    self._zone_active_entries = None
                 return
 
             # Stage 10: right-click a row on the King picker (Coronation /
@@ -832,6 +892,9 @@ class AppController:
             return
         if btn == "toggle_territory":
             self._toggle_territory()
+            return
+        if btn == "toggle_card_reveal":
+            self._toggle_card_reveal()
             return
         if btn == "toggle_speed":
             self._toggle_ai_speed()
@@ -1310,6 +1373,181 @@ class AppController:
                 remaining = self._SCAR_LIFETIME_TURNS - age
                 out[pos] = max(0.0, remaining / self._SCAR_FADE_TURNS)
         return out
+
+    # ── Stage 14: activation VFX (summon/spell/trap/ritual/coronation) ─────
+
+    def _card_accent_color(self, card_id: "str | None") -> tuple[int, int, int]:
+        """Archetype aura color for ``card_id`` if the registry has one,
+        else a neutral gold — never crashes on an unknown/None id."""
+        if card_id and self._registry is not None and card_id in self._registry:
+            try:
+                card = self._registry.get(card_id)
+                archetype = getattr(card, "archetype", None)
+                if archetype:
+                    return aura_color_for(archetype)
+            except Exception:
+                pass
+        return (230, 200, 90)
+
+    def _piece_position(self, piece_id: "str | None", obs) -> "Position | None":
+        if not piece_id:
+            return None
+        for u in obs.board.units:
+            if u.piece_id == piece_id:
+                return u.position
+        return None
+
+    def _king_position(self, player_id: str, obs) -> "Position | None":
+        for u in obs.board.units:
+            if u.piece_type == "king" and u.owner == player_id:
+                return u.position
+        return None
+
+    def _spell_target_position(self, target: "Any", obs) -> "Position | None":
+        """
+        Best-effort square to anchor a Spell's cast animation on.
+        ``ActivateSpell.target`` is effect-specific (see its docstring in
+        core/actions.py) — a (file, rank) pair for position/zone Spells, a
+        dict with "destination"/"position" for piece-move Spells, a piece
+        id or trap_instance_id for others. Returns None rather than
+        raising when the shape isn't recognized — this is purely
+        decorative, so silently skipping the animation beats crashing the
+        frame over it.
+        """
+        if target is None:
+            return None
+        try:
+            if isinstance(target, (tuple, list)) and len(target) == 2:
+                return Position(*target)
+            if isinstance(target, dict):
+                for key in ("destination", "position"):
+                    v = target.get(key)
+                    if v is None:
+                        continue
+                    if isinstance(v, (tuple, list)) and len(v) == 2:
+                        return Position(*v)
+                    pos = self._piece_position(v, obs)
+                    if pos is not None:
+                        return pos
+                return None
+            if isinstance(target, str):
+                pos = self._piece_position(target, obs)
+                if pos is not None:
+                    return pos
+                return self._trap_position(target, obs)
+        except Exception:
+            return None
+        return None
+
+    def _spawn_animation(
+        self, pos: "Position | None", kind: str, color: tuple, duration_ms: int,
+    ) -> None:
+        if pos is None:
+            return
+        self._board_animations.append({
+            "pos": pos, "kind": kind, "color": color,
+            "start": pygame.time.get_ticks(), "duration": duration_ms,
+        })
+
+    def _push_card_reveal(self, card_id: "str | None", kind_label: str) -> None:
+        """
+        Queue ``card_id`` on the activation surfaces.
+
+        The CardViewer-sidebar overlay ALWAYS gets it — it's the quiet,
+        always-on record of "what just got activated" (fades on its own
+        after ~1-2s, or right away on right-click), so there's no reason
+        to gate it. The bigger board-center popup (impossible to miss,
+        same short auto-fade) is the one the "Card Reveal" toggle
+        actually controls.
+
+        Kept as one call site rather than two so a future third surface
+        never has to be threaded through every _update_activation_effects
+        branch individually.
+        """
+        self._sidebar_activation_overlay.push(card_id, kind_label)
+        if self._show_card_reveal:
+            self._activation_popup.push(card_id, kind_label)
+
+    def _update_activation_effects(self, obs) -> None:
+        """
+        Scan events appended since the last frame and, for each Monster
+        summon / Spell cast / Trap set-or-sprung / Ritual completion /
+        Coronation, spawn a board VFX (always) and queue an activation
+        card popup (only when the "Card Reveal" toggle is on, and never
+        for a Trap merely being SET — only when it springs).
+
+        Same length-cursor pattern as _update_terrain_scars, so this sees
+        events from BOTH players regardless of who — human or AI — caused
+        them, and survives a mid-game save/load the same way that method
+        does (cursor reset when the log is shorter than last seen).
+
+        Every card-reveal push below is unconditional — _push_card_reveal
+        itself decides which of its two surfaces actually shows it (the
+        sidebar overlay always; the board-center popup only when the
+        "Card Reveal" toggle is on). Don't re-add a
+        ``if self._show_card_reveal:`` guard here — that would suppress
+        the sidebar overlay too, which must always show.
+        """
+        from game.core.events import (
+            KingCoronated, MonsterSummoned, RitualActivated,
+            SpellActivated, TrapPlaced, TrapTriggered,
+        )
+
+        log = self._game.state.event_log
+        if self._anim_events_seen > len(log):
+            self._anim_events_seen = 0
+            self._trap_info_by_instance = {}
+
+        for ev in log[self._anim_events_seen:]:
+            if isinstance(ev, MonsterSummoned):
+                self._spawn_animation(
+                    ev.position, "summon", self._card_accent_color(ev.card_id), 650,
+                )
+                self._push_card_reveal(ev.card_id, "Summoned")
+
+            elif isinstance(ev, SpellActivated):
+                pos = self._spell_target_position(ev.target, obs)
+                self._spawn_animation(pos, "spell", ZONE_TINT_SPELL_OWN[:3], 500)
+                self._push_card_reveal(ev.card_id, "Spell Cast")
+
+            elif isinstance(ev, TrapPlaced):
+                self._trap_info_by_instance[ev.trap_instance_id] = (ev.position, ev.card_id)
+                # Deliberately DISCREET (README request: "not setted") — a
+                # quiet placement pulse, and no card popup at all: a Trap
+                # stays concealed until it actually springs.
+                trap_color = TRAP_MARKER_OWN if ev.player_id == obs.player_id else TRAP_MARKER_ENEMY
+                self._spawn_animation(ev.position, "trap_set", trap_color, 300)
+
+            elif isinstance(ev, TrapTriggered):
+                info = self._trap_info_by_instance.get(ev.trap_instance_id)
+                pos, card_id = info if info is not None else (None, None)
+                self._spawn_animation(pos, "trap_trigger", (255, 150, 40), 500)
+                if card_id:
+                    self._push_card_reveal(card_id, "Trap Sprung!")
+
+            elif isinstance(ev, RitualActivated):
+                # RitualActivated carries no position — the vessel unit's
+                # piece id is always last in sacrificed_piece_ids (see
+                # mechanics/rituals.py execute_ritual) and hasn't moved
+                # since, so it's still findable on the current board.
+                vessel_pos = self._piece_position(
+                    ev.sacrificed_piece_ids[-1] if ev.sacrificed_piece_ids else None, obs,
+                )
+                self._spawn_animation(vessel_pos, "ritual", ROYAL_AURA_VIOLET, 1100)
+                self._push_card_reveal(ev.ritual_id, "Ritual Complete")
+                self._push_card_reveal(ev.summoned_monster_id, "Summoned")
+
+            elif isinstance(ev, KingCoronated):
+                king_pos = self._king_position(ev.player_id, obs)
+                self._spawn_animation(king_pos, "coronation", ROYAL_AURA_GOLD, 1300)
+                self._push_card_reveal(ev.king_card_id, "Coronation!")
+
+        self._anim_events_seen = len(log)
+
+        now = pygame.time.get_ticks()
+        self._board_animations = [
+            a for a in self._board_animations if now - a["start"] < a["duration"]
+        ]
 
     def _compute_aura_colors(self, obs) -> "dict[Position, tuple[int, int, int]]":
         """
@@ -2989,6 +3227,8 @@ class AppController:
         self._event_log_panel._surface = self._screen
         self._ritual_bar._surface = self._screen
         self._card_zoom._surface = self._screen
+        self._activation_popup._surface = self._screen
+        self._sidebar_activation_overlay._surface = self._screen
         label = "ON" if self._show_black_hand else "OFF"
         self._show_toast(f"Black hand view: {label}")
 
@@ -2997,6 +3237,19 @@ class AppController:
         self._show_territory = not self._show_territory
         label = "ON" if self._show_territory else "OFF"
         self._show_toast(f"Territory overlay: {label}")
+
+    def _toggle_card_reveal(self) -> None:
+        """
+        Stage 14: toggle the board-center activation popup on/off.
+
+        Only gates that one surface: the small board VFX always play, and
+        the persistent CardViewer-sidebar overlay always shows too — this
+        just controls whether activations ALSO get the bigger, harder-to-
+        miss center-board flash. See _push_card_reveal.
+        """
+        self._show_card_reveal = not self._show_card_reveal
+        label = "ON" if self._show_card_reveal else "OFF"
+        self._show_toast(f"Card reveal popup: {label}")
 
     # ── AI tick (called every frame) ──────────────────────────────────────
 
@@ -3373,6 +3626,7 @@ class AppController:
             spell_preview = board_summon_dests
 
         self._update_terrain_scars(obs)
+        self._update_activation_effects(obs)
 
         self._board_view.draw(
             observation=obs,
@@ -3390,6 +3644,7 @@ class AppController:
             spell_preview=spell_preview,
             trap_preview=trap_preview,
             scars=self._scar_map(obs),
+            animations=self._board_animations,
         )
 
         # Stage 11: the Ritual strip above the board. Drawn from the
@@ -3398,6 +3653,15 @@ class AppController:
         # the widget never sees anything the observation layer redacted.
         viewer_obs = self._viewer_obs(obs)
         self._ritual_bar.draw(viewer_obs, active_player=obs.active_player)
+
+        # Stage 14: the activation card popup — drawn centered over the
+        # board itself (not the Ritual strip above it). Purely decorative:
+        # it is never consulted by any click handler, so it can never
+        # block input the way the modal card-zoom overlay deliberately does.
+        self._activation_popup.draw(
+            BOARD_OFFSET_X + BOARD_PIXEL_SIZE // 2,
+            BOARD_OFFSET_Y + BOARD_PIXEL_SIZE // 2,
+        )
 
         # Stage 6: hover tooltip for Traps / active zone effects.
         hover_pos = self._board_view.pos_from_click(*self._mouse_pos)
@@ -3435,7 +3699,8 @@ class AppController:
                 for f in range(8)
                 for r in own_ranks
             )
-            show_mercenary = (monster_count >= 4 and has_empty)
+            cheapest_tier = min(RulesEngine._MERCENARY_COST.values())
+            show_mercenary = (monster_count >= cheapest_tier and has_empty)
         elif prep_available:
             # registry not loaded yet — show disabled rather than hidden
             show_mercenary = False
@@ -3536,6 +3801,7 @@ class AppController:
             show_king_btn=show_king,
             show_ritual_btn=show_ritual,
             show_territory=self._show_territory,
+            show_card_reveal=self._show_card_reveal,
             ai_speed_label=self._ai_speed.capitalize(),
             activatable_entries=activatable_entries or None,
         )
@@ -3545,6 +3811,14 @@ class AppController:
             unit_statuses=_unit_statuses,
             zone_entries=self._zone_active_entries,
             content_height=self._screen.get_height() - LOG_HEIGHT,
+        )
+        # Stage 14b: the activation overlay floats ON TOP of the
+        # CardViewer just drawn above — fades out on its own after a
+        # couple of seconds, or right away if a right-click dismisses it
+        # first (see _handle_event).
+        self._sidebar_activation_overlay.draw(
+            _LEFT_SIDEBAR_W // 2,
+            (self._screen.get_height() - LOG_HEIGHT) // 2,
         )
         self._event_log_panel.draw(self._game.state.event_log, registry=self._registry)
 
@@ -3763,13 +4037,10 @@ class _MercenaryPicker:
         Renders the dialog each frame.
     """
 
-    _COSTS: list[tuple[str, int]] = [
-        ("pawn",   4),
-        ("knight", 6),
-        ("bishop", 6),
-        ("rook",   6),
-        ("queen",  8),
-    ]
+    # Sourced from RulesEngine._MERCENARY_COST (single source of truth —
+    # this used to be a hardcoded duplicate that would silently drift out
+    # of sync with the real cost table).
+    _COSTS: list[tuple[str, int]] = list(RulesEngine._MERCENARY_COST.items())
     _PIECE_GLYPH: dict[str, str] = {
         "pawn":   "♟",
         "knight": "♞",

@@ -394,6 +394,18 @@ class DeckRecycled(Event):
 
 
 @dataclass(frozen=True)
+class CardWornOut(Event):
+    """
+    A Spell/Trap card made its *second* trip to the graveyard and was
+    banished instead — it will never be drawn again. Monsters are exempt
+    (their attrition already comes from losing their Vessel on the board).
+    See RulesEngine._bury_or_retire.
+    """
+    player_id: str
+    card_id: str
+
+
+@dataclass(frozen=True)
 class CardsReturnedToDeck(Event):
     player_id: str
     card_ids: tuple[str, ...]

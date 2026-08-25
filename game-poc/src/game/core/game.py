@@ -370,7 +370,14 @@ class Game:
             raise
 
         events.extend(new_events)
-        self._state.event_log.extend(new_events)  # engine already adds, avoid dup
+        # NOTE: do NOT also extend self._state.event_log here — RulesEngine.
+        # execute() already appends new_events to state.event_log itself
+        # (core/rules.py, end of execute()). Appending again duplicated every
+        # single event in the log (visible as doubled lines in the Event Log
+        # panel, and as duplicate VFX/popups once ui/pygame_app.py started
+        # scanning event_log for animation triggers — see
+        # _update_activation_effects). `events` (this method's local list,
+        # returned via ExecutionResult below) is unaffected either way.
         self._telemetry.record(action, new_events, self._state, turn_at_action)
         if self._state.is_game_over():
             self._telemetry.finish()

@@ -148,6 +148,7 @@ class SidebarOverlay:
         self._btn_black_mode: pygame.Rect | None = None
         self._btn_black_hand: pygame.Rect | None = None
         self._btn_territory: pygame.Rect | None = None
+        self._btn_card_reveal: pygame.Rect | None = None
         self._btn_speed: pygame.Rect | None = None
         self._btn_recompose: pygame.Rect | None = None
         self._btn_mercenary: pygame.Rect | None = None
@@ -174,6 +175,7 @@ class SidebarOverlay:
             'toggle_black'      — Toggle black player mode
             'toggle_black_hand' — Toggle black-hand debug view
             'toggle_territory'  — Stage 9: Toggle the Territory board tint
+            'toggle_card_reveal' — Stage 14: Toggle the activation card popup
             'toggle_speed'      — Cycle the AI think-speed (Normal/Fast/Instant)
             'recompose'         — Trigger DeclareRecompose (PREPARATION only)
             'mercenary'         — Open Mercenary piece-type picker (PREPARATION only)
@@ -198,6 +200,8 @@ class SidebarOverlay:
             return "toggle_black_hand"
         if self._btn_territory and self._btn_territory.collidepoint(mx, my):
             return "toggle_territory"
+        if self._btn_card_reveal and self._btn_card_reveal.collidepoint(mx, my):
+            return "toggle_card_reveal"
         if self._btn_speed and self._btn_speed.collidepoint(mx, my):
             return "toggle_speed"
         if self._btn_recompose and self._btn_recompose.collidepoint(mx, my):
@@ -259,6 +263,7 @@ class SidebarOverlay:
         show_king_btn: "bool | None" = None,
         show_ritual_btn: "bool | None" = None,
         show_territory: bool = True,
+        show_card_reveal: bool = True,
         ai_speed_label: str = "Normal",
         activatable_entries: "list[tuple[str, str]] | None" = None,
     ) -> None:
@@ -294,6 +299,15 @@ class SidebarOverlay:
                                   Territory board tint, shown as the toggle
                                   button's label (always drawn, unlike the
                                   tri-state buttons above).
+        ``show_card_reveal``    — Stage 14: current on/off state of the
+                                  board-center activation popup
+                                  (ActivationPopup) — every Monster summon /
+                                  Spell cast / Trap spring / Ritual
+                                  completion / Coronation briefly flashes
+                                  its card there when this is on. The
+                                  persistent CardViewer-sidebar overlay
+                                  (SidebarActivationOverlay) is NOT gated
+                                  by this — it always shows regardless.
         ``ai_speed_label``      — Current AI think-speed tier ("Normal" /
                                   "Fast" / "Instant"), shown on the speed
                                   toggle button. Normal keeps the visual
@@ -399,6 +413,19 @@ class SidebarOverlay:
         ts = self._font_small.render(terr_label, True, terr_color)
         self._surface.blit(ts, (self._btn_territory.x + (btn_w - ts.get_width()) // 2,
                                 self._btn_territory.y + (self.BTN_H - ts.get_height()) // 2))
+        y += self.BTN_H + 4
+
+        # Stage 14: activation card-popup toggle
+        cr_label = "▤ Card Reveal: ON" if show_card_reveal else "▤ Card Reveal: OFF"
+        cr_color = HUD_ACCENT if show_card_reveal else HUD_LABEL
+        self._btn_card_reveal = pygame.Rect(btn_x, y, btn_w, self.BTN_H)
+        hover_cr = self._btn_card_reveal.collidepoint(self._mouse_pos)
+        pygame.draw.rect(self._surface, DIALOG_HOVER if hover_cr else DIALOG_BG,
+                         self._btn_card_reveal, border_radius=4)
+        pygame.draw.rect(self._surface, DIALOG_BORDER, self._btn_card_reveal, 1, border_radius=4)
+        crs = self._font_small.render(cr_label, True, cr_color)
+        self._surface.blit(crs, (self._btn_card_reveal.x + (btn_w - crs.get_width()) // 2,
+                                 self._btn_card_reveal.y + (self.BTN_H - crs.get_height()) // 2))
         y += self.BTN_H + 4
 
         # AI speed toggle — cycles Normal → Fast → Instant. Normal is the
@@ -1640,3 +1667,299 @@ class PromotionDialog:
             if rect.collidepoint(mx, my):
                 return piece_type
         return None
+
+
+class ActivationPopup:
+    """
+    Stage 14 — a small, non-modal "what just got activated" card popup.
+
+    AppController pushes onto this whenever a Monster is summoned, a
+    Spell is cast, a Trap SPRINGS (never when merely placed — a Trap
+    stays concealed until it fires), a Ritual completes, or a King is
+    Coronated — never from direct user interaction, and only when the
+    player has the "Card Reveal" sidebar toggle on. Purely decorative:
+    ``draw()`` is the only method that touches the screen, and nothing in
+    this class is ever consulted for hit-testing, so it can never eat a
+    click the way CardZoomOverlay's modal blow-up deliberately does.
+
+    Only one card is ever shown at a time; further pushes queue behind it
+    so a burst of events (e.g. a Ritual's own card followed immediately
+    by the Monster it summons) reveals as a short sequence instead of an
+    illegible stack.
+    """
+
+    W: int = 320
+    ART_H: int = 220
+    FADE_MS: int = 220
+    HOLD_MS: int = 1500
+
+    def __init__(
+        self,
+        surface: pygame.Surface,
+        font_title: Any,
+        font_small: Any,
+        registry: "object | None" = None,
+        images_dir: "Any | None" = None,
+    ) -> None:
+        self._surface = surface
+        self._font_title = font_title
+        self._font_small = font_small
+        self._registry = registry
+        self._images_dir = images_dir
+        self._image_cache: "dict[str, Any]" = {}
+        self._queue: "list[tuple[str, str]]" = []       # (card_id, kind_label)
+        self._current: "tuple[str, str, int] | None" = None  # (card_id, kind_label, shown_since_ms)
+
+    def push(self, card_id: "str | None", kind_label: str) -> None:
+        """Queue one card to reveal. Silently ignored if ``card_id`` is falsy
+        or unknown — a missing/unresolved card_id should never crash the UI."""
+        if card_id:
+            self._queue.append((card_id, kind_label))
+
+    def draw(self, center_x: int, center_y: int) -> None:
+        """
+        Draw the current card (advancing the queue as entries expire),
+        centered at ``(center_x, center_y)`` — the board's own center, so
+        the reveal lands where the player is already looking.
+        """
+        now = pygame.time.get_ticks()
+        total = self.FADE_MS * 2 + self.HOLD_MS
+        if self._current is None:
+            if not self._queue:
+                return
+            card_id, kind_label = self._queue.pop(0)
+            self._current = (card_id, kind_label, now)
+        card_id, kind_label, shown_since = self._current
+        elapsed = now - shown_since
+        if elapsed >= total:
+            self._current = None
+            return
+
+        if elapsed < self.FADE_MS:
+            alpha = int(255 * elapsed / self.FADE_MS)
+        elif elapsed > total - self.FADE_MS:
+            alpha = int(255 * (total - elapsed) / self.FADE_MS)
+        else:
+            alpha = 255
+        alpha = max(0, min(255, alpha))
+
+        card = None
+        if self._registry is not None:
+            try:
+                if card_id in self._registry:
+                    card = self._registry.get(card_id)
+            except Exception:
+                card = None
+        name = getattr(card, "name", None) or card_id
+        img = self._get_image(card) if card is not None else None
+
+        panel_h = self.ART_H + 62
+        panel = pygame.Surface((self.W, panel_h), pygame.SRCALPHA)
+        panel_rect = panel.get_rect()
+        pygame.draw.rect(panel, (*DIALOG_BG, 235), panel_rect, border_radius=8)
+        pygame.draw.rect(panel, (*HEADER_ACCENT, 255), panel_rect, 2, border_radius=8)
+
+        art_rect = pygame.Rect(8, 8, self.W - 16, self.ART_H)
+        pygame.draw.rect(panel, (*DIALOG_BORDER, 255), art_rect, border_radius=5)
+        if img is not None and img.get_width() > 0 and img.get_height() > 0:
+            iw, ih = img.get_size()
+            scale = min((art_rect.w - 6) / iw, (art_rect.h - 6) / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            scaled = pygame.transform.smoothscale(img, (nw, nh))
+            panel.blit(scaled, (
+                art_rect.x + (art_rect.w - nw) // 2, art_rect.y + (art_rect.h - nh) // 2,
+            ))
+
+        kind_surf = self._font_small.render(kind_label.upper(), True, HEADER_ACCENT)
+        ky = art_rect.bottom + 6
+        panel.blit(kind_surf, ((self.W - kind_surf.get_width()) // 2, ky))
+
+        name_surf = self._font_title.render(name, True, HUD_TEXT)
+        if name_surf.get_width() > self.W - 16:
+            name_surf = self._font_small.render(name, True, HUD_TEXT)
+        ny = ky + kind_surf.get_height() + 3
+        panel.blit(name_surf, ((self.W - name_surf.get_width()) // 2, ny))
+
+        panel.set_alpha(alpha)
+        x = center_x - self.W // 2
+        y = center_y - panel_h // 2
+        self._surface.blit(panel, (x, y))
+
+    def _get_image(self, card: "AnyCard") -> "pygame.Surface | None":
+        path = getattr(card, "image_path", "") or ""
+        if not path or self._images_dir is None:
+            return None
+        if path in self._image_cache:
+            return self._image_cache[path]
+        surf = None
+        try:
+            full_path = self._images_dir / path
+            if full_path.is_file():
+                surf = pygame.image.load(str(full_path)).convert_alpha()
+        except Exception:
+            surf = None
+        self._image_cache[path] = surf
+        return surf
+
+
+class SidebarActivationOverlay:
+    """
+    Stage 14b — a "just activated" card overlay, floated on top of the
+    left CardViewer sidebar. Companion to ``ActivationPopup`` (the
+    transient flash centered on the board) — and, like that one, transient
+    too: a card fades out on its own after a couple of seconds
+    (FADE_MS/HOLD_MS below). The one difference from ActivationPopup is
+    that THIS overlay is never gated by the "Card Reveal" toggle — it
+    always shows regardless (see AppController._push_card_reveal) — and it
+    can be dismissed early by RIGHT-CLICKing it, which AppController wires
+    to two things at once: ``dismiss()`` here, and setting its own
+    ``_viewer_card_id`` so the same card opens in the CardViewer proper
+    right below.
+
+    Like ``ActivationPopup``, only one card shows at a time; further
+    pushes queue behind it so a burst of events (a Ritual completing,
+    immediately followed by the Monster it summons) surfaces as a short
+    sequence instead of one card silently overwriting the last.
+
+    Purely passive about input — ``hit_test()`` is the only thing an
+    outside caller ever consults, and only for right-clicks; a stray
+    left-click passes straight through to whatever is underneath.
+    """
+
+    W: int = 210
+    ART_H: int = 150
+    FADE_MS: int = 200
+    HOLD_MS: int = 1600   # ~1.8s fully visible+fading — "1 or 2 seconds"
+
+    def __init__(
+        self,
+        surface: pygame.Surface,
+        font_title: Any,
+        font_small: Any,
+        registry: "object | None" = None,
+        images_dir: "Any | None" = None,
+    ) -> None:
+        self._surface = surface
+        self._font_title = font_title
+        self._font_small = font_small
+        self._registry = registry
+        self._images_dir = images_dir
+        self._image_cache: "dict[str, Any]" = {}
+        self._queue: "list[tuple[str, str]]" = []      # (card_id, kind_label)
+        self._current: "tuple[str, str, int] | None" = None  # (card_id, kind_label, shown_since_ms)
+        self._rect: "pygame.Rect | None" = None         # last-drawn bounds, for hit_test()
+
+    def push(self, card_id: "str | None", kind_label: str) -> None:
+        """Queue one card to reveal. Silently ignored if ``card_id`` is falsy
+        — a missing/unresolved card_id should never crash the UI."""
+        if card_id:
+            self._queue.append((card_id, kind_label))
+
+    def current_card_id(self) -> "str | None":
+        """The card_id currently showing, or None if nothing is."""
+        return self._current[0] if self._current is not None else None
+
+    def dismiss(self) -> None:
+        """Drop whatever is currently showing — an early dismissal (a
+        right-click) on top of the automatic fade-out below. The next
+        queued card (if any) appears on the following ``draw()`` call."""
+        self._current = None
+        self._rect = None
+
+    def hit_test(self, mx: int, my: int) -> bool:
+        """True if (mx, my) lands inside the panel as last drawn. False
+        (never crashes) once nothing is showing."""
+        return self._rect is not None and self._rect.collidepoint(mx, my)
+
+    def draw(self, center_x: int, center_y: int) -> None:
+        """
+        Draw the current card (pulling the next one off the queue if
+        nothing is showing yet, fading it in/out over its lifetime),
+        centered at ``(center_x, center_y)``. No-op — and clears the
+        hit-test rect — when nothing is queued or showing.
+        """
+        now = pygame.time.get_ticks()
+        total = self.FADE_MS * 2 + self.HOLD_MS
+        if self._current is None:
+            if not self._queue:
+                self._rect = None
+                return
+            card_id, kind_label = self._queue.pop(0)
+            self._current = (card_id, kind_label, now)
+        card_id, kind_label, shown_since = self._current
+        elapsed = now - shown_since
+        if elapsed >= total:
+            self._current = None
+            self._rect = None
+            return
+
+        if elapsed < self.FADE_MS:
+            alpha = int(255 * elapsed / self.FADE_MS)
+        elif elapsed > total - self.FADE_MS:
+            alpha = int(255 * (total - elapsed) / self.FADE_MS)
+        else:
+            alpha = 255
+        alpha = max(0, min(255, alpha))
+
+        card = None
+        if self._registry is not None:
+            try:
+                if card_id in self._registry:
+                    card = self._registry.get(card_id)
+            except Exception:
+                card = None
+        name = getattr(card, "name", None) or card_id
+        img = self._get_image(card) if card is not None else None
+
+        panel_h = self.ART_H + 78
+        panel = pygame.Surface((self.W, panel_h), pygame.SRCALPHA)
+        panel_rect = panel.get_rect()
+        pygame.draw.rect(panel, (*DIALOG_BG, 250), panel_rect, border_radius=8)
+        pygame.draw.rect(panel, (*HEADER_ACCENT, 255), panel_rect, 3, border_radius=8)
+
+        art_rect = pygame.Rect(8, 8, self.W - 16, self.ART_H)
+        pygame.draw.rect(panel, (*DIALOG_BORDER, 255), art_rect, border_radius=5)
+        if img is not None and img.get_width() > 0 and img.get_height() > 0:
+            iw, ih = img.get_size()
+            scale = min((art_rect.w - 6) / iw, (art_rect.h - 6) / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            scaled = pygame.transform.smoothscale(img, (nw, nh))
+            panel.blit(scaled, (
+                art_rect.x + (art_rect.w - nw) // 2, art_rect.y + (art_rect.h - nh) // 2,
+            ))
+
+        kind_surf = self._font_small.render(kind_label.upper(), True, HEADER_ACCENT)
+        ky = art_rect.bottom + 6
+        panel.blit(kind_surf, ((self.W - kind_surf.get_width()) // 2, ky))
+
+        name_surf = self._font_title.render(name, True, HUD_TEXT)
+        if name_surf.get_width() > self.W - 16:
+            name_surf = self._font_small.render(name, True, HUD_TEXT)
+        ny = ky + kind_surf.get_height() + 3
+        panel.blit(name_surf, ((self.W - name_surf.get_width()) // 2, ny))
+
+        hint_surf = self._font_small.render("right-click to view", True, HUD_LABEL)
+        hy = ny + name_surf.get_height() + 6
+        panel.blit(hint_surf, ((self.W - hint_surf.get_width()) // 2, hy))
+
+        panel.set_alpha(alpha)
+        x = center_x - self.W // 2
+        y = center_y - panel_h // 2
+        self._surface.blit(panel, (x, y))
+        self._rect = pygame.Rect(x, y, self.W, panel_h)
+
+    def _get_image(self, card: "AnyCard") -> "pygame.Surface | None":
+        path = getattr(card, "image_path", "") or ""
+        if not path or self._images_dir is None:
+            return None
+        if path in self._image_cache:
+            return self._image_cache[path]
+        surf = None
+        try:
+            full_path = self._images_dir / path
+            if full_path.is_file():
+                surf = pygame.image.load(str(full_path)).convert_alpha()
+        except Exception:
+            surf = None
+        self._image_cache[path] = surf
+        return surf

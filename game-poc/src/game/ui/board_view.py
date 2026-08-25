@@ -625,6 +625,14 @@ class BoardView:
         self._overlay = pygame.Surface(
             (SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA
         )
+        # Stage 14: scratch canvas for transient VFX (summon/spell/trap/
+        # ritual/coronation). 3×3 squares so a ring or ray can bleed into
+        # neighboring squares — Ritual/Coronation deliberately do — without
+        # needing per-effect surface allocation every frame. Re-filled
+        # transparent and reused for every animation drawn each frame.
+        self._anim_overlay = pygame.Surface(
+            (SQUARE_SIZE * 3, SQUARE_SIZE * 3), pygame.SRCALPHA
+        )
 
     # ── Public render entry point ─────────────────────────────────────────
 
@@ -645,6 +653,7 @@ class BoardView:
         spell_preview: "Iterable[Position] | None" = None,
         trap_preview: "Iterable[Position] | None" = None,
         scars: "dict[Position, float] | None" = None,
+        animations: "list[dict] | None" = None,
     ) -> None:
         """
         Render the full board onto ``self._surface``.
@@ -701,6 +710,18 @@ class BoardView:
                               AppController owns the bookkeeping (it is the
                               only side that sees events); this module just
                               draws what it is handed.
+        animations          : Stage 14 — transient VFX for the moment a
+                              Monster is summoned, a Spell is cast, a Trap
+                              is set or sprung, a Ritual completes, or a
+                              King is Coronated. Each entry is a dict with
+                              "pos" (Position), "kind" (one of "summon" /
+                              "spell" / "trap_set" / "trap_trigger" /
+                              "ritual" / "coronation"), "color" (RGB),
+                              "start" and "duration" (both pygame.time.
+                              get_ticks() milliseconds). AppController owns
+                              spawning them from the event log and pruning
+                              expired ones — same "pure rendering" contract
+                              as everything else this method is handed.
         """
         self._draw_squares(observation, selected_pos, legal_dests, castle_dests,
                            checked_player, summon_vessel_dests or [], inspect_pos,
@@ -717,6 +738,8 @@ class BoardView:
         self._draw_building_front_and_banner(observation)
         # ── Stage 13: siege target rings, above everything on the square ─────
         self._draw_siege_targets(siege_dests or [])
+        # ── Stage 14: transient VFX, topmost so they always read clearly ─────
+        self._draw_animations(animations or [])
         # NOTE: the decorative rim (draw_frame) is deliberately NOT called
         # here — the Ritual bar and side panels are drawn AFTER this method
         # returns and would paint straight over it. AppController calls
@@ -1515,3 +1538,167 @@ class BoardView:
         for i, surf in enumerate(surfs):
             box.blit(surf, (pad, pad + i * line_h))
         self._surface.blit(box, (x, y))
+
+    # ── Stage 14: transient VFX (summon / spell / trap / ritual / coronation) ──
+    #
+    # All of it is pure code — circles, lines, a fading flash — drawn onto
+    # ``_anim_overlay`` (a 3×3-square SRCALPHA scratch canvas, re-filled
+    # transparent for every animation so alpha actually fades instead of
+    # compositing onto whatever the last one drew) and blitted centered on
+    # the target square. No image assets, no per-frame allocation.
+    #
+    # Each ``_anim_*`` method receives ``t`` already clamped to 0..1 — 0 the
+    # instant the triggering event fired, 1 the instant its ``duration`` in
+    # AppController's animation record runs out — and draws directly onto
+    # ``self._anim_overlay`` centered at ``c`` (both axes, since the canvas
+    # is square). It never touches game state and never reads the clock
+    # itself — timing is entirely AppController's to own, exactly like the
+    # "own vs enemy" color decisions ``aura_colors`` etc. already are.
+
+    def _draw_animations(self, animations: "list[dict]") -> None:
+        if not animations:
+            return
+        now = pygame.time.get_ticks()
+        canvas = self._anim_overlay.get_width()
+        center = canvas // 2
+        for anim in animations:
+            pos = anim.get("pos")
+            if pos is None:
+                continue
+            duration = max(1, anim.get("duration", 500))
+            t = (now - anim.get("start", now)) / duration
+            if t < 0.0 or t > 1.0:
+                continue
+            draw_fn = getattr(self, f"_anim_{anim.get('kind')}", None)
+            if draw_fn is None:
+                continue
+            self._anim_overlay.fill((0, 0, 0, 0))
+            draw_fn(center, anim.get("color", (230, 200, 90)), t)
+            sx, sy = _sq_to_screen(pos, self._flip)
+            self._surface.blit(
+                self._anim_overlay,
+                (sx + SQUARE_SIZE // 2 - center, sy + SQUARE_SIZE // 2 - center),
+            )
+
+    def _anim_summon(self, c: int, color: tuple, t: float) -> None:
+        """A Monster materializing on its vessel: two staggered rings
+        expanding outward from the square, plus a brief white flash at
+        the very start so the piece reads as *appearing*, not just tinted."""
+        base_r = SQUARE_SIZE // 2
+        for delay in (0.0, 0.2):
+            lt = (t - delay) / (1 - delay)
+            if lt <= 0.0 or lt > 1.0:
+                continue
+            r = int(base_r * (0.2 + 0.9 * lt))
+            alpha = int(230 * (1 - lt))
+            if r > 0 and alpha > 0:
+                pygame.draw.circle(self._anim_overlay, (*color, alpha), (c, c), r, 3)
+        if t < 0.22:
+            flash_a = int(150 * (1 - t / 0.22))
+            pygame.draw.circle(self._anim_overlay, (255, 255, 255, flash_a), (c, c), base_r)
+
+    def _anim_spell(self, c: int, color: tuple, t: float) -> None:
+        """A Spell landing: a soft glow behind a burst of rays reaching
+        outward from the target square, slowly rotating as they fade."""
+        base_r = SQUARE_SIZE // 2
+        glow_a = int(110 * (1 - t))
+        if glow_a > 0:
+            pygame.draw.circle(self._anim_overlay, (*color, glow_a), (c, c), int(base_r * 0.6))
+        n_rays = 8
+        length = base_r * (0.35 + 0.8 * t)
+        inner = length * 0.35
+        alpha = int(230 * (1 - t))
+        if alpha > 0:
+            for i in range(n_rays):
+                ang = (2 * math.pi * i / n_rays) + t * 0.6
+                x1, y1 = c + math.cos(ang) * inner, c + math.sin(ang) * inner
+                x2, y2 = c + math.cos(ang) * length, c + math.sin(ang) * length
+                pygame.draw.line(self._anim_overlay, (*color, alpha), (x1, y1), (x2, y2), 3)
+
+    def _anim_trap_set(self, c: int, color: tuple, t: float) -> None:
+        """A Trap being planted: deliberately DISCREET — a single faint
+        ring that barely grows before fading, over a short lifetime. A Trap
+        stays concealed; this should read as a quiet placement, not a
+        showy reveal (that's reserved for _anim_trap_trigger)."""
+        base_r = SQUARE_SIZE // 2
+        r = int(base_r * (0.35 + 0.35 * t))
+        alpha = int(100 * (1 - t))
+        if r > 0 and alpha > 0:
+            pygame.draw.circle(self._anim_overlay, (*color, alpha), (c, c), r, 2)
+
+    def _anim_trap_trigger(self, c: int, color: tuple, t: float) -> None:
+        """A Trap springing: a sharp expanding ring, jagged spikes bursting
+        outward, and a hot flash at the very start — the loud counterpart
+        to the quiet _anim_trap_set."""
+        base_r = SQUARE_SIZE // 2
+        r = int(base_r * (0.25 + 1.0 * t))
+        alpha = int(220 * (1 - t))
+        if r > 0 and alpha > 0:
+            pygame.draw.circle(self._anim_overlay, (*color, alpha), (c, c), r, 4)
+        n_spikes = 6
+        length = base_r * (0.5 + 0.9 * t)
+        alpha2 = int(230 * (1 - t))
+        if alpha2 > 0:
+            for i in range(n_spikes):
+                ang = (2 * math.pi * i / n_spikes) + math.pi / n_spikes
+                x2, y2 = c + math.cos(ang) * length, c + math.sin(ang) * length
+                pygame.draw.line(self._anim_overlay, (*color, alpha2), (c, c), (x2, y2), 3)
+        if t < 0.15:
+            flash_a = int(200 * (1 - t / 0.15))
+            pygame.draw.circle(self._anim_overlay, (255, 240, 200, flash_a), (c, c), base_r)
+
+    def _anim_ritual(self, c: int, color: tuple, t: float) -> None:
+        """A Ritual completing: bigger and longer than a plain summon —
+        three staggered gold/violet rings (the same pairing as a Crowned
+        King's static aura) that expand PAST the square's edge, plus
+        slowly-rotating rays, so it reads as grander than an ordinary
+        summon even though a Monster lands the same way underneath it."""
+        base_r = SQUARE_SIZE // 2
+        for i, delay in enumerate((0.0, 0.22, 0.44)):
+            lt = (t - delay) / (1 - delay)
+            if lt <= 0.0 or lt > 1.0:
+                continue
+            r = int(base_r * (0.3 + 1.6 * lt))
+            alpha = int(210 * (1 - lt))
+            if r <= 0 or alpha <= 0:
+                continue
+            ring_color = ROYAL_AURA_GOLD if i % 2 == 0 else ROYAL_AURA_VIOLET
+            pygame.draw.circle(self._anim_overlay, (*ring_color, alpha), (c, c), r, 3)
+        n_rays = 12
+        length = base_r * (1.1 + 0.6 * t)
+        alpha_r = int(150 * (1 - t))
+        if alpha_r > 0:
+            for i in range(n_rays):
+                ang = (2 * math.pi * i / n_rays) + t * 1.2
+                x2, y2 = c + math.cos(ang) * length, c + math.sin(ang) * length
+                pygame.draw.line(self._anim_overlay, (*ROYAL_AURA_GOLD, alpha_r), (c, c), (x2, y2), 2)
+
+    def _anim_coronation(self, c: int, color: tuple, t: float) -> None:
+        """A King's Coronation — the grandest effect on the board: four
+        staggered gold/violet rings expanding well past the square, a wide
+        rotating ray-burst, and a warm flash at the start. Longest-running
+        of every animation here, reflecting there is only ever one Crowned
+        King per side (README §17)."""
+        base_r = SQUARE_SIZE // 2
+        for i, delay in enumerate((0.0, 0.15, 0.32, 0.5)):
+            lt = (t - delay) / (1 - delay)
+            if lt <= 0.0 or lt > 1.0:
+                continue
+            r = int(base_r * (0.3 + 2.0 * lt))
+            alpha = int(200 * (1 - lt))
+            if r <= 0 or alpha <= 0:
+                continue
+            ring_color = ROYAL_AURA_GOLD if i % 2 == 0 else ROYAL_AURA_VIOLET
+            width = 4 if i < 2 else 2
+            pygame.draw.circle(self._anim_overlay, (*ring_color, alpha), (c, c), r, width)
+        n_rays = 16
+        length = base_r * (1.3 + 0.8 * t)
+        alpha_r = int(180 * (1 - t))
+        if alpha_r > 0:
+            for i in range(n_rays):
+                ang = (2 * math.pi * i / n_rays) + t * 0.8
+                x2, y2 = c + math.cos(ang) * length, c + math.sin(ang) * length
+                pygame.draw.line(self._anim_overlay, (*ROYAL_AURA_GOLD, alpha_r), (c, c), (x2, y2), 2)
+        if t < 0.2:
+            flash_a = int(190 * (1 - t / 0.2))
+            pygame.draw.circle(self._anim_overlay, (255, 250, 220, flash_a), (c, c), int(base_r * 1.3))

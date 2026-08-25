@@ -113,6 +113,7 @@ from game.core.actions import (
 from game.core.events import (
     CardDiscarded,
     CardDrawn,
+    CardWornOut,
     CastlingPerformed,
     CheckDetected,
     CheckResolved,
@@ -294,7 +295,7 @@ class RulesEngine:
             elif isinstance(action, PromotePawn):
                 events = self._execute_promote_pawn(state, action)
             elif isinstance(action, DiscardCard):
-                events = self._execute_discard_card(state, action)
+                events = self._execute_discard_card(state, action, registry=self._registry)
             elif isinstance(action, EndPreparation):
                 events = self._execute_end_preparation(state, action)
             elif isinstance(action, EndTurn):
@@ -1544,6 +1545,47 @@ class RulesEngine:
             to_phase=Phase.PREPARATION,
         ))
 
+    def _bury_or_retire(
+        self,
+        ps: "PlayerState",
+        card_id: str,
+        registry: "object | None",
+        events: list[Event],
+    ) -> None:
+        """
+        Send a card to the graveyard — unless this is a Spell/Trap making
+        its SECOND trip there, in which case it is banished instead.
+
+        Endgame-pacing fix: with the deck-empty reshuffle recycling the
+        whole graveyard (_auto_draw above), Spell/Trap cards would
+        otherwise circulate forever while Monster cards quietly go dead
+        once their Vessel classes are captured off the board. This gives
+        Spells/Traps the same kind of real attrition Monsters already
+        have, without touching Monsters (their scarcity already comes
+        from losing their Vessel — no need to tax them twice).
+
+        Without a registry we cannot tell a Spell/Trap from a Monster, so
+        this falls back to the old unconditional-graveyard behavior (e.g.
+        registry-less tests).
+        """
+        from game.cards.card import SpellCard, TrapCard
+
+        card = None
+        if registry is not None:
+            try:
+                card = registry.get(card_id)
+            except KeyError:
+                card = None
+
+        if isinstance(card, (SpellCard, TrapCard)):
+            if card_id in ps.spent_once:
+                ps.banished.append(card_id)
+                events.append(CardWornOut(player_id=ps.player_id, card_id=card_id))
+                return
+            ps.spent_once.add(card_id)
+
+        ps.graveyard.append(card_id)
+
     # ── Action executors ─────────────────────────────────────────────────
 
     def _execute_move_piece(
@@ -2705,9 +2747,9 @@ class RulesEngine:
                     )
 
         ps.hand.remove(action.card_id)
-        ps.graveyard.append(action.card_id)
 
         events: list[Event] = []
+        self._bury_or_retire(ps, action.card_id, registry, events)
         self._mark_prep_used(state, action.player_id, "ActivateSpell", events)
         events.append(SpellActivated(
             player_id=action.player_id,
@@ -3577,8 +3619,16 @@ class RulesEngine:
     # ── Mercenary executors (Stage 7) ────────────────────────────────────
 
     # Cost table: piece_type → number of Monster cards required.
+    # Endgame-pacing fix: Pawn dropped from 4 → 2. Mercenary was tuned as
+    # a rare "nuclear option" for material recovery (README §9.2), but at
+    # 4+ dead Monster cards to even start, it never fires early enough to
+    # keep a player back in Monster/Vessel play — they're stuck in
+    # Spell/Trap-only turns for many turns first. A cheap Pawn floor gets
+    # a Vessel (and Builder capacity) back on the board sooner. Knight/
+    # Bishop/Rook and Queen stay steep on purpose — recovering real
+    # material should still hurt.
     _MERCENARY_COST: dict[str, int] = {
-        "pawn": 4, "knight": 6, "bishop": 6, "rook": 6, "queen": 8,
+        "pawn": 2, "knight": 6, "bishop": 6, "rook": 6, "queen": 8,
     }
 
     def _execute_declare_mercenary(
@@ -3800,6 +3850,7 @@ class RulesEngine:
         self,
         state: GameState,
         action: DiscardCard,
+        registry: "object | None" = None,
     ) -> list[Event]:
         """Discard one card from hand to graveyard during Phase.DISCARD."""
         self._require_phase(state, Phase.DISCARD)
@@ -3809,10 +3860,10 @@ class RulesEngine:
                 f"Card {action.card_id!r} is not in {action.player_id}'s hand."
             )
         ps.hand.remove(action.card_id)
-        ps.graveyard.append(action.card_id)
         events: list[Event] = [
             CardDiscarded(player_id=action.player_id, card_id=action.card_id)
         ]
+        self._bury_or_retire(ps, action.card_id, registry, events)
         # If hand is now within limit, leave DISCARD phase → END
         if len(ps.hand) <= HAND_SIZE_LIMIT:
             old = state.phase
