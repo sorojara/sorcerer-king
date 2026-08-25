@@ -508,7 +508,7 @@ class TestInterruptRitual:
         engine = RulesEngine(registry=registry)
 
         from game.core.actions import ActivateRitual
-        with pytest.raises(IllegalActionError):
+        with pytest.raises(IllegalActionError) as exc_info:
             engine.execute(state, ActivateRitual(
                 player_id="white", ritual_id="rite_of_the_wyrm",
                 sacrifice_positions=[Position.from_algebraic("d3"), Position.from_algebraic("d4")],
@@ -517,6 +517,14 @@ class TestInterruptRitual:
         assert board.get_unit(Position.from_algebraic("d3")) is not None
         assert board.get_unit(Position.from_algebraic("d4")) is not None
         assert state.traps == []  # consumed
+        # test_ai_stage6_offers.TestOfferedActionsAreAccepted allowlists this
+        # exact rejection as a legitimate game event rather than a broken
+        # offer (get_legal_actions deliberately still offers a Ritual a
+        # visible enemy Trap could interrupt — see sim.py's _execute_one).
+        # Checked here, against the real raised message, so the two files
+        # can't drift out of sync the way they did once already.
+        from .test_ai_stage6_offers import _is_legitimate
+        assert _is_legitimate(str(exc_info.value))
 
 
 class TestDispelField:

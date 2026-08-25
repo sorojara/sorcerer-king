@@ -53,7 +53,7 @@ MAX_STEPS = 400
 #: opponent's card is what refused it.
 LEGITIMATE_REJECTIONS = (
     "profane_interruption",
-    "Ritual attempt interrupted",
+    "Ritual attempt is interrupted",
 )
 
 
